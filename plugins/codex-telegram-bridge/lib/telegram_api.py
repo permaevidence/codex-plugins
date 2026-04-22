@@ -106,11 +106,17 @@ def send_message(
 ) -> list[dict[str, Any]]:
     access = access or {}
     files = files or []
-    chunks = split_text(
-        text,
-        limit=int(access.get("textChunkLimit", TELEGRAM_TEXT_LIMIT)),
-        chunk_mode=str(access.get("chunkMode", "newline")),
-    )
+    value = (text or "").strip()
+    if value:
+        chunks = split_text(
+            value,
+            limit=int(access.get("textChunkLimit", TELEGRAM_TEXT_LIMIT)),
+            chunk_mode=str(access.get("chunkMode", "newline")),
+        )
+    elif files:
+        chunks = []
+    else:
+        chunks = ["(no text)"]
     reply_mode = str(access.get("replyToMode", "first"))
     sent: list[dict[str, Any]] = []
     for index, chunk in enumerate(chunks):

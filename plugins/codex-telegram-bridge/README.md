@@ -13,6 +13,7 @@ This plugin ports the Telegram control loop from `claude-telegram-plugin` to Cod
 - Supports DM pairing, allowlists, groups, mention policies, and mention regexes
 - Transcribes voice messages with OpenAI `gpt-4o-transcribe`
 - Forwards inbound photos as downloaded local paths and other Telegram attachments as downloadable file IDs
+- Auto-forwards newly generated images from `~/.codex/generated_images/<thread_id>/` when a turn completes
 - Injects due reminders from `~/.codex/telegram-bridge/scheduled_reminders.json`
 - Injects unread-email summaries via `gws gmail +triage`
 - Monitors on-disk Codex CLI version changes and notifies the owner chat
@@ -59,6 +60,18 @@ By default the bridge does not post the per-message `Sent to Codex...` acknowled
 You can also place `TELEGRAM_BOT_TOKEN=...` and `OPENAI_API_KEY=...` in `~/.codex/telegram-bridge/.env`.
 
 If you change `config.json`, restart the bridge so the new settings take effect.
+
+## Generated Images
+
+When a Codex turn generates new image files under `~/.codex/generated_images/<thread_id>/`, the bridge now compares the directory state at turn start versus turn completion and automatically sends any newly created images back to the Telegram chat.
+
+Behavior:
+
+- text-only turn: sends the text reply as before
+- image-only turn: sends the generated image without the old `Turn completed with no final assistant text.` fallback
+- text plus images: sends the text reply and the generated images in the same Telegram response flow
+
+The bridge only forwards images that were newly created during that specific turn, so older images from the same thread are not resent automatically.
 
 ## Tell Codex About Local Capabilities
 
@@ -156,19 +169,36 @@ If you want narrower blast radius, switch back to `workspaceWrite`, restrict `wr
 ## Running
 
 ```bash
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/telegram_bridge.py
+bash /absolute/path/to/plugins/codex-telegram-bridge/scripts/start_bridge.sh
 ```
 
-For unattended use, run it inside `tmux`, `screen`, `launchd`, or another supervisor.
+Use `start_bridge.sh` as the normal launch and restart path. It is a singleton supervisor:
+
+- it writes `.bridge-supervisor.pid` and `.bridge-child.pid` under `~/.codex/telegram-bridge/`
+- it cleans stale pid files on startup
+- it refuses to start a second live supervisor
+- it kills stale orphaned `telegram_bridge.py` children it finds before relaunching
+
+Avoid launching `telegram_bridge.py` directly for normal use. Running the raw Python script alongside the supervisor can create duplicate Telegram long-pollers and produce `HTTP Error 409: Conflict` in `bridge.log`.
+
+For unattended use, run the supervisor inside `tmux`, `screen`, `launchd`, or another process manager.
 
 This repo also includes a simple restart loop:
 
 ```bash
 chmod +x /absolute/path/to/plugins/codex-telegram-bridge/scripts/start_bridge.sh
-/absolute/path/to/plugins/codex-telegram-bridge/scripts/start_bridge.sh
+bash /absolute/path/to/plugins/codex-telegram-bridge/scripts/start_bridge.sh
 ```
 
 It writes logs to `~/.codex/telegram-bridge/bridge.log` and tracks supervisor and child PIDs under the same state directory.
+
+If you are watching logs during startup, prefer:
+
+```bash
+tail -n 0 -f ~/.codex/telegram-bridge/bridge.log
+```
+
+That shows only new log lines from the current launch instead of mixing in older historical `409` entries.
 
 ## Access control
 

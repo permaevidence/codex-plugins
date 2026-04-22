@@ -19,6 +19,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from lib.telegram_api import (
+    PHOTO_EXTS,
     download_attachment_to_dir,
     fetch_telegram_file,
     send_chat_action,
@@ -48,6 +49,7 @@ EMAIL_CHECK_INTERVAL = 5 * 60
 REMINDER_CHECK_INTERVAL = 60
 VERSION_CHECK_INTERVAL = 5 * 60
 TRANSCRIPTION_MAX_BYTES = 25 * 1024 * 1024
+GENERATED_IMAGES_DIR = Path.home() / ".codex" / "generated_images"
 
 
 def normalize_command(text: str, bot_username: str) -> str:
@@ -221,6 +223,21 @@ def convert_audio_for_transcription(file_bytes: bytes, suffix: str) -> tuple[byt
             return converted, target.name, "audio/mpeg"
     except Exception:
         return None
+
+
+def list_generated_images(thread_id: str) -> list[str]:
+    directory = GENERATED_IMAGES_DIR / str(thread_id or "").strip()
+    if not directory.exists() or not directory.is_dir():
+        return []
+    files: list[Path] = []
+    try:
+        for path in directory.iterdir():
+            if path.is_file() and path.suffix.lower() in PHOTO_EXTS:
+                files.append(path)
+    except Exception:
+        return []
+    files.sort(key=lambda item: (item.stat().st_mtime, item.name))
+    return [str(path.resolve()) for path in files]
 
 
 class CodexAppServerClient:
@@ -423,6 +440,7 @@ class CodexAppServerClient:
             "started_at": time.time(),
             "status": turn.get("status", "inProgress"),
             "error": None,
+            "generated_images_seen": set(list_generated_images(thread_id)),
         }
         self._active_turn_by_chat[chat_id] = turn_id
         save_runtime_state(
@@ -547,6 +565,9 @@ class CodexAppServerClient:
         self._active_turn_by_chat.pop(chat_id, None)
 
         text = state["text"].strip()
+        current_images = list_generated_images(state["thread_id"])
+        prior_images = state.get("generated_images_seen") or set()
+        files = [path for path in current_images if path not in prior_images]
         status = turn.get("status")
         runtime_state = load_runtime_state()
         runtime_state["active_chat_id"] = chat_id
@@ -556,7 +577,10 @@ class CodexAppServerClient:
         runtime_state["updated_at"] = time.time()
         save_runtime_state(runtime_state)
         if status == "completed":
-            self.send_callback(chat_id, text or "Turn completed with no final assistant text.")
+            if text or files:
+                self.send_callback(chat_id, text, files)
+            else:
+                self.send_callback(chat_id, "Turn completed with no final assistant text.")
         elif status == "interrupted":
             self.send_callback(chat_id, "Turn interrupted.")
         elif status == "failed":
@@ -998,7 +1022,7 @@ def main() -> None:
     chat_map_lock = threading.Lock()
     offset = 0
 
-    def send_callback(chat_id: str, text: str) -> None:
+    def send_callback(chat_id: str, text: str, files: list[str] | None = None) -> None:
         access = load_access()
         with chat_map_lock:
             entry = dict(chat_map.get(chat_id, {}))
@@ -1011,6 +1035,7 @@ def main() -> None:
             text,
             reply_to_message_id=reply_to_message_id,
             access=access,
+            files=files or [],
         )
         if sent:
             with chat_map_lock:

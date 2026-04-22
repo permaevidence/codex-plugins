@@ -32,8 +32,10 @@ python3 /absolute/path/to/repo/plugins/codex-long-term-memory/scripts/install.py
 7. Start the Telegram bridge:
 
 ```bash
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/telegram_bridge.py
+bash /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/start_bridge.sh
 ```
+
+Use the supervisor script rather than launching `telegram_bridge.py` directly. The supervisor is the supported restart path, writes pid files under `~/.codex/telegram-bridge/`, and now guards against duplicate long-pollers for the same bot token.
 
 If you want Codex on the other machine to do this itself, giving it the repo URL should be enough only if it is also told to clone the repo locally and use the checked-out `.agents/plugins/marketplace.json`. The URL alone is not a complete install contract without those steps.
 
