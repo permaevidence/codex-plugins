@@ -146,6 +146,13 @@ def current_thread_id(payload: dict[str, Any]) -> str:
     return str(value).strip()
 
 
+def current_compaction_thread_id(payload: dict[str, Any]) -> str:
+    value = first_present(payload, "thread_id", "threadId")
+    if value in (None, ""):
+        return ""
+    return str(value).strip()
+
+
 def rollout_paths_for_thread(thread_id: str) -> list[Path]:
     if not thread_id or not SESSIONS_DIR.exists():
         return []
@@ -169,12 +176,15 @@ def scan_rollout_log_for_compaction(path: Path, start_offset: int = 0) -> tuple[
             if start_offset > 0:
                 handle.seek(start_offset)
             while True:
+                line_offset = handle.tell()
                 line = handle.readline()
                 if not line:
                     break
                 try:
                     obj = json.loads(line.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
+                    if not line.endswith(b"\n"):
+                        return line_offset, saw_compaction
                     continue
                 if is_context_compacted_event(obj):
                     saw_compaction = True
@@ -247,11 +257,11 @@ def update_compaction_reinjection_state(thread_id: str, consume: bool = False) -
 
 
 def should_reinject_after_compaction(payload: dict[str, Any]) -> bool:
-    return update_compaction_reinjection_state(current_thread_id(payload), consume=False)
+    return update_compaction_reinjection_state(current_compaction_thread_id(payload), consume=False)
 
 
 def consume_compaction_reinjection(payload: dict[str, Any]) -> bool:
-    return update_compaction_reinjection_state(current_thread_id(payload), consume=True)
+    return update_compaction_reinjection_state(current_compaction_thread_id(payload), consume=True)
 
 
 def append_history_entry(role: str, content: str, payload: dict[str, Any]) -> None:
