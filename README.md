@@ -143,6 +143,7 @@ After editing `AGENTS.md`, start a new Codex session so the updated instructions
 
 - The original Claude plugin repos were used as local reference material during the port and are intentionally ignored by git in this repo.
 - Telegram parity and memory parity are now functionally closed relative to the original Claude plugins.
+- The current post-compaction memory reinjection path is a workaround for a Codex limitation. Claude Code exposes a hook after compaction; Codex does not yet, so this repo currently detects compaction by scanning rollout logs on the next user turn. If Codex later adds a real post-compaction hook, this workaround should be replaced with the direct hook path.
 - Post-compaction memory reinjection currently depends on Codex rollout logs continuing to emit the exact JSON event `type == "event_msg"` with `payload.type == "context_compacted"`. Revalidate that contract after Codex updates.
 
 ## References

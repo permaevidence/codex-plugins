@@ -96,7 +96,9 @@ When model-backed summarization is enabled, compaction tries the API first and f
 
 ## Reinjection after Codex compaction
 
-Codex does not currently expose a dedicated post-compaction hook. This plugin therefore keeps the full history injection at `SessionStart`, and adds a one-shot reinjection path on `UserPromptSubmit`.
+Codex does not currently expose a dedicated post-compaction hook. Claude Code does, which is why this extra detection path is needed only on the Codex side right now.
+
+This plugin therefore keeps the full history injection at `SessionStart`, and adds a one-shot reinjection path on `UserPromptSubmit`. The rollout-log scan is a workaround for the missing Codex hook, not the ideal long-term design. If Codex later adds a real post-compaction hook, this plugin should stop doing log-based detection and switch to that direct hook instead.
 
 On each user prompt, the plugin scans the current thread's rollout log under `~/.codex/sessions/` and looks only for this exact JSON event shape:
 
@@ -110,6 +112,10 @@ On each user prompt, the plugin scans the current thread's rollout log under `~/
 ```
 
 The detector is structural. It parses JSONL records and requires both the top-level `type == "event_msg"` and nested `payload.type == "context_compacted"`. It does not trigger on plain text that merely mentions `context_compacted`, and it does not treat the separate top-level `type == "compacted"` rollout record as the reinjection signal.
+
+The scanner is also defensive about partially written JSONL output. If the newest trailing line is incomplete when the hook reads the file, the scanner leaves the offset at the start of that line and retries it on the next scan instead of advancing past it and missing a real compaction event forever.
+
+Compaction-log lookup is intentionally keyed only by `thread_id`. The broader history pipeline may still record `session_id` as a fallback identifier in some places, but rollout-log detection does not assume `session_id` and `thread_id` are interchangeable.
 
 When that exact event is seen, the plugin records a pending one-shot reinjection in `~/.codex/long-term-memory/compaction_scan_state.json`. On the next user turn for that same thread, it appends the normal long-term-memory context once and then clears the pending flag.
 
