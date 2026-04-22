@@ -58,7 +58,8 @@ DEFAULT_CONFIG = {
     "openai_api_key": "",
     "openai_api_key_env": "OPENAI_API_KEY",
     "openai_base_url": OPENAI_RESPONSES_URL,
-    "openai_model": "gpt-5-mini",
+    "openai_model": "gpt-5.4",
+    "openai_reasoning_effort": "high",
     "openai_timeout_seconds": 45,
     "pending_retry_enabled": True,
     "pending_retry_base_seconds": 30,
@@ -896,13 +897,15 @@ def openai_settings(config: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     base_url = str(config.get("openai_base_url") or "").strip() or os.getenv("OPENAI_BASE_URL", "").strip()
-    model = str(config.get("openai_model") or "").strip() or "gpt-5-mini"
+    model = str(config.get("openai_model") or "").strip() or "gpt-5.4"
+    reasoning_effort = str(config.get("openai_reasoning_effort") or "").strip() or "high"
     timeout = int(config.get("openai_timeout_seconds", 45))
 
     return {
         "api_key": api_key,
         "base_url": base_url or OPENAI_RESPONSES_URL,
         "model": model,
+        "reasoning_effort": reasoning_effort,
         "timeout": timeout,
     }
 
@@ -928,6 +931,8 @@ def call_openai_responses(
         ],
         "store": False,
     }
+    if settings.get("reasoning_effort"):
+        payload["reasoning"] = {"effort": settings["reasoning_effort"]}
     body = json.dumps(payload).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
