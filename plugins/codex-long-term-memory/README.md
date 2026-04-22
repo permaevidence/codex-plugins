@@ -53,7 +53,6 @@ Default config:
 ```json
 {
   "max_injection_chars": 200000,
-  "max_entries": 400,
   "include_timestamps": true,
   "enable_user_facts": true,
   "enable_calendar": true,
@@ -81,6 +80,8 @@ Default config:
 ```
 
 When an OpenAI API key is configured, the plugin uses the Responses API with `gpt-5.4` and `reasoning.effort = "high"` for model-backed summaries, file descriptions, and richer user-fact extraction by default.
+
+`max_injection_chars` is the only cap on injected chat-history size. The plugin does not apply a separate entry-count limit.
 
 ## Compaction tiers
 

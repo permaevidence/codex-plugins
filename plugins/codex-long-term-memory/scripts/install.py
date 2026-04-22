@@ -17,7 +17,6 @@ STATE_CONFIG = STATE_DIR / "config.json"
 
 DEFAULT_STATE_CONFIG = {
     "max_injection_chars": 200000,
-    "max_entries": 400,
     "include_timestamps": True,
     "enable_user_facts": True,
     "enable_calendar": True,

@@ -40,7 +40,6 @@ SUPPORTED_VISION_MEDIA_TYPES = {
 
 DEFAULT_CONFIG = {
     "max_injection_chars": 200000,
-    "max_entries": 400,
     "include_timestamps": True,
     "enable_user_facts": True,
     "enable_calendar": True,
@@ -352,7 +351,6 @@ def format_entries(entries: list[dict[str, Any]], config: dict[str, Any]) -> str
         return ""
 
     max_chars = int(config.get("max_injection_chars", DEFAULT_CONFIG["max_injection_chars"]))
-    max_entries = int(config.get("max_entries", DEFAULT_CONFIG["max_entries"]))
     include_timestamps = bool(config.get("include_timestamps", True))
 
     selected: list[dict[str, Any]] = []
@@ -363,7 +361,7 @@ def format_entries(entries: list[dict[str, Any]], config: dict[str, Any]) -> str
         if not rendered:
             continue
         entry_chars = len(rendered) + 2
-        if selected and (len(selected) >= max_entries or total_chars + entry_chars > max_chars):
+        if selected and total_chars + entry_chars > max_chars:
             break
         selected.append(entry)
         total_chars += entry_chars
