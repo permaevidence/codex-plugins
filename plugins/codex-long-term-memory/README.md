@@ -52,12 +52,12 @@ Default config:
 
 ```json
 {
-  "max_injection_chars": 200000,
+  "max_injection_chars": 300000,
   "include_timestamps": true,
   "enable_user_facts": true,
   "enable_calendar": true,
   "enable_attachment_capture": true,
-  "compact_threshold_chars": 120000,
+  "compact_threshold_chars": 80000,
   "archive_chunk_chars": 40000,
   "temp_summaries_per_consolidation": 4,
   "max_visible_consolidated": 5,

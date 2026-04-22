@@ -39,12 +39,12 @@ SUPPORTED_VISION_MEDIA_TYPES = {
 }
 
 DEFAULT_CONFIG = {
-    "max_injection_chars": 200000,
+    "max_injection_chars": 300000,
     "include_timestamps": True,
     "enable_user_facts": True,
     "enable_calendar": True,
     "enable_attachment_capture": True,
-    "compact_threshold_chars": 120000,
+    "compact_threshold_chars": 80000,
     "archive_chunk_chars": 40000,
     "temp_summaries_per_consolidation": 4,
     "max_visible_consolidated": 5,
