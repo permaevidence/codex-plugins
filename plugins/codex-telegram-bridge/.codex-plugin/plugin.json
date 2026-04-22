@@ -1,6 +1,6 @@
 {
   "name": "codex-telegram-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Telegram bridge for Codex backed by codex app-server.",
   "author": {
     "name": "Perma Evidence",
@@ -16,16 +16,21 @@
     "remote"
   ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex Telegram Bridge",
     "shortDescription": "Run Codex through Telegram using the local app-server.",
-    "longDescription": "Maps Telegram chats to Codex app-server threads, supports unattended approvals, voice transcription, reminders, email injection, and local access-control helpers.",
+    "longDescription": "Maps Telegram chats to Codex app-server threads, supports unattended approvals, voice transcription, reminders, email injection, Telegram action tools, and local access-control helpers.",
     "developerName": "Perma Evidence",
     "category": "Integrations",
     "capabilities": [
+      "Interactive",
       "Read",
       "Write"
     ],
-    "websiteURL": "https://github.com/permaevidence/claude-telegram-plugin"
+    "websiteURL": "https://github.com/permaevidence/claude-telegram-plugin",
+    "defaultPrompt": [
+      "If the user is interacting through Telegram, use the bundled telegram-actions MCP tools for progress updates, message edits, and reactions when helpful."
+    ]
   }
 }

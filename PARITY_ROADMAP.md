@@ -44,8 +44,9 @@ When Codex offers a better primitive, parity uses the Codex-native primitive rat
   - delivery controls: ack reactions, reply threading, chunking
   - on-disk Codex version monitor
   - bundled restart-loop supervisor script
+  - Codex-exposed Telegram action tools for replies, edits, and reactions
 - Remaining gap:
-  - no Codex-exposed Telegram tool surface yet for mid-turn message edits or manual reactions
+  - no major Telegram workflow gap remains relative to the Claude plugin
 
 ## Phases
 
@@ -59,9 +60,7 @@ When Codex offers a better primitive, parity uses the Codex-native primitive rat
 
 ### Phase 3: Telegram feature parity
 
-- Status: substantially complete
-- Remaining work:
-  - expose assistant-driven Telegram actions if we want full parity with Claude's channel tool surface
+- Status: complete
 
 ### Phase 4: Polish and verification
 
@@ -69,7 +68,7 @@ When Codex offers a better primitive, parity uses the Codex-native primitive rat
 - Remaining work:
   - run a live end-to-end Telegram test with real bot credentials
   - document intentional Codex-native differences more explicitly
-  - decide whether to add a Codex-side Telegram action tool layer
+  - decide whether the remaining memory-side differences should be closed literally or kept as Codex-native variants
 
 ## Implementation principles
 

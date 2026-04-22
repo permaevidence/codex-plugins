@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "telegram-actions": {
+      "command": "python3",
+      "args": [
+        "-u",
+        "./scripts/telegram_actions_mcp.py"
+      ],
+      "note": "Local MCP server that lets Codex send Telegram replies, edit progress messages, and add reactions in the active Telegram chat."
+    }
+  }
+}

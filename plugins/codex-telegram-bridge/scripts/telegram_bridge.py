@@ -9,124 +9,40 @@ import sys
 import threading
 import time
 import traceback
-import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from lib.telegram_api import (
+    send_chat_action,
+    send_message,
+    set_message_reaction,
+    telegram_get_json,
+    telegram_request,
+)
 from lib.telegram_common import (
     load_access,
     load_chat_map,
     load_config,
     load_email_state,
     load_reminders,
+    load_runtime_state,
     load_version_state,
     make_pair_code,
     save_access,
     save_chat_map,
     save_email_state,
     save_reminders,
+    save_runtime_state,
     save_version_state,
 )
 
-TELEGRAM_TEXT_LIMIT = 3900
 EMAIL_CHECK_INTERVAL = 5 * 60
 REMINDER_CHECK_INTERVAL = 60
 VERSION_CHECK_INTERVAL = 5 * 60
 TRANSCRIPTION_MAX_BYTES = 25 * 1024 * 1024
-
-
-def telegram_request(token: str, method: str, payload: dict[str, Any]) -> dict[str, Any]:
-    data = urllib.parse.urlencode(payload).encode("utf-8")
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/{method}",
-        data=data,
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=60) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def telegram_get_json(url: str) -> dict[str, Any]:
-    with urllib.request.urlopen(url, timeout=60) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def send_chat_action(token: str, chat_id: str, action: str = "typing") -> None:
-    try:
-        telegram_request(token, "sendChatAction", {"chat_id": chat_id, "action": action})
-    except Exception:
-        return
-
-
-def set_message_reaction(token: str, chat_id: str, message_id: int, emoji: str) -> None:
-    if not emoji:
-        return
-    payload = {
-        "chat_id": chat_id,
-        "message_id": str(message_id),
-        "reaction": json.dumps([{"type": "emoji", "emoji": emoji}]),
-    }
-    try:
-        telegram_request(token, "setMessageReaction", payload)
-    except Exception:
-        return
-
-
-def send_message(
-    token: str,
-    chat_id: str,
-    text: str,
-    reply_to_message_id: int | None = None,
-    access: dict[str, Any] | None = None,
-) -> None:
-    access = access or load_access()
-    chunks = split_text(
-        text,
-        limit=int(access.get("textChunkLimit", TELEGRAM_TEXT_LIMIT)),
-        chunk_mode=str(access.get("chunkMode", "newline")),
-    )
-    reply_mode = str(access.get("replyToMode", "first"))
-    for index, chunk in enumerate(chunks):
-        payload: dict[str, Any] = {
-            "chat_id": chat_id,
-            "text": chunk,
-        }
-        if reply_to_message_id is not None and (
-            reply_mode == "all" or (reply_mode == "first" and index == 0)
-        ):
-            payload["reply_to_message_id"] = str(reply_to_message_id)
-        telegram_request(token, "sendMessage", payload)
-
-
-def split_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT, chunk_mode: str = "newline") -> list[str]:
-    value = (text or "").strip()
-    if not value:
-        return ["(no text)"]
-
-    try:
-        limit = max(256, min(int(limit), 4096))
-    except Exception:
-        limit = TELEGRAM_TEXT_LIMIT
-
-    chunks: list[str] = []
-    remainder = value
-    while len(remainder) > limit:
-        split_at = limit
-        if chunk_mode == "newline":
-            split_at = remainder.rfind("\n\n", 0, limit)
-            if split_at < limit // 2:
-                split_at = remainder.rfind("\n", 0, limit)
-            if split_at < limit // 2:
-                split_at = limit
-        chunk = remainder[:split_at].strip()
-        chunks.append(chunk)
-        remainder = remainder[split_at:].strip()
-    if remainder:
-        chunks.append(remainder)
-    return chunks
 
 
 def normalize_command(text: str, bot_username: str) -> str:
@@ -477,6 +393,15 @@ class CodexAppServerClient:
             "error": None,
         }
         self._active_turn_by_chat[chat_id] = turn_id
+        save_runtime_state(
+            {
+                **load_runtime_state(),
+                "active_chat_id": chat_id,
+                "active_thread_id": thread_id,
+                "active_turn_id": turn_id,
+                "updated_at": time.time(),
+            }
+        )
         return turn_id
 
     def steer_turn(self, chat_id: str, text: str) -> str | None:
@@ -494,6 +419,15 @@ class CodexAppServerClient:
                 "expectedTurnId": turn_id,
             },
         )
+        save_runtime_state(
+            {
+                **load_runtime_state(),
+                "active_chat_id": chat_id,
+                "active_thread_id": state["thread_id"],
+                "active_turn_id": turn_id,
+                "updated_at": time.time(),
+            }
+        )
         return turn_id
 
     def interrupt_turn(self, chat_id: str) -> bool:
@@ -504,6 +438,16 @@ class CodexAppServerClient:
         if not state:
             return False
         self.request("turn/interrupt", {"threadId": state["thread_id"]})
+        save_runtime_state(
+            {
+                **load_runtime_state(),
+                "active_chat_id": chat_id,
+                "active_thread_id": state["thread_id"],
+                "active_turn_id": turn_id,
+                "last_turn_status": "interruptRequested",
+                "updated_at": time.time(),
+            }
+        )
         return True
 
     def inject_external_message(self, chat_id: str, chat_map: dict[str, Any], text: str) -> None:
@@ -572,6 +516,13 @@ class CodexAppServerClient:
 
         text = state["text"].strip()
         status = turn.get("status")
+        runtime_state = load_runtime_state()
+        runtime_state["active_chat_id"] = chat_id
+        runtime_state["active_thread_id"] = state["thread_id"]
+        runtime_state["active_turn_id"] = None
+        runtime_state["last_turn_status"] = status
+        runtime_state["updated_at"] = time.time()
+        save_runtime_state(runtime_state)
         if status == "completed":
             self.send_callback(chat_id, text or "Turn completed with no final assistant text.")
         elif status == "interrupted":
@@ -879,7 +830,32 @@ def main() -> None:
         reply_to_message_id = entry.get("last_message_id")
         if not isinstance(reply_to_message_id, int):
             reply_to_message_id = None
-        send_message(str(token), chat_id, text, reply_to_message_id=reply_to_message_id, access=access)
+        sent = send_message(
+            str(token),
+            chat_id,
+            text,
+            reply_to_message_id=reply_to_message_id,
+            access=access,
+        )
+        if sent:
+            with chat_map_lock:
+                state_entry = chat_map.setdefault(chat_id, {})
+                state_entry["last_outbound_message_ids"] = [
+                    int(item["message_id"]) for item in sent if isinstance(item.get("message_id"), int)
+                ]
+                if state_entry["last_outbound_message_ids"]:
+                    state_entry["last_outbound_message_id"] = state_entry["last_outbound_message_ids"][-1]
+                save_chat_map(chat_map)
+                save_runtime_state(
+                    {
+                        **load_runtime_state(),
+                        "active_chat_id": chat_id,
+                        "last_outbound_message_id": state_entry.get("last_outbound_message_id"),
+                        "last_outbound_message_ids": state_entry.get("last_outbound_message_ids", []),
+                        "last_inbound_message_id": state_entry.get("last_message_id"),
+                        "updated_at": time.time(),
+                    }
+                )
 
     codex = CodexAppServerClient(config, send_callback)
     maybe_start_reminder_loop(config, codex, chat_map, chat_map_lock)
@@ -925,6 +901,16 @@ def main() -> None:
                     entry["last_seen_at"] = time.time()
                     entry["chat_type"] = chat.get("type")
                     save_chat_map(chat_map)
+                    save_runtime_state(
+                        {
+                            **load_runtime_state(),
+                            "active_chat_id": chat_id,
+                            "last_inbound_message_id": message.get("message_id"),
+                            "last_sender_id": sender_id,
+                            "chat_type": chat.get("type"),
+                            "updated_at": time.time(),
+                        }
+                    )
 
                 if not text:
                     send_message(str(token), chat_id, "This message type is not supported yet.", access=access)
@@ -994,6 +980,14 @@ def main() -> None:
                 with chat_map_lock:
                     thread_id = codex.ensure_thread(chat_id, chat_map)
                     save_chat_map(chat_map)
+                    save_runtime_state(
+                        {
+                            **load_runtime_state(),
+                            "active_chat_id": chat_id,
+                            "active_thread_id": thread_id,
+                            "updated_at": time.time(),
+                        }
+                    )
                     codex.start_turn(chat_id, thread_id, text)
                 send_message(
                     str(token),

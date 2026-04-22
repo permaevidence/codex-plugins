@@ -26,6 +26,7 @@ This repo is structured as a local Codex plugin marketplace so both plugins can 
 - auto-approves unattended Codex approval requests
 - transcribes voice messages with OpenAI audio transcription
 - injects reminders and unread-email summaries
+- bundles Telegram MCP tools for replies, message edits, and reactions
 - includes a simple restart-loop supervisor script
 
 ## Repo layout
@@ -38,7 +39,7 @@ This repo is structured as a local Codex plugin marketplace so both plugins can 
 ## Notes
 
 - The original Claude plugin repos were used as local reference material during the port and are intentionally ignored by git in this repo.
-- The remaining meaningful parity gap is assistant-driven Telegram message edits/reactions during a running turn.
+- The main remaining parity differences are on the memory side, not the Telegram side.
 
 ## References
 

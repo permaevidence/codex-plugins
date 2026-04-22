@@ -12,6 +12,7 @@ CHAT_MAP_FILE = STATE_DIR / "chat-map.json"
 REMINDERS_FILE = STATE_DIR / "scheduled_reminders.json"
 EMAIL_STATE_FILE = STATE_DIR / "email_state.json"
 VERSION_STATE_FILE = STATE_DIR / "version_state.json"
+RUNTIME_STATE_FILE = STATE_DIR / "runtime_state.json"
 ENV_FILE = STATE_DIR / ".env"
 
 DEFAULT_ACCESS = {
@@ -139,6 +140,15 @@ def load_version_state() -> dict[str, Any]:
 
 def save_version_state(data: dict[str, Any]) -> None:
     save_json(VERSION_STATE_FILE, data)
+
+
+def load_runtime_state() -> dict[str, Any]:
+    ensure_state_dir()
+    return load_json(RUNTIME_STATE_FILE, {})
+
+
+def save_runtime_state(data: dict[str, Any]) -> None:
+    save_json(RUNTIME_STATE_FILE, data)
 
 
 def make_pair_code() -> str:

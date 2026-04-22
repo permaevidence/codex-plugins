@@ -16,6 +16,7 @@ This plugin ports the Telegram control loop from `claude-telegram-plugin` to Cod
 - Injects unread-email summaries via `gws gmail +triage`
 - Monitors on-disk Codex CLI version changes and notifies the owner chat
 - Supports delivery controls such as ack reactions, chunking, and reply threading
+- Bundles Telegram MCP action tools so Codex can send replies, edit progress messages, and react mid-turn
 
 ## Configuration
 
@@ -27,6 +28,7 @@ State lives under `~/.codex/telegram-bridge/`:
 - `scheduled_reminders.json`
 - `email_state.json`
 - `version_state.json`
+- `runtime_state.json`
 - `.env` (optional)
 
 Example `config.json`:
@@ -106,6 +108,16 @@ python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py set ch
 
 See [ACCESS.md](./ACCESS.md) for the full access and delivery model.
 
+## Telegram action tools
+
+The plugin bundles a local MCP server from [`.mcp.json`](./.mcp.json). After install, Codex can use:
+
+- `reply`
+- `edit_message`
+- `react`
+
+These tools default to the currently active Telegram chat tracked by the bridge, so Codex can post progress updates during a long-running task instead of waiting only for the final turn completion.
+
 ## Reminders
 
 The bridge polls `scheduled_reminders.json` every 60 seconds. Example:
@@ -136,4 +148,4 @@ The bridge polls `scheduled_reminders.json` every 60 seconds. Example:
 
 ## Remaining gap
 
-The Claude fork exposes Telegram-specific assistant tools for message edits and reactions during long tasks. This Codex port currently sends normal Telegram replies and optional automatic ack reactions, but it does not yet expose a tool surface for Codex itself to edit or react to messages mid-turn.
+Telegram-side parity is now effectively complete for the Claude plugin's remote-control workflow. The remaining overall parity gaps in this repo are on the memory side: Claude's multi-tier LLM summarization and richer assistant attachment/tool-file capture are still only partially matched.
