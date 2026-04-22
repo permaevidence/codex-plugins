@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Local reference clones kept outside the published Codex port
+Claude-Code-Long-Term-Memory/
+claude-telegram-plugin/
+
+# Local Codex state and plugin testing artifacts
+.codex/
+tmp/

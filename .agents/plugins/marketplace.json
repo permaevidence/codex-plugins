@@ -1,0 +1,33 @@
+{
+  "name": "permaevidence-local",
+  "interface": {
+    "displayName": "Perma Evidence Local Plugins"
+  },
+  "plugins": [
+    {
+      "name": "codex-long-term-memory",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-long-term-memory"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "codex-telegram-bridge",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-telegram-bridge"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Integrations"
+    }
+  ]
+}
+

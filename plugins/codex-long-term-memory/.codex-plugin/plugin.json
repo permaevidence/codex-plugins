@@ -1,0 +1,32 @@
+{
+  "name": "codex-long-term-memory",
+  "version": "0.1.0",
+  "description": "Cross-thread conversation memory for Codex using SessionStart, UserPromptSubmit, and Stop hooks.",
+  "author": {
+    "name": "Perma Evidence",
+    "url": "https://github.com/permaevidence"
+  },
+  "homepage": "https://github.com/permaevidence/Claude-Code-Long-Term-Memory",
+  "repository": "https://github.com/permaevidence/Claude-Code-Long-Term-Memory",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "memory",
+    "hooks",
+    "history"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Long-Term Memory",
+    "shortDescription": "Install and manage Codex hook-based conversation memory.",
+    "longDescription": "Adds Codex hooks that log prompts and replies into local history and inject recent cross-thread context at session start.",
+    "developerName": "Perma Evidence",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/permaevidence/Claude-Code-Long-Term-Memory"
+  }
+}
+
