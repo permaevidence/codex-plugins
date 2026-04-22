@@ -60,6 +60,56 @@ You can also place `TELEGRAM_BOT_TOKEN=...` and `OPENAI_API_KEY=...` in `~/.code
 
 If you change `config.json`, restart the bridge so the new settings take effect.
 
+## Tell Codex About Local Capabilities
+
+The bridge can surface reminders, unread Gmail summaries, and Telegram runtime context, but Codex still works better if those local capabilities are described explicitly in `AGENTS.md`.
+
+This matters because:
+
+- reminder creation is file-based and expects exact JSON in `~/.codex/telegram-bridge/scheduled_reminders.json`
+- the active Telegram chat id lives in bridge runtime state, not in a generic Codex API
+- `gws` availability is machine-specific, so Codex should be told which Google account and services are actually configured
+
+Recommended `AGENTS.md` additions:
+
+~~~md
+## Local Capabilities
+
+### Telegram Reminders
+
+- The Telegram bridge supports reminders through `~/.codex/telegram-bridge/scheduled_reminders.json`.
+- This is a JSON array of reminder objects. Do not assume the bridge has a natural-language reminder parser.
+- When creating or editing reminders, preserve valid JSON and keep existing reminder entries unless the user asked to replace or delete them.
+- Each reminder should use this shape:
+
+```json
+{
+  "id": "short-stable-id",
+  "chat_id": "123456789",
+  "due": "2026-04-22T18:30:00",
+  "prompt": "Check whether the release build finished and message me with the result.",
+  "recurring": "daily"
+}
+```
+
+- Required fields: `id`, `chat_id`, `due`, `prompt`.
+- `recurring` is optional. Supported values are only `daily`, `weekly`, and `monthly`.
+- `due` must be `YYYY-MM-DDTHH:MM[:SS]` in local time.
+- The reminder loop polls every 60 seconds, so reminders can fire up to about one minute late.
+- For reminders meant for the current Telegram conversation, use the active chat id from `~/.codex/telegram-bridge/runtime_state.json` or `chat-map.json` if needed.
+
+### Google Workspace CLI
+
+- `gws` is installed on this machine and authenticated for `<account@example.com>`.
+- Verified live access currently includes Gmail and Calendar.
+- Treat `gws` as live account access. Use it only when relevant to the user's request, and summarize clearly what was read or changed.
+- If a task depends on a specific Google Workspace capability beyond Gmail or Calendar, verify the exact `gws` command or schema before making assumptions.
+~~~
+
+In the current plugin split, this Telegram bridge injects reminders and unread Gmail summaries, while the companion long-term-memory plugin can inject calendar context through `gws`.
+
+After editing `AGENTS.md`, start a new Codex session so those instructions are loaded.
+
 ## Sandbox and Network Modes
 
 The bridge passes its sandbox settings straight through to `codex app-server`.
