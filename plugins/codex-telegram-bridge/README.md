@@ -42,18 +42,66 @@ Example `config.json`:
   "effort": "medium",
   "approval_policy": "never",
   "personality": "friendly",
-  "sandbox_mode": "workspaceWrite",
-  "network_access": false,
+  "sandbox_mode": "dangerFullAccess",
+  "network_access": true,
   "writable_roots": [],
   "owner_chat_id": "123456789",
   "openai_api_key": "sk-...",
   "enable_voice_transcription": true,
+  "send_queue_confirmation": false,
   "enable_reminders": true,
   "enable_email_notifications": false
 }
 ```
 
+By default the bridge does not post the per-message `Sent to Codex...` acknowledgement before the actual reply arrives. Set `"send_queue_confirmation": true` if you want that extra queue-status message back.
+
 You can also place `TELEGRAM_BOT_TOKEN=...` and `OPENAI_API_KEY=...` in `~/.codex/telegram-bridge/.env`.
+
+If you change `config.json`, restart the bridge so the new settings take effect.
+
+## Sandbox and Network Modes
+
+The bridge passes its sandbox settings straight through to `codex app-server`.
+
+Current repo default:
+
+```json
+{
+  "sandbox_mode": "dangerFullAccess",
+  "network_access": true
+}
+```
+
+That matches the broad remote-control setup we used on this machine.
+
+Safer alternative:
+
+```json
+{
+  "sandbox_mode": "workspaceWrite",
+  "network_access": false,
+  "writable_roots": [
+    "/absolute/path/to/your/project"
+  ]
+}
+```
+
+## Risks
+
+Be careful with the default combination of `dangerFullAccess`, `network_access: true`, and `approval_policy: "never"`.
+
+That setup means a Telegram-triggered Codex turn can:
+
+- modify any file your local user can modify
+- read any file your local user can read
+- run local commands without an extra approval step
+- make outbound network requests
+- use any configured credentials reachable from the local environment
+
+Only use that mode if you trust the Telegram account(s) that can reach the bot and you are comfortable treating Telegram as a fully privileged remote control for your Codex machine.
+
+If you want narrower blast radius, switch back to `workspaceWrite`, restrict `writable_roots`, and disable `network_access` unless it is actually needed.
 
 ## Running
 
@@ -119,6 +167,12 @@ The plugin bundles a local MCP server from [`.mcp.json`](./.mcp.json). After ins
 - `download_attachment`
 
 These tools default to the currently active Telegram chat tracked by the bridge, so Codex can post progress updates during a long-running task instead of waiting only for the final turn completion. `reply` also accepts file paths for attachments, and inbound `<channel ...>` messages may include `image_path` or `attachment_file_id` metadata.
+
+## Voice Transcription
+
+Voice transcription uses OpenAI `gpt-4o-transcribe`. Telegram voice notes often arrive as `.oga` / Ogg Opus files, so the bridge converts them to `.mp3` with `ffmpeg` before sending them to the transcription API.
+
+Install `ffmpeg` on the machine running the bridge if you want Telegram voice-note transcription to work reliably.
 
 ## Reminders
 

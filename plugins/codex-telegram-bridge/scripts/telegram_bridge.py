@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import json
 import mimetypes
 import os
@@ -6,6 +8,7 @@ import queue
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -165,6 +168,12 @@ def transcribe_audio(file_bytes: bytes, filename: str, mime_type: str, api_key: 
     if not api_key or len(file_bytes) > TRANSCRIPTION_MAX_BYTES:
         return None
 
+    suffix = Path(filename or "audio").suffix.lower()
+    if mime_type == "audio/ogg" or suffix in {".oga", ".ogg"}:
+        converted = convert_audio_for_transcription(file_bytes, suffix or ".oga")
+        if converted is not None:
+            file_bytes, filename, mime_type = converted
+
     fields = {"model": "gpt-4o-transcribe"}
     payload, boundary = encode_multipart(fields, file_bytes, filename, mime_type)
     req = urllib.request.Request(
@@ -180,6 +189,36 @@ def transcribe_audio(file_bytes: bytes, filename: str, mime_type: str, api_key: 
         with urllib.request.urlopen(req, timeout=120) as response:
             result = json.loads(response.read().decode("utf-8"))
         return (result.get("text") or "").strip() or None
+    except Exception:
+        return None
+
+
+def convert_audio_for_transcription(file_bytes: bytes, suffix: str) -> tuple[bytes, str, str] | None:
+    try:
+        with tempfile.TemporaryDirectory(prefix="telegram-audio-") as tmp_dir:
+            source = Path(tmp_dir) / f"input{suffix}"
+            target = Path(tmp_dir) / "transcription.mp3"
+            source.write_bytes(file_bytes)
+            proc = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-nostdin",
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(source),
+                    str(target),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
+            )
+            if proc.returncode != 0 or not target.exists():
+                return None
+            converted = target.read_bytes()
+            return converted, target.name, "audio/mpeg"
     except Exception:
         return None
 
@@ -1127,13 +1166,14 @@ def main() -> None:
                         }
                     )
                     codex.start_turn(chat_id, thread_id, text)
-                send_message(
-                    str(token),
-                    chat_id,
-                    "Sent to Codex. Use /status or /stop while it runs.",
-                    message.get("message_id"),
-                    access=access,
-                )
+                if config.get("send_queue_confirmation", False):
+                    send_message(
+                        str(token),
+                        chat_id,
+                        "Sent to Codex. Use /status or /stop while it runs.",
+                        message.get("message_id"),
+                        access=access,
+                    )
             except Exception as exc:
                 print(f"telegram update handling failed: {exc}", file=sys.stderr)
                 traceback.print_exc()

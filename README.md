@@ -5,6 +5,8 @@ Codex-native ports of two Claude Code workflows:
 - `codex-long-term-memory`: long-term cross-session memory built with Codex hooks
 - `codex-telegram-bridge`: Telegram control of Codex through `codex app-server`
 
+The Telegram bridge now defaults to broad remote-control mode for parity with the setup we validated locally. Read the plugin README before using it that way on another machine.
+
 This repo is structured as a local Codex plugin marketplace so both plugins can be installed from one workspace.
 
 ## Install
@@ -35,6 +37,8 @@ python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/telegram_br
 
 If you want Codex on the other machine to do this itself, giving it the repo URL should be enough only if it is also told to clone the repo locally and use the checked-out `.agents/plugins/marketplace.json`. The URL alone is not a complete install contract without those steps.
 
+The repo intentionally ignores local runtime state under `.codex/`, so secrets, chat history, and live bridge state do not belong in git.
+
 ## Quick setup
 
 Minimum secrets/config needed after cloning:
@@ -45,7 +49,9 @@ Minimum secrets/config needed after cloning:
   - Telegram bot token
   - `owner_chat_id` if you want owner-only notifications like email/version monitor
   - optional `OPENAI_API_KEY` for voice transcription
+  - optional `ffmpeg` for Telegram voice-note transcription
   - optional `gws` for Gmail and calendar integrations
+  - review the Telegram README before leaving `dangerFullAccess` and `network_access = true` enabled
 
 ## Included plugins
 
@@ -72,6 +78,7 @@ Minimum secrets/config needed after cloning:
 - forwards inbound attachment metadata and downloaded photo paths
 - bundles Telegram MCP tools for replies, attachments, inbound file download, message edits, and reactions
 - includes a simple restart-loop supervisor script
+- can run in either safer `workspaceWrite` mode or broader `dangerFullAccess` mode depending on your remote-control needs
 
 ## Repo layout
 
