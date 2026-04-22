@@ -17,6 +17,8 @@ This repo is structured as a local Codex plugin marketplace so both plugins can 
 - extracts durable user facts
 - optionally injects calendar context via `gws`
 - compacts older history into temporary, consolidated, and meta archive-backed summaries
+- uses the OpenAI Responses API for summaries, file captions, and richer user-fact extraction when configured
+- retries failed summary refreshes from an on-disk pending queue
 - includes backup, reset, and restore utilities
 
 ### `codex-telegram-bridge`
@@ -40,7 +42,7 @@ This repo is structured as a local Codex plugin marketplace so both plugins can 
 ## Notes
 
 - The original Claude plugin repos were used as local reference material during the port and are intentionally ignored by git in this repo.
-- Telegram parity is effectively closed; the only remaining memory-side difference is that summaries and file descriptions are deterministic by default rather than model-generated.
+- Telegram parity is effectively closed, and the remaining memory-side gap has been closed with model-backed summaries/captions plus background retry.
 
 ## References
 

@@ -15,10 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib.common import (
     FILES_DIR,
     append_history_entries,
+    describe_file_entry,
     empty_success,
     first_present,
     load_config,
     load_hook_input,
+    load_recent_history_context,
 )
 
 TEXT_EXTENSIONS = {
@@ -67,7 +69,7 @@ def main() -> None:
             assistant_text = channel_reply
         if not assistant_text:
             assistant_text = extract_last_assistant_message(transcript_path, turn_start)
-        file_entries = extract_files_from_turn(transcript_path, turn_start, payload)
+        file_entries = extract_files_from_turn(transcript_path, turn_start, payload, config)
 
     entries: list[dict[str, Any]] = []
     for entry in file_entries:
@@ -195,10 +197,16 @@ def extract_channel_reply_text(transcript_path: str, turn_start: int = 0) -> str
     return "\n\n".join(texts).strip()
 
 
-def extract_files_from_turn(transcript_path: str, turn_start: int, payload: dict[str, Any]) -> list[dict[str, Any]]:
+def extract_files_from_turn(
+    transcript_path: str,
+    turn_start: int,
+    payload: dict[str, Any],
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
     files: list[dict[str, Any]] = []
     seen: set[str] = set()
     timestamp = datetime.now(timezone.utc).isoformat()
+    chat_context = load_recent_history_context()
 
     with open(transcript_path, "r", encoding="utf-8") as handle:
         for index, line in enumerate(handle):
@@ -222,14 +230,21 @@ def extract_files_from_turn(transcript_path: str, turn_start: int, payload: dict
                 block_type = str(block.get("type") or "")
 
                 if block_type in {"image", "document", "file"}:
-                    entry = extract_inline_attachment(block, source_role, timestamp)
+                    entry = extract_inline_attachment(block, source_role, timestamp, config, chat_context)
                     if entry and dedupe_key(entry) not in seen:
                         seen.add(dedupe_key(entry))
                         files.append(entry)
 
                 if block_type == "text" and source_role == "user":
                     for path in extract_channel_image_paths(str(block.get("text") or "")):
-                        entry = create_file_entry_from_path(path, source_role, timestamp, preserve_original=True)
+                        entry = create_file_entry_from_path(
+                            path,
+                            source_role,
+                            timestamp,
+                            config=config,
+                            chat_context=chat_context,
+                            preserve_original=True,
+                        )
                         if entry and dedupe_key(entry) not in seen:
                             seen.add(dedupe_key(entry))
                             files.append(entry)
@@ -238,7 +253,13 @@ def extract_files_from_turn(transcript_path: str, turn_start: int, payload: dict
                     tool_name = str(block.get("name") or block.get("tool_name") or "")
                     tool_input = block.get("input") or block.get("arguments") or {}
                     for path in extract_paths_from_tool(tool_name, tool_input):
-                        entry = create_file_entry_from_path(path, "assistant", timestamp)
+                        entry = create_file_entry_from_path(
+                            path,
+                            "assistant",
+                            timestamp,
+                            config=config,
+                            chat_context=chat_context,
+                        )
                         if entry and dedupe_key(entry) not in seen:
                             seen.add(dedupe_key(entry))
                             files.append(entry)
@@ -261,7 +282,13 @@ def is_assistant_message(obj: dict[str, Any]) -> bool:
     return obj.get("type") == "assistant" or obj.get("role") == "assistant"
 
 
-def extract_inline_attachment(block: dict[str, Any], source_role: str, timestamp: str) -> dict[str, Any] | None:
+def extract_inline_attachment(
+    block: dict[str, Any],
+    source_role: str,
+    timestamp: str,
+    config: dict[str, Any],
+    chat_context: str,
+) -> dict[str, Any] | None:
     source = block.get("source") or {}
     if not isinstance(source, dict):
         return None
@@ -272,12 +299,26 @@ def extract_inline_attachment(block: dict[str, Any], source_role: str, timestamp
         path = save_base64_attachment(data_b64, media_type)
         if not path:
             return None
-        return build_file_entry(path, source_role, timestamp, media_type=media_type, include_description=True)
+        return build_file_entry(
+            path,
+            source_role,
+            timestamp,
+            config=config,
+            chat_context=chat_context,
+            media_type=media_type,
+            include_description=True,
+        )
 
     for key in ("path", "file_path", "pathOrUrl"):
         value = source.get(key)
         if isinstance(value, str) and value:
-            return create_file_entry_from_path(value, source_role, timestamp)
+            return create_file_entry_from_path(
+                value,
+                source_role,
+                timestamp,
+                config=config,
+                chat_context=chat_context,
+            )
     return None
 
 
@@ -332,6 +373,8 @@ def create_file_entry_from_path(
     file_path: str,
     source_role: str,
     timestamp: str,
+    config: dict[str, Any],
+    chat_context: str,
     preserve_original: bool = False,
 ) -> dict[str, Any] | None:
     path = Path(file_path).expanduser()
@@ -339,13 +382,23 @@ def create_file_entry_from_path(
         return None
 
     managed_path = str(path) if preserve_original else copy_file_to_store(path)
-    return build_file_entry(managed_path, source_role, timestamp, original_path=str(path), include_description=True)
+    return build_file_entry(
+        managed_path,
+        source_role,
+        timestamp,
+        config=config,
+        chat_context=chat_context,
+        original_path=str(path),
+        include_description=True,
+    )
 
 
 def build_file_entry(
     file_path: str,
     source_role: str,
     timestamp: str,
+    config: dict[str, Any],
+    chat_context: str,
     media_type: str | None = None,
     original_path: str | None = None,
     include_description: bool = False,
@@ -364,7 +417,7 @@ def build_file_entry(
     if original_path:
         entry["original_path"] = original_path
     if include_description:
-        entry["description"] = describe_file(path, media_type)
+        entry["description"] = describe_file_entry(path, media_type, config=config, chat_context=chat_context)
     return entry
 
 
@@ -445,26 +498,6 @@ def guess_media_type(file_path: str) -> str:
         ".sh": "text/x-shellscript",
     }
     return mapping.get(suffix, "application/octet-stream")
-
-
-def describe_file(path: Path, media_type: str) -> str:
-    try:
-        if media_type.startswith("image/"):
-            return f"Image attachment named {path.name}"
-        if media_type == "application/pdf":
-            return f"PDF document named {path.name}"
-        if path.suffix.lower() in TEXT_EXTENSIONS and path.stat().st_size <= 64 * 1024:
-            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                snippet = " ".join(line.strip().split())
-                if snippet:
-                    if len(snippet) > 120:
-                        snippet = snippet[:117] + "..."
-                    return f"Text file named {path.name}; first content: {snippet}"
-            return f"Text file named {path.name}"
-    except Exception:
-        pass
-    return f"File attachment named {path.name}"
-
 
 if __name__ == "__main__":
     main()

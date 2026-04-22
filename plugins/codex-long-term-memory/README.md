@@ -11,6 +11,8 @@ This plugin ports the core idea of `Claude-Code-Long-Term-Memory` to Codex hooks
 - Extracts durable user facts from earlier conversations
 - Optionally injects upcoming calendar items via `gws`
 - Compacts older history into archive-backed summaries with temporary, consolidated, and meta tiers
+- Uses the OpenAI Responses API for summaries, user-fact extraction, and file descriptions when configured
+- Queues failed summary refreshes under `~/.codex/long-term-memory/pending/` and retries them in the background
 - Stores everything under `~/.codex/long-term-memory/`
 - Merges its hook registrations into `~/.codex/hooks.json`
 
@@ -18,7 +20,7 @@ This plugin ports the core idea of `Claude-Code-Long-Term-Memory` to Codex hooks
 
 Codex already has a native Memories feature, but it is separate from hook-based full-history injection. This plugin focuses on explicit cross-thread recall using hook output.
 
-This implementation now mirrors the Claude plugin much more closely: durable user facts, calendar injection, hierarchical summary tiers, raw archives, and transcript-driven file capture are all in place. The main remaining difference is that summarization/file descriptions are deterministic and local by default rather than model-generated.
+This implementation now mirrors the Claude plugin much more closely: durable user facts, richer calendar injection, hierarchical summary tiers, raw archives, transcript-driven file capture, model-backed summaries, and model-backed file descriptions are all in place. If the OpenAI API is unavailable, the plugin falls back to deterministic local summaries and descriptions so memory capture still works.
 
 ## Install
 
@@ -43,6 +45,7 @@ Restart Codex after installing.
 - `~/.codex/long-term-memory/archives/`
 - `~/.codex/long-term-memory/files/`
 - `~/.codex/long-term-memory/backups/`
+- `~/.codex/long-term-memory/pending/`
 - `~/.codex/long-term-memory/config.json`
 
 Default config:
@@ -59,7 +62,20 @@ Default config:
   "archive_chunk_chars": 40000,
   "temp_summaries_per_consolidation": 4,
   "max_visible_consolidated": 5,
-  "meta_permanent_threshold": 5
+  "meta_permanent_threshold": 5,
+  "enable_model_summaries": true,
+  "enable_model_file_descriptions": true,
+  "enable_model_user_facts": true,
+  "user_facts_max_chars": 16000,
+  "model_file_max_bytes": 8388608,
+  "openai_api_key": "",
+  "openai_api_key_env": "OPENAI_API_KEY",
+  "openai_base_url": "https://api.openai.com/v1/responses",
+  "openai_model": "gpt-5-mini",
+  "openai_timeout_seconds": 45,
+  "pending_retry_enabled": true,
+  "pending_retry_base_seconds": 30,
+  "pending_retry_max_seconds": 480
 }
 ```
 
@@ -69,6 +85,8 @@ Default config:
 - Temporary summaries: oldest raw chunks are archived into `temp_*` files and replaced with compact summaries.
 - Consolidated summaries: older temporary chunks are merged into `cons_*` archive files and re-expressed as one summary.
 - Meta summaries: overflow consolidated summaries are folded into meta summaries with source-archive references.
+
+When model-backed summarization is enabled, compaction tries the API first and falls back to a deterministic placeholder summary if the API fails. That placeholder is then refreshed by a background retry worker when the API becomes available again.
 
 ## Data management
 
