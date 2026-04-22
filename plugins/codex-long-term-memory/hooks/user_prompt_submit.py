@@ -6,20 +6,42 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lib.common import append_history_entry, first_present, load_hook_input
+from lib.common import (
+    append_history_entry,
+    build_injected_context,
+    consume_compaction_reinjection,
+    first_present,
+    load_config,
+    load_hook_input,
+    read_history,
+    should_reinject_after_compaction,
+)
 
 
 def main() -> None:
     payload = load_hook_input()
+    config = load_config()
     prompt = first_present(payload, "user_prompt", "userPrompt", "prompt")
+    injected_context = ""
+    needs_reinjection = should_reinject_after_compaction(payload)
+
+    if needs_reinjection:
+        injected_context = build_injected_context(read_history(), config)
+
     if isinstance(prompt, str):
         append_history_entry("user", prompt, payload)
 
     now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    context_parts = [f"[Current time: {now}]"]
+
+    if needs_reinjection and consume_compaction_reinjection(payload):
+        if injected_context:
+            context_parts.extend(["", injected_context])
+
     output = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
-            "additionalContext": f"[Current time: {now}]",
+            "additionalContext": "\n".join(context_parts),
         }
     }
     print(json.dumps(output))

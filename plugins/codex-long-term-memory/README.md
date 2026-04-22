@@ -8,6 +8,7 @@ This plugin ports the core idea of `Claude-Code-Long-Term-Memory` to Codex hooks
 - Logs every final assistant reply
 - Captures file attachments and assistant file/tool references when transcript data is available
 - Injects recent cross-thread history at `SessionStart`
+- Reinjects full memory once on the next user turn after detected Codex auto-compaction
 - Extracts durable user facts from earlier conversations
 - Optionally injects upcoming calendar items via `gws`
 - Compacts older history into archive-backed summaries with temporary, consolidated, and meta tiers
@@ -46,6 +47,7 @@ Restart Codex after installing.
 - `~/.codex/long-term-memory/files/`
 - `~/.codex/long-term-memory/backups/`
 - `~/.codex/long-term-memory/pending/`
+- `~/.codex/long-term-memory/compaction_scan_state.json`
 - `~/.codex/long-term-memory/config.json`
 
 Default config:
@@ -91,6 +93,31 @@ When an OpenAI API key is configured, the plugin uses the Responses API with `gp
 - Meta summaries: overflow consolidated summaries are folded into meta summaries with source-archive references.
 
 When model-backed summarization is enabled, compaction tries the API first and falls back to a deterministic placeholder summary if the API fails. That placeholder is then refreshed by a background retry worker when the API becomes available again.
+
+## Reinjection after Codex compaction
+
+Codex does not currently expose a dedicated post-compaction hook. This plugin therefore keeps the full history injection at `SessionStart`, and adds a one-shot reinjection path on `UserPromptSubmit`.
+
+On each user prompt, the plugin scans the current thread's rollout log under `~/.codex/sessions/` and looks only for this exact JSON event shape:
+
+```json
+{
+  "type": "event_msg",
+  "payload": {
+    "type": "context_compacted"
+  }
+}
+```
+
+The detector is structural. It parses JSONL records and requires both the top-level `type == "event_msg"` and nested `payload.type == "context_compacted"`. It does not trigger on plain text that merely mentions `context_compacted`, and it does not treat the separate top-level `type == "compacted"` rollout record as the reinjection signal.
+
+When that exact event is seen, the plugin records a pending one-shot reinjection in `~/.codex/long-term-memory/compaction_scan_state.json`. On the next user turn for that same thread, it appends the normal long-term-memory context once and then clears the pending flag.
+
+One limitation remains: because hooks run on user submits, reinjection happens on the next turn after compaction, not in the middle of the already-compacted turn.
+
+### Upgrade check after Codex updates
+
+After updating Codex, trigger a real compaction and confirm the rollout logs still contain an `event_msg` record whose nested payload type is exactly `context_compacted`. If Codex changes the rollout filename pattern, top-level record type, or nested payload shape, update the detector in `lib/common.py` before relying on post-compaction reinjection.
 
 ## Data management
 

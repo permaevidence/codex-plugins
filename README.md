@@ -60,6 +60,7 @@ Minimum secrets/config needed after cloning:
 - logs user prompts and assistant replies
 - captures file attachments and assistant file references from transcript data
 - injects recent history at session start
+- reinjects memory once on the next turn after detected Codex auto-compaction
 - extracts durable user facts
 - optionally injects calendar context via `gws`
 - compacts older history into temporary, consolidated, and meta archive-backed summaries
@@ -91,6 +92,7 @@ Minimum secrets/config needed after cloning:
 
 - The original Claude plugin repos were used as local reference material during the port and are intentionally ignored by git in this repo.
 - Telegram parity and memory parity are now functionally closed relative to the original Claude plugins.
+- Post-compaction memory reinjection currently depends on Codex rollout logs continuing to emit the exact JSON event `type == "event_msg"` with `payload.type == "context_compacted"`. Revalidate that contract after Codex updates.
 
 ## References
 

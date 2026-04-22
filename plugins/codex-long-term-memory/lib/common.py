@@ -25,6 +25,8 @@ ARCHIVES_DIR = STATE_DIR / "archives"
 BACKUPS_DIR = STATE_DIR / "backups"
 FILES_DIR = STATE_DIR / "files"
 PENDING_DIR = STATE_DIR / "pending"
+COMPACTION_STATE_FILE = STATE_DIR / "compaction_scan_state.json"
+SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 MODEL_FILE_MAX_BYTES = 8 * 1024 * 1024
@@ -111,6 +113,145 @@ def save_json(path: Path, data: Any) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(data, handle, indent=2)
         handle.write("\n")
+
+
+def load_compaction_state_locked(handle: Any) -> dict[str, Any]:
+    handle.seek(0)
+    raw = handle.read().strip()
+    if not raw:
+        return {"threads": {}}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"threads": {}}
+    if not isinstance(data, dict):
+        return {"threads": {}}
+    threads = data.get("threads")
+    if not isinstance(threads, dict):
+        data["threads"] = {}
+    return data
+
+
+def save_compaction_state_locked(handle: Any, data: dict[str, Any]) -> None:
+    handle.seek(0)
+    json.dump(data, handle, indent=2)
+    handle.write("\n")
+    handle.truncate()
+
+
+def current_thread_id(payload: dict[str, Any]) -> str:
+    value = first_present(payload, "thread_id", "threadId", "session_id", "sessionId")
+    if value in (None, ""):
+        return ""
+    return str(value).strip()
+
+
+def rollout_paths_for_thread(thread_id: str) -> list[Path]:
+    if not thread_id or not SESSIONS_DIR.exists():
+        return []
+    pattern = f"rollout-*-{thread_id}.jsonl"
+    return sorted(SESSIONS_DIR.rglob(pattern), key=lambda path: path.as_posix())
+
+
+def is_context_compacted_event(obj: Any) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    if obj.get("type") != "event_msg":
+        return False
+    payload = obj.get("payload")
+    return isinstance(payload, dict) and payload.get("type") == "context_compacted"
+
+
+def scan_rollout_log_for_compaction(path: Path, start_offset: int = 0) -> tuple[int, bool]:
+    saw_compaction = False
+    try:
+        with path.open("rb") as handle:
+            if start_offset > 0:
+                handle.seek(start_offset)
+            while True:
+                line = handle.readline()
+                if not line:
+                    break
+                try:
+                    obj = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if is_context_compacted_event(obj):
+                    saw_compaction = True
+            return handle.tell(), saw_compaction
+    except OSError:
+        return start_offset, False
+
+
+def update_compaction_reinjection_state(thread_id: str, consume: bool = False) -> bool:
+    if not thread_id:
+        return False
+
+    ensure_state_dir()
+    COMPACTION_STATE_FILE.touch(exist_ok=True)
+    with COMPACTION_STATE_FILE.open("r+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        state = load_compaction_state_locked(handle)
+        threads = state.setdefault("threads", {})
+        thread_state = threads.get(thread_id)
+        if not isinstance(thread_state, dict):
+            thread_state = {}
+            threads[thread_id] = thread_state
+
+        file_states = thread_state.get("files")
+        if not isinstance(file_states, dict):
+            file_states = {}
+            thread_state["files"] = file_states
+
+        active_paths: set[str] = set()
+        for path in rollout_paths_for_thread(thread_id):
+            path_key = str(path)
+            active_paths.add(path_key)
+            try:
+                stat_result = path.stat()
+            except OSError:
+                continue
+
+            file_state = file_states.get(path_key)
+            if not isinstance(file_state, dict):
+                file_state = {}
+
+            try:
+                offset = max(int(file_state.get("offset", 0)), 0)
+            except (TypeError, ValueError):
+                offset = 0
+
+            if file_state.get("inode") != stat_result.st_ino or offset > stat_result.st_size:
+                offset = 0
+
+            new_offset, saw_compaction = scan_rollout_log_for_compaction(path, offset)
+            file_states[path_key] = {
+                "inode": stat_result.st_ino,
+                "offset": new_offset,
+            }
+            if saw_compaction:
+                thread_state["pending_compaction_reinjection"] = True
+                thread_state["last_compaction_detected_at"] = datetime.now(timezone.utc).isoformat()
+                thread_state["last_compaction_log"] = path_key
+
+        for stale_path in [path for path in file_states if path not in active_paths]:
+            del file_states[stale_path]
+
+        pending = bool(thread_state.get("pending_compaction_reinjection"))
+        if consume and pending:
+            thread_state["pending_compaction_reinjection"] = False
+
+        save_compaction_state_locked(handle, state)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return pending
+
+
+def should_reinject_after_compaction(payload: dict[str, Any]) -> bool:
+    return update_compaction_reinjection_state(current_thread_id(payload), consume=False)
+
+
+def consume_compaction_reinjection(payload: dict[str, Any]) -> bool:
+    return update_compaction_reinjection_state(current_thread_id(payload), consume=True)
 
 
 def append_history_entry(role: str, content: str, payload: dict[str, Any]) -> None:
