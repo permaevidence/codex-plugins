@@ -7,6 +7,46 @@ Codex-native ports of two Claude Code workflows:
 
 This repo is structured as a local Codex plugin marketplace so both plugins can be installed from one workspace.
 
+## Install
+
+For another Codex instance, the safest assumption is:
+
+1. Clone this repo locally.
+2. Open the cloned folder in Codex.
+3. Use the local marketplace file at `.agents/plugins/marketplace.json` so Codex can see both plugins from one repo.
+4. Install:
+   - `codex-long-term-memory`
+   - `codex-telegram-bridge`
+5. Run the memory installer after install:
+
+```bash
+python3 /absolute/path/to/repo/plugins/codex-long-term-memory/scripts/install.py
+```
+
+6. Create and fill:
+   - `~/.codex/telegram-bridge/config.json`
+   - `~/.codex/telegram-bridge/access.json`
+   - optionally `~/.codex/telegram-bridge/.env`
+7. Start the Telegram bridge:
+
+```bash
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/telegram_bridge.py
+```
+
+If you want Codex on the other machine to do this itself, giving it the repo URL should be enough only if it is also told to clone the repo locally and use the checked-out `.agents/plugins/marketplace.json`. The URL alone is not a complete install contract without those steps.
+
+## Quick setup
+
+Minimum secrets/config needed after cloning:
+
+- Long-term memory:
+  - optional `OPENAI_API_KEY` if you want model-backed summaries, captions, and fact extraction
+- Telegram bridge:
+  - Telegram bot token
+  - `owner_chat_id` if you want owner-only notifications like email/version monitor
+  - optional `OPENAI_API_KEY` for voice transcription
+  - optional `gws` for Gmail and calendar integrations
+
 ## Included plugins
 
 ### `codex-long-term-memory`
