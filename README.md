@@ -12,10 +12,11 @@ This repo is structured as a local Codex plugin marketplace so both plugins can 
 ### `codex-long-term-memory`
 
 - logs user prompts and assistant replies
+- captures file attachments and assistant file references from transcript data
 - injects recent history at session start
 - extracts durable user facts
 - optionally injects calendar context via `gws`
-- compacts older history into archive-backed summaries
+- compacts older history into temporary, consolidated, and meta archive-backed summaries
 - includes backup, reset, and restore utilities
 
 ### `codex-telegram-bridge`
@@ -39,7 +40,7 @@ This repo is structured as a local Codex plugin marketplace so both plugins can 
 ## Notes
 
 - The original Claude plugin repos were used as local reference material during the port and are intentionally ignored by git in this repo.
-- The main remaining parity differences are on the memory side, not the Telegram side.
+- Telegram parity is effectively closed; the only remaining memory-side difference is that summaries and file descriptions are deterministic by default rather than model-generated.
 
 ## References
 

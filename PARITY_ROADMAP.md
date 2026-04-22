@@ -19,14 +19,14 @@ When Codex offers a better primitive, parity uses the Codex-native primitive rat
   - hook install and uninstall
   - user prompt logging
   - assistant reply logging
+  - transcript-driven file attachment and tool-file capture
   - session-start history injection
   - durable user-fact extraction and injection
   - optional calendar injection via `gws`
-  - history compaction with archive-backed summaries
+  - history compaction with temporary, consolidated, and meta archive-backed summaries
   - backup, reset, and restore workflows
 - Remaining gap:
-  - Claude's multi-tier LLM summarization is still replaced by deterministic local compaction
-  - assistant attachment and tool-file capture is still lighter than the Claude hook implementation
+  - Claude's model-generated summaries and file captions are still represented by deterministic local summaries/descriptions by default
 
 ### Telegram plugin
 
