@@ -24,8 +24,10 @@ Use this skill when the user wants to set up or troubleshoot the Codex Telegram 
 ## Delivery tools
 
 - `reply`: send a Telegram message to the active chat
+- `reply`: can also attach local files and optionally use Telegram MarkdownV2 formatting
 - `edit_message`: edit the latest outbound Telegram message, useful for progress updates
 - `react`: add an emoji reaction to the latest inbound or outbound Telegram message
+- `download_attachment`: fetch an inbound Telegram file by `attachment_file_id` into the local bridge inbox
 
 Prefer these tools when the user would benefit from intermediate updates during a long task.
 

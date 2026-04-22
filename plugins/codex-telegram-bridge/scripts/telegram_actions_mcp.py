@@ -7,8 +7,9 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lib.telegram_api import edit_message_text, send_message, set_message_reaction
+from lib.telegram_api import download_attachment_to_dir, edit_message_text, send_message, set_message_reaction
 from lib.telegram_common import (
+    INBOX_DIR,
     load_access,
     load_chat_map,
     load_config,
@@ -51,6 +52,20 @@ def tool_definitions() -> list[dict[str, Any]]:
                         "type": "integer",
                         "description": "Optional explicit Telegram message id to reply to.",
                     },
+                    "reply_to": {
+                        "type": "integer",
+                        "description": "Alias for reply_to_message_id.",
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional absolute file paths to attach as photos or documents.",
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["text", "markdownv2"],
+                        "description": "Optional Telegram formatting mode for the text payload.",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -67,6 +82,11 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "message_id": {
                         "type": "integer",
                         "description": "Optional explicit Telegram message id to edit.",
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["text", "markdownv2"],
+                        "description": "Optional Telegram formatting mode for the edited text.",
                     },
                 },
                 "additionalProperties": False,
@@ -90,6 +110,19 @@ def tool_definitions() -> list[dict[str, Any]]:
                         "enum": ["inbound", "outbound"],
                         "description": "Which recent message to use when message_id is omitted.",
                     },
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "download_attachment",
+            "description": "Download a Telegram attachment by file_id into the local bridge inbox and return the local path.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["file_id"],
+                "properties": {
+                    "file_id": {"type": "string", "description": "Telegram attachment file_id from an inbound <channel ...> message."},
+                    "filename": {"type": "string", "description": "Optional preferred filename."},
                 },
                 "additionalProperties": False,
             },
@@ -131,10 +164,20 @@ def handle_reply(arguments: dict[str, Any]) -> dict[str, Any]:
     entry = resolve_entry(chat_map, chat_id)
 
     reply_to_message_id = arguments.get("reply_to_message_id")
+    if not isinstance(reply_to_message_id, int):
+        alias_value = arguments.get("reply_to")
+        if isinstance(alias_value, int):
+            reply_to_message_id = alias_value
     if reply_to_message_id is None:
         candidate = entry.get("last_message_id") or runtime.get("last_inbound_message_id")
         if isinstance(candidate, int):
             reply_to_message_id = candidate
+
+    format_value = str(arguments.get("format") or "text").strip().lower()
+    parse_mode = "MarkdownV2" if format_value == "markdownv2" else None
+    files = arguments.get("files") or []
+    if not isinstance(files, list) or not all(isinstance(item, str) for item in files):
+        raise RuntimeError("files must be an array of absolute file paths.")
 
     sent = send_message(
         token,
@@ -142,6 +185,8 @@ def handle_reply(arguments: dict[str, Any]) -> dict[str, Any]:
         str(arguments.get("text") or ""),
         reply_to_message_id=reply_to_message_id if isinstance(reply_to_message_id, int) else None,
         access=access,
+        parse_mode=parse_mode,
+        files=list(files),
     )
     message_ids = [int(item["message_id"]) for item in sent if isinstance(item.get("message_id"), int)]
 
@@ -165,6 +210,7 @@ def handle_reply(arguments: dict[str, Any]) -> dict[str, Any]:
         "chat_id": chat_id,
         "message_ids": message_ids,
         "reply_to_message_id": reply_to_message_id,
+        "files": list(files),
     }
     return {
         "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
@@ -186,7 +232,9 @@ def handle_edit_message(arguments: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(message_id, int):
         raise RuntimeError("No outbound Telegram message is available to edit. Call reply first or pass message_id.")
 
-    edit_message_text(token, chat_id, message_id, str(arguments.get("text") or ""))
+    format_value = str(arguments.get("format") or "text").strip().lower()
+    parse_mode = "MarkdownV2" if format_value == "markdownv2" else None
+    edit_message_text(token, chat_id, message_id, str(arguments.get("text") or ""), parse_mode=parse_mode)
 
     runtime.update(
         {
@@ -234,6 +282,25 @@ def handle_react(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def handle_download_attachment(arguments: dict[str, Any]) -> dict[str, Any]:
+    config, _, _, _, _ = current_context()
+    token = require_token(config)
+    file_id = str(arguments.get("file_id") or "").strip()
+    if not file_id:
+        raise RuntimeError("file_id is required.")
+    filename = arguments.get("filename")
+    if filename is not None and not isinstance(filename, str):
+        raise RuntimeError("filename must be a string when provided.")
+    path = download_attachment_to_dir(token, file_id, INBOX_DIR, preferred_name=filename)
+    if not path:
+        raise RuntimeError("Could not download the Telegram attachment.")
+    payload = {"file_id": file_id, "path": path}
+    return {
+        "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+        "structuredContent": payload,
+    }
+
+
 def handle_tool_call(params: dict[str, Any]) -> dict[str, Any]:
     name = params.get("name")
     arguments = params.get("arguments") or {}
@@ -245,6 +312,8 @@ def handle_tool_call(params: dict[str, Any]) -> dict[str, Any]:
         return handle_edit_message(arguments)
     if name == "react":
         return handle_react(arguments)
+    if name == "download_attachment":
+        return handle_download_attachment(arguments)
     raise RuntimeError(f"Unknown tool: {name}")
 
 

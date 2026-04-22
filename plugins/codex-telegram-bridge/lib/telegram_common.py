@@ -14,6 +14,7 @@ EMAIL_STATE_FILE = STATE_DIR / "email_state.json"
 VERSION_STATE_FILE = STATE_DIR / "version_state.json"
 RUNTIME_STATE_FILE = STATE_DIR / "runtime_state.json"
 ENV_FILE = STATE_DIR / ".env"
+INBOX_DIR = STATE_DIR / "inbox"
 
 DEFAULT_ACCESS = {
     "dmPolicy": "pairing",
@@ -47,6 +48,7 @@ DEFAULT_CONFIG = {
 
 def ensure_state_dir() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    INBOX_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_env_file() -> dict[str, str]:

@@ -8,15 +8,16 @@ This plugin ports the Telegram control loop from `claude-telegram-plugin` to Cod
 - Maps each Telegram chat to a persistent Codex thread
 - Starts, steers, and interrupts turns through `codex app-server`
 - Auto-approves command, file-change, and permission approval requests
-- Handles unsupported `item/tool/requestUserInput` prompts gracefully
+- Auto-answers structured `item/tool/requestUserInput` prompts with default options when possible
 - Supports `/help`, `/status`, `/stop`, and `/newsession`
 - Supports DM pairing, allowlists, groups, mention policies, and mention regexes
 - Transcribes voice messages with OpenAI `gpt-4o-transcribe`
+- Forwards inbound photos as downloaded local paths and other Telegram attachments as downloadable file IDs
 - Injects due reminders from `~/.codex/telegram-bridge/scheduled_reminders.json`
 - Injects unread-email summaries via `gws gmail +triage`
 - Monitors on-disk Codex CLI version changes and notifies the owner chat
 - Supports delivery controls such as ack reactions, chunking, and reply threading
-- Bundles Telegram MCP action tools so Codex can send replies, edit progress messages, and react mid-turn
+- Bundles Telegram MCP action tools so Codex can send replies and attachments, download inbound files, edit progress messages, and react mid-turn
 
 ## Configuration
 
@@ -115,8 +116,9 @@ The plugin bundles a local MCP server from [`.mcp.json`](./.mcp.json). After ins
 - `reply`
 - `edit_message`
 - `react`
+- `download_attachment`
 
-These tools default to the currently active Telegram chat tracked by the bridge, so Codex can post progress updates during a long-running task instead of waiting only for the final turn completion.
+These tools default to the currently active Telegram chat tracked by the bridge, so Codex can post progress updates during a long-running task instead of waiting only for the final turn completion. `reply` also accepts file paths for attachments, and inbound `<channel ...>` messages may include `image_path` or `attachment_file_id` metadata.
 
 ## Reminders
 
@@ -148,4 +150,4 @@ The bridge polls `scheduled_reminders.json` every 60 seconds. Example:
 
 ## Remaining gap
 
-Telegram-side parity is now effectively complete for the Claude plugin's remote-control workflow. The remaining overall parity gaps in this repo are on the memory side: Claude's multi-tier LLM summarization and richer assistant attachment/tool-file capture are still only partially matched.
+Telegram-side parity is now functionally closed for the Claude plugin's remote-control workflow.

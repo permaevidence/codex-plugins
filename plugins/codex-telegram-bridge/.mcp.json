@@ -6,7 +6,7 @@
         "-u",
         "./scripts/telegram_actions_mcp.py"
       ],
-      "note": "Local MCP server that lets Codex send Telegram replies, edit progress messages, and add reactions in the active Telegram chat."
+      "note": "Local MCP server that lets Codex send Telegram replies and attachments, download inbound Telegram files, edit progress messages, and add reactions in the active Telegram chat."
     }
   }
 }

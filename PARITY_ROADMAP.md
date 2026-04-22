@@ -38,7 +38,7 @@ When Codex offers a better primitive, parity uses the Codex-native primitive rat
   - persistent Codex thread mapping
   - `/help`, `/status`, `/stop`, `/newsession`
   - auto-approve command, file-change, and permission approval requests
-  - graceful handling for `item/tool/requestUserInput`
+  - auto-answering for structured `item/tool/requestUserInput` prompts, with fallback notification when safe inference is not possible
   - voice transcription
   - reminders
   - Gmail polling via `gws`
@@ -46,7 +46,8 @@ When Codex offers a better primitive, parity uses the Codex-native primitive rat
   - delivery controls: ack reactions, reply threading, chunking
   - on-disk Codex version monitor
   - bundled restart-loop supervisor script
-  - Codex-exposed Telegram action tools for replies, edits, and reactions
+  - inbound attachment metadata and downloaded photo-path forwarding
+  - Codex-exposed Telegram action tools for replies, attachments, inbound file download, edits, and reactions
 - Remaining gap:
   - no major Telegram workflow gap remains relative to the Claude plugin
 

@@ -16,13 +16,15 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from lib.telegram_api import (
+    download_attachment_to_dir,
+    fetch_telegram_file,
     send_chat_action,
     send_message,
     set_message_reaction,
-    telegram_get_json,
     telegram_request,
 )
 from lib.telegram_common import (
+    INBOX_DIR,
     load_access,
     load_chat_map,
     load_config,
@@ -182,22 +184,6 @@ def transcribe_audio(file_bytes: bytes, filename: str, mime_type: str, api_key: 
         return None
 
 
-def fetch_telegram_file(token: str, file_id: str) -> tuple[bytes, str, str] | None:
-    try:
-        info = telegram_request(token, "getFile", {"file_id": file_id})
-        file_path = (info.get("result") or {}).get("file_path")
-        if not file_path:
-            return None
-        url = f"https://api.telegram.org/file/bot{token}/{file_path}"
-        with urllib.request.urlopen(url, timeout=120) as response:
-            data = response.read()
-        filename = Path(file_path).name
-        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        return data, filename, mime_type
-    except Exception:
-        return None
-
-
 class CodexAppServerClient:
     def __init__(self, config: dict[str, Any], send_callback) -> None:
         self.config = config
@@ -340,14 +326,21 @@ class CodexAppServerClient:
             )
             return
         if method == "item/tool/requestUserInput":
-            self._send_json({"jsonrpc": "2.0", "id": request_id, "result": {"answers": {}}})
+            auto_answers = build_auto_user_input_answers(message.get("params") or {})
+            if auto_answers:
+                self._send_json({"jsonrpc": "2.0", "id": request_id, "result": {"answers": auto_answers}})
+            else:
+                self._send_json({"jsonrpc": "2.0", "id": request_id, "result": {"answers": {}}})
             params = message.get("params", {})
             chat_id = self._thread_to_chat.get(params.get("threadId"))
             if chat_id:
-                self.send_callback(
-                    chat_id,
-                    "Codex asked for interactive tool input, but the Telegram bridge cannot answer that request yet.",
-                )
+                if auto_answers:
+                    self.send_callback(chat_id, "Codex requested interactive tool input. The bridge auto-answered with the default options.")
+                else:
+                    self.send_callback(
+                        chat_id,
+                        "Codex asked for interactive tool input, and the bridge could not infer safe answers.",
+                    )
             return
         self._send_json(
             {
@@ -796,7 +789,150 @@ def extract_message_text(message: dict[str, Any], token: str, config: dict[str, 
     if photo:
         return text or "(photo)"
 
+    sticker = message.get("sticker")
+    if sticker:
+        emoji = str(sticker.get("emoji") or "").strip()
+        return text or (f"(sticker {emoji})" if emoji else "(sticker)")
+
     return text
+
+
+def extract_attachment_meta(message: dict[str, Any], token: str) -> dict[str, Any]:
+    photo = message.get("photo")
+    if isinstance(photo, list) and photo:
+        selected = photo[-1]
+        file_id = str(selected.get("file_id") or "").strip()
+        if file_id:
+            image_path = download_attachment_to_dir(token, file_id, INBOX_DIR, preferred_name="telegram-photo.jpg")
+            meta: dict[str, Any] = {
+                "attachment_kind": "photo",
+                "attachment_file_id": file_id,
+            }
+            if image_path:
+                meta["image_path"] = image_path
+            size = selected.get("file_size")
+            if size is not None:
+                meta["attachment_size"] = str(size)
+            return meta
+
+    document = message.get("document")
+    if isinstance(document, dict) and document.get("file_id"):
+        return attachment_meta(
+            kind="document",
+            file_id=document.get("file_id"),
+            size=document.get("file_size"),
+            mime=document.get("mime_type"),
+            name=document.get("file_name"),
+        )
+
+    audio = message.get("audio")
+    if isinstance(audio, dict) and audio.get("file_id"):
+        return attachment_meta(
+            kind="audio",
+            file_id=audio.get("file_id"),
+            size=audio.get("file_size"),
+            mime=audio.get("mime_type"),
+            name=audio.get("file_name") or audio.get("title"),
+        )
+
+    video = message.get("video")
+    if isinstance(video, dict) and video.get("file_id"):
+        return attachment_meta(
+            kind="video",
+            file_id=video.get("file_id"),
+            size=video.get("file_size"),
+            mime=video.get("mime_type"),
+            name=video.get("file_name"),
+        )
+
+    video_note = message.get("video_note")
+    if isinstance(video_note, dict) and video_note.get("file_id"):
+        return attachment_meta(
+            kind="video_note",
+            file_id=video_note.get("file_id"),
+            size=video_note.get("file_size"),
+            mime=video_note.get("mime_type"),
+            name="video-note.mp4",
+        )
+
+    voice = message.get("voice")
+    if isinstance(voice, dict) and voice.get("file_id"):
+        return attachment_meta(
+            kind="voice",
+            file_id=voice.get("file_id"),
+            size=voice.get("file_size"),
+            mime=voice.get("mime_type"),
+            name="voice.ogg",
+        )
+
+    return {}
+
+
+def attachment_meta(kind: str, file_id: Any, size: Any, mime: Any, name: Any) -> dict[str, Any]:
+    meta = {
+        "attachment_kind": kind,
+        "attachment_file_id": str(file_id or ""),
+    }
+    if size not in (None, ""):
+        meta["attachment_size"] = str(size)
+    if mime:
+        meta["attachment_mime"] = safe_attr(str(mime))
+    if name:
+        meta["attachment_name"] = safe_name(str(name))
+    return meta
+
+
+def build_channel_message(message: dict[str, Any], text: str, attachment: dict[str, Any]) -> str:
+    chat = message.get("chat") or {}
+    sender = message.get("from") or {}
+    attrs = {
+        "source": "telegram",
+        "chat_id": str(chat.get("id") or ""),
+        "message_id": str(message.get("message_id") or ""),
+        "user": str(sender.get("id") or ""),
+        "ts": str(message.get("date") or ""),
+    }
+    attrs.update({key: str(value) for key, value in attachment.items() if value not in (None, "")})
+    attr_text = " ".join(f'{key}="{safe_attr(value)}"' for key, value in attrs.items() if value)
+    body = text.strip() or "(empty message)"
+    return f"<channel {attr_text}>{body}"
+
+
+def safe_attr(value: str) -> str:
+    return value.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def safe_name(value: str) -> str:
+    return re.sub(r'[<>\[\]\r\n;"]', "_", value)
+
+
+def build_auto_user_input_answers(params: dict[str, Any]) -> dict[str, str]:
+    questions = params.get("questions")
+    if not isinstance(questions, list):
+        request = params.get("request")
+        if isinstance(request, dict):
+            questions = request.get("questions")
+    if not isinstance(questions, list):
+        return {}
+
+    answers: dict[str, str] = {}
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        question_id = str(question.get("id") or question.get("key") or question.get("name") or "").strip()
+        if not question_id:
+            continue
+        options = question.get("options")
+        if isinstance(options, list) and options:
+            first_option = options[0]
+            if isinstance(first_option, dict):
+                answer = first_option.get("label") or first_option.get("value") or first_option.get("id") or ""
+            else:
+                answer = str(first_option)
+        else:
+            answer = question.get("default") or ""
+        answers[question_id] = str(answer)
+    return {key: value for key, value in answers.items() if value != ""}
 
 
 def help_text() -> str:
@@ -806,7 +942,7 @@ def help_text() -> str:
         "/status - show current Codex status\n"
         "/stop - interrupt the active turn\n"
         "/newsession - start a fresh Codex thread\n\n"
-        "Text, voice, and several media captions are forwarded to Codex."
+        "Text, voice, photos, and file metadata are forwarded to Codex."
     )
 
 
@@ -892,6 +1028,7 @@ def main() -> None:
                 chat_id = str(chat.get("id"))
                 sender_id = str((message.get("from") or {}).get("id"))
                 text = extract_message_text(message, str(token), config).strip()
+                attachment = extract_attachment_meta(message, str(token))
                 access = load_access()
 
                 with chat_map_lock:
@@ -917,6 +1054,8 @@ def main() -> None:
                     continue
 
                 command = normalize_command(text, bot_username)
+                if command.startswith("/") and chat.get("type") != "private":
+                    continue
                 if command in {"/start", "/help"}:
                     send_message(str(token), chat_id, help_text(), message.get("message_id"), access=access)
                     continue
@@ -954,8 +1093,7 @@ def main() -> None:
                         )
                     continue
 
-                if chat.get("type") in {"group", "supergroup"}:
-                    text = f"[Group message from {sender_id}] {text}"
+                text = build_channel_message(message, text, attachment)
 
                 send_chat_action(str(token), chat_id, "typing")
                 if message.get("message_id") is not None and access.get("ackReaction"):
