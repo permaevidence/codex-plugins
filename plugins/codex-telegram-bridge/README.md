@@ -37,7 +37,6 @@ Example `config.json`:
 
 ```json
 {
-  "bot_token": "123456789:AA....",
   "default_cwd": "/absolute/path/to/your/project",
   "model": "gpt-5.5",
   "effort": "high",
@@ -47,7 +46,6 @@ Example `config.json`:
   "network_access": true,
   "writable_roots": [],
   "owner_chat_id": "123456789",
-  "openai_api_key": "sk-...",
   "enable_voice_transcription": true,
   "send_queue_confirmation": false,
   "enable_reminders": true,
@@ -57,7 +55,12 @@ Example `config.json`:
 
 By default the bridge does not post the per-message `Sent to Codex...` acknowledgement before the actual reply arrives. Set `"send_queue_confirmation": true` if you want that extra queue-status message back.
 
-You can also place `TELEGRAM_BOT_TOKEN=...` and `OPENAI_API_KEY=...` in `~/.codex/telegram-bridge/.env`.
+Put secrets in `~/.codex/telegram-bridge/.env` rather than `config.json`:
+
+```dotenv
+TELEGRAM_BOT_TOKEN=123456789:AA....
+OPENAI_API_KEY=sk-...
+```
 
 If you change `config.json`, restart the bridge so the new settings take effect.
 

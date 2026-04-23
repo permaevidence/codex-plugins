@@ -49,6 +49,7 @@ Restart Codex after installing.
 - `~/.codex/long-term-memory/pending/`
 - `~/.codex/long-term-memory/compaction_scan_state.json`
 - `~/.codex/long-term-memory/config.json`
+- `~/.codex/long-term-memory/.env`
 
 Default config:
 
@@ -82,6 +83,12 @@ Default config:
 ```
 
 When an OpenAI API key is configured, the plugin uses the Responses API with `gpt-5.4` and `reasoning.effort = "high"` for model-backed summaries, file descriptions, and richer user-fact extraction by default.
+
+Put secrets in `~/.codex/long-term-memory/.env` or the process environment rather than `config.json`:
+
+```dotenv
+OPENAI_API_KEY=sk-...
+```
 
 `max_injection_chars` is the only cap on injected chat-history size. The plugin does not apply a separate entry-count limit.
 

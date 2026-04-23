@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 
 STATE_DIR = Path.home() / ".codex" / "long-term-memory"
 CONFIG_FILE = STATE_DIR / "config.json"
+ENV_FILE = STATE_DIR / ".env"
 HISTORY_FILE = STATE_DIR / "history.jsonl"
 FACTS_FILE = STATE_DIR / "user_facts.jsonl"
 ARCHIVES_DIR = STATE_DIR / "archives"
@@ -121,6 +122,22 @@ def load_config() -> dict[str, Any]:
         return merged
     except Exception:
         return dict(DEFAULT_CONFIG)
+
+
+def load_env_file() -> dict[str, str]:
+    if not ENV_FILE.exists():
+        return {}
+    values: dict[str, str] = {}
+    try:
+        for raw_line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+    except Exception:
+        return {}
+    return values
 
 
 def save_json(path: Path, data: Any) -> None:
@@ -1089,16 +1106,20 @@ def format_entries_for_model(entries: list[dict[str, Any]], max_chars: int = MOD
 
 
 def openai_settings(config: dict[str, Any]) -> dict[str, Any] | None:
+    env = load_env_file()
     api_key = str(config.get("openai_api_key") or "").strip()
     if not api_key:
         env_name = str(config.get("openai_api_key_env") or "OPENAI_API_KEY").strip()
-        api_key = os.getenv(env_name, "").strip()
+        api_key = (os.getenv(env_name) or env.get(env_name, "")).strip()
     if not api_key:
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        api_key = (os.getenv("OPENAI_API_KEY") or env.get("OPENAI_API_KEY", "")).strip()
     if not api_key:
         return None
 
-    base_url = str(config.get("openai_base_url") or "").strip() or os.getenv("OPENAI_BASE_URL", "").strip()
+    base_url = (
+        str(config.get("openai_base_url") or "").strip()
+        or (os.getenv("OPENAI_BASE_URL") or env.get("OPENAI_BASE_URL", "")).strip()
+    )
     model = str(config.get("openai_model") or "").strip() or "gpt-5.4"
     reasoning_effort = str(config.get("openai_reasoning_effort") or "").strip() or "high"
     timeout = int(config.get("openai_timeout_seconds", 45))
