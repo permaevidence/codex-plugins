@@ -62,7 +62,7 @@ def hook_group(script_name: str, event_name: str, matcher: str | None = None, st
 
 OUR_HOOKS = {
     "SessionStart": [
-        hook_group("session_start.py", "SessionStart", "startup|resume", "Loading long-term memory"),
+        hook_group("session_start.py", "SessionStart", "startup|resume|clear", "Loading long-term memory"),
     ],
     "UserPromptSubmit": [
         hook_group("user_prompt_submit.py", "UserPromptSubmit"),

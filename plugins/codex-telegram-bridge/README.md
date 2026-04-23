@@ -39,8 +39,8 @@ Example `config.json`:
 {
   "bot_token": "123456789:AA....",
   "default_cwd": "/absolute/path/to/your/project",
-  "model": "gpt-5.4",
-  "effort": "medium",
+  "model": "gpt-5.5",
+  "effort": "high",
   "approval_policy": "never",
   "personality": "friendly",
   "sandbox_mode": "dangerFullAccess",

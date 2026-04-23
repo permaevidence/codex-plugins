@@ -31,8 +31,8 @@ DEFAULT_ACCESS = {
 DEFAULT_CONFIG = {
     "codex_cmd": "codex",
     "default_cwd": str(Path.home()),
-    "model": "gpt-5.4",
-    "effort": "medium",
+    "model": "gpt-5.5",
+    "effort": "high",
     "approval_policy": "never",
     "personality": "friendly",
     "sandbox_mode": "dangerFullAccess",
