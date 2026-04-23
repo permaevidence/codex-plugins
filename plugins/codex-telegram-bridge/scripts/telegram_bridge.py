@@ -411,7 +411,18 @@ class CodexAppServerClient:
         if entry and entry.get("thread_id"):
             thread_id = entry["thread_id"]
             if thread_id not in self._thread_to_chat:
-                self.request("thread/resume", {"threadId": thread_id})
+                try:
+                    self.request("thread/resume", {"threadId": thread_id})
+                except RuntimeError as exc:
+                    # A newly created thread may have no rollout yet if the bridge
+                    # restarts before the first real turn starts. In that case Codex
+                    # cannot resume it, so replace the stale mapping with a fresh thread.
+                    if "no rollout found for thread id" not in str(exc):
+                        raise
+                    self._thread_to_chat.pop(thread_id, None)
+                    result = self.request("thread/start", {})
+                    thread_id = result["thread"]["id"]
+                    chat_map[chat_id] = {"thread_id": thread_id, "created_at": time.time()}
             self._thread_to_chat[thread_id] = chat_id
             return thread_id
 
