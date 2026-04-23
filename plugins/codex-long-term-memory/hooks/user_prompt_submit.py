@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from lib.common import (
     append_history_entry,
+    build_compaction_policy,
     build_injected_context,
     consume_compaction_reinjection,
     first_present,
@@ -35,6 +36,7 @@ def main() -> None:
     context_parts = [f"[Current time: {now}]"]
 
     if needs_reinjection and consume_compaction_reinjection(payload):
+        context_parts.extend(["", build_compaction_policy()])
         if injected_context:
             context_parts.extend(["", injected_context])
 

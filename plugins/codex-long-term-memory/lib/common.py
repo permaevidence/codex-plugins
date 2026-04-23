@@ -68,6 +68,20 @@ DEFAULT_CONFIG = {
     "pending_retry_max_seconds": 480,
 }
 
+COMPACTION_POLICY_TEXT = """=== COMPACTION POLICY FOR LONG-TERM-MEMORY OVERLAYS ===
+Some developer messages are temporary long-term-memory overlays that are re-generated automatically after compaction. They are identified by headers such as:
+- === USER CONTEXT (permanent personal facts) ===
+- === CALENDAR (next 30 days) ===
+- === CHAT HISTORY (all sessions) ===
+
+When compacting conversation history, treat those sections as ephemeral working context, not as conversation content to preserve.
+
+Do not copy, summarize, paraphrase, quote, or otherwise carry their contents into compacted history or replacement history.
+
+If those sections contain facts that seem useful, still omit them from compaction output, because they will be re-injected automatically after compaction in fresh form.
+
+Preserve only the actual user/assistant conversation and durable task state outside those injected overlay sections."""
+
 
 def ensure_state_dir() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1853,6 +1867,10 @@ def entry_content_size(entry: dict[str, Any]) -> int:
 
 def empty_success() -> None:
     print("{}")
+
+
+def build_compaction_policy() -> str:
+    return COMPACTION_POLICY_TEXT
 
 
 def print_session_start_context(context: str) -> None:
