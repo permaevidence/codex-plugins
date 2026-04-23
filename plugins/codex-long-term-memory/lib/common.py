@@ -39,6 +39,7 @@ SUPPORTED_VISION_MEDIA_TYPES = {
     "image/gif",
     "image/webp",
 }
+COMPACTION_SCAN_OVERLAP_BYTES = 4096
 
 DEFAULT_CONFIG = {
     "max_injection_chars": 300000,
@@ -146,11 +147,31 @@ def current_thread_id(payload: dict[str, Any]) -> str:
     return str(value).strip()
 
 
+def compaction_state_has_thread(thread_id: str) -> bool:
+    if not thread_id or not COMPACTION_STATE_FILE.exists():
+        return False
+    try:
+        with COMPACTION_STATE_FILE.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return False
+    threads = data.get("threads")
+    return isinstance(threads, dict) and thread_id in threads
+
+
 def current_compaction_thread_id(payload: dict[str, Any]) -> str:
     value = first_present(payload, "thread_id", "threadId")
-    if value in (None, ""):
+    if value not in (None, ""):
+        return str(value).strip()
+
+    fallback = first_present(payload, "session_id", "sessionId")
+    if fallback in (None, ""):
         return ""
-    return str(value).strip()
+
+    fallback_thread_id = str(fallback).strip()
+    if rollout_paths_for_thread(fallback_thread_id) or compaction_state_has_thread(fallback_thread_id):
+        return fallback_thread_id
+    return ""
 
 
 def rollout_paths_for_thread(thread_id: str) -> list[Path]:
@@ -169,12 +190,19 @@ def is_context_compacted_event(obj: Any) -> bool:
     return isinstance(payload, dict) and payload.get("type") == "context_compacted"
 
 
-def scan_rollout_log_for_compaction(path: Path, start_offset: int = 0) -> tuple[int, bool]:
+def scan_rollout_log_for_compaction(
+    path: Path,
+    start_offset: int = 0,
+    last_compaction_offset: int = -1,
+) -> tuple[int, bool, int]:
     saw_compaction = False
+    latest_compaction_offset = last_compaction_offset
     try:
         with path.open("rb") as handle:
-            if start_offset > 0:
-                handle.seek(start_offset)
+            scan_offset = max(start_offset - COMPACTION_SCAN_OVERLAP_BYTES, 0)
+            handle.seek(scan_offset)
+            if scan_offset > 0:
+                handle.readline()
             while True:
                 line_offset = handle.tell()
                 line = handle.readline()
@@ -184,13 +212,14 @@ def scan_rollout_log_for_compaction(path: Path, start_offset: int = 0) -> tuple[
                     obj = json.loads(line.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     if not line.endswith(b"\n"):
-                        return line_offset, saw_compaction
+                        return line_offset, saw_compaction, latest_compaction_offset
                     continue
-                if is_context_compacted_event(obj):
+                if is_context_compacted_event(obj) and line_offset > latest_compaction_offset:
                     saw_compaction = True
-            return handle.tell(), saw_compaction
+                    latest_compaction_offset = line_offset
+            return handle.tell(), saw_compaction, latest_compaction_offset
     except OSError:
-        return start_offset, False
+        return start_offset, False, last_compaction_offset
 
 
 def update_compaction_reinjection_state(thread_id: str, consume: bool = False) -> bool:
@@ -230,14 +259,24 @@ def update_compaction_reinjection_state(thread_id: str, consume: bool = False) -
                 offset = max(int(file_state.get("offset", 0)), 0)
             except (TypeError, ValueError):
                 offset = 0
+            try:
+                last_compaction_offset = int(file_state.get("last_compaction_offset", -1))
+            except (TypeError, ValueError):
+                last_compaction_offset = -1
 
             if file_state.get("inode") != stat_result.st_ino or offset > stat_result.st_size:
                 offset = 0
+                last_compaction_offset = -1
 
-            new_offset, saw_compaction = scan_rollout_log_for_compaction(path, offset)
+            new_offset, saw_compaction, latest_compaction_offset = scan_rollout_log_for_compaction(
+                path,
+                offset,
+                last_compaction_offset,
+            )
             file_states[path_key] = {
                 "inode": stat_result.st_ino,
                 "offset": new_offset,
+                "last_compaction_offset": latest_compaction_offset,
             }
             if saw_compaction:
                 thread_state["pending_compaction_reinjection"] = True
