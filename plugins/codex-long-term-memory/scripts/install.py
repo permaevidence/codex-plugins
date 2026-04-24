@@ -43,13 +43,19 @@ DEFAULT_STATE_CONFIG = {
 }
 
 
-def hook_group(script_name: str, event_name: str, matcher: str | None = None, status: str | None = None) -> dict:
+def hook_group(
+    script_name: str,
+    event_name: str,
+    matcher: str | None = None,
+    status: str | None = None,
+    timeout: int = 30,
+) -> dict:
     group: dict[str, object] = {
         "hooks": [
             {
                 "type": "command",
                 "command": f"{PYTHON} {PLUGIN_ROOT / 'hooks' / script_name}",
-                "timeout": 30,
+                "timeout": timeout,
             }
         ]
     }
@@ -68,7 +74,7 @@ OUR_HOOKS = {
         hook_group("user_prompt_submit.py", "UserPromptSubmit"),
     ],
     "Stop": [
-        hook_group("stop.py", "Stop"),
+        hook_group("stop.py", "Stop", timeout=120),
     ],
 }
 
