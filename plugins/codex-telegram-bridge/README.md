@@ -64,6 +64,12 @@ OPENAI_API_KEY=sk-...
 
 If you change `config.json`, restart the bridge so the new settings take effect.
 
+`/newsession` is the remote restart path from Telegram. It clears the chat's
+current Codex thread mapping, sends a confirmation, shuts down the active
+`codex app-server`, and exits the bridge child process. The supervisor then
+relaunches the bridge automatically, so the next Telegram message starts a
+fresh Codex thread on a fresh app-server process.
+
 ## Generated Images
 
 When a Codex turn generates new image files under `~/.codex/generated_images/<thread_id>/`, the bridge now compares the directory state at turn start versus turn completion and automatically sends any newly created images back to the Telegram chat.
@@ -202,6 +208,12 @@ bash /absolute/path/to/plugins/codex-telegram-bridge/scripts/start_bridge.sh
 ```
 
 It writes logs to `~/.codex/telegram-bridge/bridge.log` and tracks supervisor and child PIDs under the same state directory.
+
+The bridge also persists the latest Telegram long-polling offset in
+`runtime_state.json` as `telegram_update_offset`. This prevents restarted
+bridge processes from re-processing already handled updates, which is
+especially important because `/newsession` intentionally exits the bridge child
+so the supervisor can relaunch it.
 
 If you are watching logs during startup, prefer:
 

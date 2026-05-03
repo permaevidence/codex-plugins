@@ -275,6 +275,21 @@ class CodexAppServerClient:
         )
         self.notify("initialized", {})
 
+    def shutdown(self, timeout: float = 5.0) -> None:
+        if self.process.poll() is not None:
+            return
+        try:
+            if self.process.stdin is not None:
+                self.process.stdin.close()
+        except Exception:
+            pass
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=timeout)
+
     def request(self, method: str, params: dict[str, Any]) -> Any:
         request_id = self._reserve_id()
         reply_queue: queue.Queue = queue.Queue(maxsize=1)
@@ -788,7 +803,7 @@ def maybe_start_version_monitor_loop(
                         (
                             f"Codex CLI updated on disk:\n{previous_version} -> {current_version}\n\n"
                             "The running bridge may still be using the older app-server process. "
-                            "Consider /newsession if you want new turns to start from a fresh state."
+                            "Send /newsession to restart the bridge/app-server and make the next turn fresh."
                         ),
                     )
                     with chat_map_lock:
@@ -1023,7 +1038,7 @@ def help_text() -> str:
         "/help - show this message\n"
         "/status - show current Codex status\n"
         "/stop - interrupt the active turn\n"
-        "/newsession - start a fresh Codex thread\n\n"
+        "/newsession - restart the bridge/app-server; next message starts a fresh Codex thread\n\n"
         "Text, voice, photos, and file metadata are forwarded to Codex."
     )
 
@@ -1039,7 +1054,10 @@ def main() -> None:
     bot_username = get_bot_username(str(token))
     chat_map = load_chat_map()
     chat_map_lock = threading.Lock()
-    offset = 0
+    # Resume from the last seen Telegram update to avoid re-processing
+    # commands (like /newsession) that would cause a restart loop.
+    runtime = load_runtime_state()
+    offset = int(runtime.get("telegram_update_offset") or 0)
 
     def send_callback(chat_id: str, text: str, files: list[str] | None = None) -> None:
         access = load_access()
@@ -1100,6 +1118,8 @@ def main() -> None:
         for update in result.get("result", []):
             try:
                 offset = max(offset, int(update["update_id"]) + 1)
+                # Persist offset immediately so restarts never re-process this update.
+                save_runtime_state({**load_runtime_state(), "telegram_update_offset": offset})
                 message = update.get("message") or update.get("edited_message")
                 if not message:
                     continue
@@ -1153,16 +1173,29 @@ def main() -> None:
                     continue
                 if command == "/newsession":
                     with chat_map_lock:
-                        thread_id = codex.new_thread(chat_id, chat_map)
+                        entry = chat_map.setdefault(chat_id, {})
+                        entry.pop("thread_id", None)
+                        entry.pop("created_at", None)
                         save_chat_map(chat_map)
+                        save_runtime_state(
+                            {
+                                **load_runtime_state(),
+                                "active_chat_id": chat_id,
+                                "active_thread_id": None,
+                                "active_turn_id": None,
+                                "updated_at": time.time(),
+                            }
+                        )
                     send_message(
                         str(token),
                         chat_id,
-                        f"Started a new Codex thread:\n{thread_id}",
+                        "Restarting the bridge and Codex app-server.\n"
+                        "Your next message will start a fresh Codex thread.",
                         message.get("message_id"),
                         access=access,
                     )
-                    continue
+                    codex.shutdown()
+                    return
                 if command == "/stop":
                     if codex.interrupt_turn(chat_id):
                         send_message(str(token), chat_id, "Interrupt requested.", message.get("message_id"), access=access)
