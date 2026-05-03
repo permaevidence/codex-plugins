@@ -73,16 +73,16 @@ Default config:
   "openai_api_key": "",
   "openai_api_key_env": "OPENAI_API_KEY",
   "openai_base_url": "https://api.openai.com/v1/responses",
-  "openai_model": "gpt-5.4",
+  "openai_model": "gpt-5.4-mini",
   "openai_reasoning_effort": "high",
-  "openai_timeout_seconds": 45,
+  "openai_timeout_seconds": 240,
   "pending_retry_enabled": true,
   "pending_retry_base_seconds": 30,
   "pending_retry_max_seconds": 480
 }
 ```
 
-When an OpenAI API key is configured, the plugin uses the Responses API with `gpt-5.4` and `reasoning.effort = "high"` for model-backed summaries, file descriptions, and richer user-fact extraction by default.
+When an OpenAI API key is configured, the plugin uses the Responses API with `gpt-5.4-mini` and `reasoning.effort = "high"` for model-backed summaries, file descriptions, and richer user-fact extraction by default.
 
 Put secrets in `~/.codex/long-term-memory/.env` or the process environment rather than `config.json`:
 
