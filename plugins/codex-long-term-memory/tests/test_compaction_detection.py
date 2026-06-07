@@ -495,6 +495,94 @@ class CompactionDetectionTests(unittest.TestCase):
         self.assertIn("recurring preferences", content_text)
         self.assertIn("people, places, organizations", content_text)
 
+    def test_user_context_extraction_prompt_includes_budget_and_durable_work_context(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_call(instructions: str, content: list[dict[str, object]], config: dict[str, object]) -> str:
+            captured["instructions"] = instructions
+            captured["content"] = content
+            return "- The user maintains a long-running Codex Telegram bridge project."
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            facts_path = Path(tmpdir) / "user_facts.jsonl"
+            facts_path.write_text(
+                json.dumps({"id": "a", "fact": "The user prefers concise technical explanations."}) + "\n",
+                encoding="utf-8",
+            )
+            original_facts_file = common.FACTS_FILE
+            original_call = common.call_openai_responses
+            try:
+                common.FACTS_FILE = facts_path
+                common.call_openai_responses = fake_call  # type: ignore[assignment]
+                result = common.extract_user_facts_from_chunk(
+                    [{"role": "user", "content": "Remember that my Codex plugins repo is a long-running project."}],
+                    {
+                        "enable_user_facts": True,
+                        "enable_model_user_facts": True,
+                        "openai_api_key": "test-key",
+                        "user_facts_max_chars": 16000,
+                    },
+                )
+            finally:
+                common.FACTS_FILE = original_facts_file
+                common.call_openai_responses = original_call
+
+        self.assertIn("Codex Telegram bridge", result)
+        instructions = str(captured["instructions"])
+        content_text = "\n\n".join(str(block.get("text", "")) for block in captured["content"])  # type: ignore[index,union-attr]
+        self.assertIn("durable user context", instructions)
+        self.assertIn("long-running projects", instructions)
+        self.assertIn("Do not discard something merely because it mentions tools", instructions)
+        self.assertIn("PERSISTENT USER-CONTEXT BUDGET", content_text)
+        self.assertIn("Total budget: about 16000 characters", content_text)
+        self.assertIn("Remaining before cleanup", content_text)
+        self.assertIn("EXISTING USER CONTEXT FOR DEDUPLICATION", content_text)
+
+    def test_user_context_condense_prompt_uses_budget_without_dropping_technical_context(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_call(instructions: str, content: list[dict[str, object]], config: dict[str, object]) -> str:
+            captured["instructions"] = instructions
+            captured["content"] = content
+            return "- The user maintains a long-running Codex plugins repo and prefers AGENTS.md memory transport."
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            facts_path = Path(tmpdir) / "user_facts.jsonl"
+            facts = [
+                "The user maintains a long-running Codex plugins repo.",
+                "The user prefers AGENTS.md memory transport for Codex memory.",
+                "The user prefers AGENTS.md memory transport for Codex memory.",
+            ]
+            facts_path.write_text(
+                "".join(json.dumps({"id": str(index), "fact": fact}) + "\n" for index, fact in enumerate(facts)),
+                encoding="utf-8",
+            )
+            original_facts_file = common.FACTS_FILE
+            original_call = common.call_openai_responses
+            try:
+                common.FACTS_FILE = facts_path
+                common.call_openai_responses = fake_call  # type: ignore[assignment]
+                common.condense_user_facts_if_needed(
+                    {
+                        "enable_model_user_facts": True,
+                        "openai_api_key": "test-key",
+                        "user_facts_max_chars": 80,
+                    }
+                )
+                updated = facts_path.read_text(encoding="utf-8")
+            finally:
+                common.FACTS_FILE = original_facts_file
+                common.call_openai_responses = original_call
+
+        instructions = str(captured["instructions"])
+        content_text = "\n\n".join(str(block.get("text", "")) for block in captured["content"])  # type: ignore[index,union-attr]
+        self.assertIn("limited persistent user-context memory", instructions)
+        self.assertIn("Do not delete durable technical/work/project context", instructions)
+        self.assertIn("PERSISTENT USER-CONTEXT BUDGET", content_text)
+        self.assertIn("Target: compress the fact list back under about 80 characters", content_text)
+        self.assertIn("FACT LIST TO CLEANUP", content_text)
+        self.assertIn("AGENTS.md memory transport", updated)
+
 
 if __name__ == "__main__":
     unittest.main()
