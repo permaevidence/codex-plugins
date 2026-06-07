@@ -40,6 +40,9 @@ DEFAULT_STATE_CONFIG = {
     "pending_retry_enabled": True,
     "pending_retry_base_seconds": 30,
     "pending_retry_max_seconds": 480,
+    "injection_transport": "hook",
+    "agents_md_path": "",
+    "agents_project_doc_max_bytes": 524288,
 }
 
 
@@ -72,6 +75,9 @@ OUR_HOOKS = {
     ],
     "UserPromptSubmit": [
         hook_group("user_prompt_submit.py", "UserPromptSubmit"),
+    ],
+    "PreCompact": [
+        hook_group("pre_compact.py", "PreCompact", "manual|auto", "Refreshing long-term memory", timeout=120),
     ],
     "Stop": [
         hook_group("stop.py", "Stop", timeout=120),

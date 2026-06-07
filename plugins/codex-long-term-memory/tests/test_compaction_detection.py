@@ -10,15 +10,113 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from lib import common
 from lib.common import (
+    AGENTS_MEMORY_BEGIN,
+    AGENTS_MEMORY_END,
     compaction_state_has_thread,
     current_compaction_thread_id,
     current_thread_id,
+    ensure_project_doc_max_bytes,
     is_context_compacted_event,
+    replace_marked_agents_block,
+    refresh_agents_memory_injection,
     scan_rollout_log_for_compaction,
 )
 
 
 class CompactionDetectionTests(unittest.TestCase):
+    def test_replace_marked_agents_block_preserves_surrounding_text(self) -> None:
+        original = (
+            "# Local Capabilities\n\n"
+            "Keep this.\n\n"
+            f"{AGENTS_MEMORY_BEGIN}\nold memory\n{AGENTS_MEMORY_END}\n\n"
+            "Keep this too.\n"
+        )
+
+        updated = replace_marked_agents_block(original, "new memory")
+
+        self.assertIn("Keep this.", updated)
+        self.assertIn("Keep this too.", updated)
+        self.assertIn("new memory", updated)
+        self.assertNotIn("old memory", updated)
+        self.assertEqual(updated.count(AGENTS_MEMORY_BEGIN), 1)
+        self.assertEqual(updated.count(AGENTS_MEMORY_END), 1)
+
+    def test_ensure_project_doc_max_bytes_inserts_top_level_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.toml"
+            path.write_text('model = "gpt-5.5"\n\n[features]\nhooks = true\n', encoding="utf-8")
+
+            changed = ensure_project_doc_max_bytes(524288, path)
+
+            self.assertTrue(changed)
+            text = path.read_text(encoding="utf-8")
+            self.assertLess(text.index("project_doc_max_bytes = 524288"), text.index("[features]"))
+
+            changed_again = ensure_project_doc_max_bytes(100000, path)
+            self.assertFalse(changed_again)
+
+    def test_refresh_agents_memory_injection_updates_marked_block_and_doc_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state_dir = root / "state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            agents_path = root / "AGENTS.md"
+            codex_config_path = root / "config.toml"
+            agents_path.write_text("# Existing\n\nKeep this.\n", encoding="utf-8")
+            config = {
+                "injection_transport": "agents_md",
+                "agents_md_path": str(agents_path),
+                "agents_project_doc_max_bytes": 524288,
+                "max_injection_chars": 300000,
+                "include_timestamps": True,
+                "enable_user_facts": False,
+                "enable_calendar": False,
+            }
+
+            original_paths = {
+                "STATE_DIR": common.STATE_DIR,
+                "CONFIG_FILE": common.CONFIG_FILE,
+                "HISTORY_FILE": common.HISTORY_FILE,
+                "FACTS_FILE": common.FACTS_FILE,
+                "ARCHIVES_DIR": common.ARCHIVES_DIR,
+                "BACKUPS_DIR": common.BACKUPS_DIR,
+                "FILES_DIR": common.FILES_DIR,
+                "PENDING_DIR": common.PENDING_DIR,
+                "INJECTED_CONTEXT_FILE": common.INJECTED_CONTEXT_FILE,
+                "CODEX_CONFIG_FILE": common.CODEX_CONFIG_FILE,
+            }
+
+            try:
+                common.STATE_DIR = state_dir
+                common.CONFIG_FILE = state_dir / "config.json"
+                common.HISTORY_FILE = state_dir / "history.jsonl"
+                common.FACTS_FILE = state_dir / "user_facts.jsonl"
+                common.ARCHIVES_DIR = state_dir / "archives"
+                common.BACKUPS_DIR = state_dir / "backups"
+                common.FILES_DIR = state_dir / "files"
+                common.PENDING_DIR = state_dir / "pending"
+                common.INJECTED_CONTEXT_FILE = state_dir / "injected_context.md"
+                common.CODEX_CONFIG_FILE = codex_config_path
+                common.CONFIG_FILE.write_text(json.dumps(config), encoding="utf-8")
+                common.HISTORY_FILE.write_text(
+                    json.dumps({"role": "user", "content": "hello from history"}) + "\n",
+                    encoding="utf-8",
+                )
+
+                result = refresh_agents_memory_injection(config, str(root))
+
+                self.assertTrue(result["enabled"])
+                updated = agents_path.read_text(encoding="utf-8")
+                self.assertIn("Keep this.", updated)
+                self.assertIn("hello from history", updated)
+                self.assertEqual(updated.count(AGENTS_MEMORY_BEGIN), 1)
+                self.assertEqual(updated.count(AGENTS_MEMORY_END), 1)
+                self.assertIn("project_doc_max_bytes = 524288", codex_config_path.read_text(encoding="utf-8"))
+                self.assertIn("hello from history", common.INJECTED_CONTEXT_FILE.read_text(encoding="utf-8"))
+            finally:
+                for name, value in original_paths.items():
+                    setattr(common, name, value)
+
     def test_accepts_exact_context_compacted_event(self) -> None:
         obj = {
             "type": "event_msg",

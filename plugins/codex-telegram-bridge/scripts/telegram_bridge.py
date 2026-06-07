@@ -50,6 +50,12 @@ REMINDER_CHECK_INTERVAL = 60
 VERSION_CHECK_INTERVAL = 5 * 60
 TRANSCRIPTION_MAX_BYTES = 25 * 1024 * 1024
 GENERATED_IMAGES_DIR = Path.home() / ".codex" / "generated_images"
+LONG_TERM_MEMORY_AGENTS_SCRIPT = (
+    Path(__file__).resolve().parents[2]
+    / "codex-long-term-memory"
+    / "scripts"
+    / "update_agents_injection.py"
+)
 
 
 def normalize_command(text: str, bot_username: str) -> str:
@@ -244,6 +250,8 @@ class CodexAppServerClient:
     def __init__(self, config: dict[str, Any], send_callback) -> None:
         self.config = config
         self.send_callback = send_callback
+        default_cwd = Path(str(config.get("default_cwd") or Path.home())).expanduser()
+        app_server_cwd = str(default_cwd if default_cwd.is_dir() else Path.home())
         self.process = subprocess.Popen(
             [config["codex_cmd"], "app-server"],
             stdin=subprocess.PIPE,
@@ -251,6 +259,7 @@ class CodexAppServerClient:
             stderr=sys.stderr,
             text=True,
             bufsize=1,
+            cwd=app_server_cwd,
         )
         self._lock = threading.Lock()
         self._next_id = 1
@@ -847,6 +856,31 @@ def current_codex_version(codex_cmd: str) -> str | None:
     return output or None
 
 
+def update_long_term_memory_agents_file(config: dict[str, Any]) -> None:
+    if not LONG_TERM_MEMORY_AGENTS_SCRIPT.exists():
+        return
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(LONG_TERM_MEMORY_AGENTS_SCRIPT),
+                "--cwd",
+                str(config.get("default_cwd") or Path.home()),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=45,
+        )
+    except Exception as exc:
+        print(f"long-term-memory AGENTS.md update failed: {exc}", file=sys.stderr)
+        return
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        print(f"long-term-memory AGENTS.md update failed: {detail}", file=sys.stderr)
+
+
 def get_bot_username(token: str) -> str:
     result = telegram_request(token, "getMe", {})
     return ((result.get("result") or {}).get("username") or "").strip()
@@ -1094,6 +1128,7 @@ def main() -> None:
                     }
                 )
 
+    update_long_term_memory_agents_file(config)
     codex = CodexAppServerClient(config, send_callback)
     maybe_start_reminder_loop(config, codex, chat_map, chat_map_lock)
     maybe_start_email_loop(config, codex, chat_map, chat_map_lock)
@@ -1172,6 +1207,7 @@ def main() -> None:
                     )
                     continue
                 if command == "/newsession":
+                    update_long_term_memory_agents_file(config)
                     with chat_map_lock:
                         entry = chat_map.setdefault(chat_id, {})
                         entry.pop("thread_id", None)

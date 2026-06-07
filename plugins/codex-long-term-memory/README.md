@@ -78,7 +78,10 @@ Default config:
   "openai_timeout_seconds": 240,
   "pending_retry_enabled": true,
   "pending_retry_base_seconds": 30,
-  "pending_retry_max_seconds": 480
+  "pending_retry_max_seconds": 480,
+  "injection_transport": "hook",
+  "agents_md_path": "",
+  "agents_project_doc_max_bytes": 524288
 }
 ```
 
@@ -92,6 +95,22 @@ OPENAI_API_KEY=sk-...
 
 `max_injection_chars` is the only cap on injected chat-history size. The plugin does not apply a separate entry-count limit.
 
+## AGENTS.md transport
+
+Recent Codex releases spill large hook `additionalContext` output to temp files instead of embedding it inline. To avoid that for Telegram-driven sessions, set:
+
+```json
+{
+  "injection_transport": "agents_md",
+  "agents_md_path": "/Users/alice/AGENTS.md",
+  "agents_project_doc_max_bytes": 524288
+}
+```
+
+When the Telegram bridge starts, and again when `/newsession` is received, it runs `scripts/update_agents_injection.py`. That helper rewrites only the marked long-term-memory block appended to the target `AGENTS.md`, updates `~/.codex/long-term-memory/injected_context.md`, and raises top-level `project_doc_max_bytes` in `~/.codex/config.toml` high enough for Codex to embed the whole file.
+
+In this mode the `SessionStart` hook no longer emits the full memory overlay, and the old compaction reinjection path on `UserPromptSubmit` is disabled. The `PreCompact` hook refreshes the marked `AGENTS.md` block before Codex compacts so the durable file is current before messages are removed from the live context. Codex reads `AGENTS.md` at fresh session start, so use `/newsession` after changing this mode or when a current thread needs to start with the refreshed embedded history.
+
 ## Compaction tiers
 
 - Raw history: newest messages and file entries remain verbatim.
@@ -101,11 +120,15 @@ OPENAI_API_KEY=sk-...
 
 When model-backed summarization is enabled, compaction tries the API first and falls back to a deterministic placeholder summary if the API fails. That placeholder is then refreshed by a background retry worker when the API becomes available again.
 
-## Reinjection after Codex compaction
+## Codex compaction hooks
 
-Codex does not currently expose a dedicated post-compaction hook. Claude Code does, which is why this extra detection path is needed only on the Codex side right now.
+Current Codex releases expose `PreCompact` and `PostCompact` hooks. The compact-hook output schema supports continuing or stopping compaction; it does not support large `additionalContext` reinjection. This plugin therefore uses `PreCompact` as a side-effect hook: it refreshes the `AGENTS.md` memory block before compaction runs.
 
-This plugin therefore keeps the full history injection at `SessionStart`, and adds a one-shot reinjection path on `UserPromptSubmit`. The rollout-log scan is a workaround for the missing Codex hook, not the ideal long-term design. If Codex later adds a real post-compaction hook, this plugin should stop doing log-based detection and switch to that direct hook instead.
+For legacy hook-transport setups, the plugin still keeps the full history injection at `SessionStart`, and has a one-shot reinjection path on `UserPromptSubmit`.
+
+### Legacy rollout-log detection
+
+The rollout-log scanner is kept only for older hook-transport behavior. It is not used for the `AGENTS.md` transport.
 
 On each user prompt, the plugin scans the current thread's rollout log under `~/.codex/sessions/` and looks only for this exact JSON event shape:
 
@@ -130,7 +153,7 @@ One limitation remains: because hooks run on user submits, reinjection happens o
 
 ### Upgrade check after Codex updates
 
-After updating Codex, trigger a real compaction and confirm the rollout logs still contain an `event_msg` record whose nested payload type is exactly `context_compacted`. If Codex changes the rollout filename pattern, top-level record type, or nested payload shape, update the detector in `lib/common.py` before relying on post-compaction reinjection.
+After updating Codex, trigger a real compaction and confirm `PreCompact` still fires with the expected `trigger` values, currently `manual` and `auto`. For legacy hook-transport setups, also confirm the rollout logs still contain an `event_msg` record whose nested payload type is exactly `context_compacted`.
 
 ## Data management
 

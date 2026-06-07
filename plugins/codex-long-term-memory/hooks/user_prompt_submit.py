@@ -16,6 +16,7 @@ from lib.common import (
     load_hook_input,
     read_history,
     should_reinject_after_compaction,
+    uses_agents_md_injection,
 )
 
 
@@ -24,7 +25,8 @@ def main() -> None:
     config = load_config()
     prompt = first_present(payload, "user_prompt", "userPrompt", "prompt")
     injected_context = ""
-    needs_reinjection = should_reinject_after_compaction(payload)
+    agents_md_mode = uses_agents_md_injection(config)
+    needs_reinjection = False if agents_md_mode else should_reinject_after_compaction(payload)
 
     if needs_reinjection:
         injected_context = build_injected_context(read_history(), config)

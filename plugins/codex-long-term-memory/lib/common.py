@@ -22,12 +22,17 @@ CONFIG_FILE = STATE_DIR / "config.json"
 ENV_FILE = STATE_DIR / ".env"
 HISTORY_FILE = STATE_DIR / "history.jsonl"
 FACTS_FILE = STATE_DIR / "user_facts.jsonl"
+INJECTED_CONTEXT_FILE = STATE_DIR / "injected_context.md"
 ARCHIVES_DIR = STATE_DIR / "archives"
 BACKUPS_DIR = STATE_DIR / "backups"
 FILES_DIR = STATE_DIR / "files"
 PENDING_DIR = STATE_DIR / "pending"
 COMPACTION_STATE_FILE = STATE_DIR / "compaction_scan_state.json"
 SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+CODEX_CONFIG_FILE = Path.home() / ".codex" / "config.toml"
+
+AGENTS_MEMORY_BEGIN = "<!-- BEGIN CODEX LONG-TERM-MEMORY INJECTION -->"
+AGENTS_MEMORY_END = "<!-- END CODEX LONG-TERM-MEMORY INJECTION -->"
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 MODEL_FILE_MAX_BYTES = 8 * 1024 * 1024
@@ -67,6 +72,9 @@ DEFAULT_CONFIG = {
     "pending_retry_enabled": True,
     "pending_retry_base_seconds": 30,
     "pending_retry_max_seconds": 480,
+    "injection_transport": "hook",
+    "agents_md_path": "",
+    "agents_project_doc_max_bytes": 524288,
 }
 
 COMPACTION_POLICY_TEXT = """=== COMPACTION POLICY FOR LONG-TERM-MEMORY OVERLAYS ===
@@ -1892,6 +1900,141 @@ def empty_success() -> None:
 
 def build_compaction_policy() -> str:
     return COMPACTION_POLICY_TEXT
+
+
+def uses_agents_md_injection(config: dict[str, Any] | None = None) -> bool:
+    config = config or load_config()
+    return str(config.get("injection_transport") or "hook").strip().lower() in {
+        "agents_md",
+        "agents-md",
+        "agents",
+    }
+
+
+def default_agents_md_path(cwd: str | None = None) -> Path:
+    root = Path(cwd).expanduser() if cwd else Path.home()
+    return root / "AGENTS.md"
+
+
+def configured_agents_md_path(config: dict[str, Any], cwd: str | None = None) -> Path:
+    configured = str(config.get("agents_md_path") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return default_agents_md_path(cwd)
+
+
+def build_agents_memory_payload(config: dict[str, Any] | None = None) -> str:
+    config = config or load_config()
+    parts = [build_compaction_policy()]
+    context = build_injected_context(read_history(), config)
+    if context:
+        parts.extend(["", context])
+    return "\n".join(parts).strip()
+
+
+def replace_marked_agents_block(text: str, block: str) -> str:
+    start = text.find(AGENTS_MEMORY_BEGIN)
+    end = text.find(AGENTS_MEMORY_END)
+    if start != -1 and end != -1 and start < end:
+        end += len(AGENTS_MEMORY_END)
+        text = text[:start].rstrip() + text[end:].lstrip()
+    elif start != -1:
+        text = text[:start].rstrip()
+
+    if not block.strip():
+        return text.rstrip() + ("\n" if text.strip() else "")
+
+    marked_block = f"{AGENTS_MEMORY_BEGIN}\n{block.strip()}\n{AGENTS_MEMORY_END}"
+    if text.strip():
+        return text.rstrip() + "\n\n" + marked_block + "\n"
+    return marked_block + "\n"
+
+
+def write_agents_memory_injection(agents_path: Path, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    config = config or load_config()
+    payload = build_agents_memory_payload(config)
+    agents_path = agents_path.expanduser()
+    agents_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = agents_path.read_text(encoding="utf-8") if agents_path.exists() else ""
+    updated = replace_marked_agents_block(existing, payload)
+
+    temp_path = agents_path.with_name(f".{agents_path.name}.tmp")
+    temp_path.write_text(updated, encoding="utf-8")
+    if agents_path.exists():
+        shutil.copymode(agents_path, temp_path)
+    temp_path.replace(agents_path)
+    try:
+        INJECTED_CONTEXT_FILE.write_text(payload + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+    return {
+        "path": str(agents_path),
+        "payload_chars": len(payload),
+        "payload_bytes": len(payload.encode("utf-8")),
+        "agents_bytes": len(updated.encode("utf-8")),
+    }
+
+
+def refresh_agents_memory_injection(
+    config: dict[str, Any] | None = None,
+    cwd: str | None = None,
+) -> dict[str, Any]:
+    config = config or load_config()
+    if not uses_agents_md_injection(config):
+        return {"enabled": False}
+
+    agents_path = configured_agents_md_path(config, cwd)
+    result = write_agents_memory_injection(agents_path, config)
+    configured_limit = int(config.get("agents_project_doc_max_bytes") or 524288)
+    required_limit = max(configured_limit, int(result["agents_bytes"]) + 4096)
+    result["project_doc_max_bytes"] = required_limit
+    result["config_updated"] = ensure_project_doc_max_bytes(required_limit)
+    result["enabled"] = True
+    return result
+
+
+def ensure_project_doc_max_bytes(min_bytes: int, config_path: Path | None = None) -> bool:
+    config_path = config_path or CODEX_CONFIG_FILE
+    min_bytes = max(int(min_bytes), 32768)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    if not config_path.exists():
+        config_path.write_text(f"project_doc_max_bytes = {min_bytes}\n", encoding="utf-8")
+        return True
+
+    lines = config_path.read_text(encoding="utf-8").splitlines()
+    in_top_level = True
+    first_table_index = len(lines)
+    changed = False
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_top_level = False
+            first_table_index = min(first_table_index, index)
+        if not in_top_level or stripped.startswith("#"):
+            continue
+        if re.match(r"^project_doc_max_bytes\s*=", stripped):
+            raw_value = stripped.split("=", 1)[1].strip()
+            try:
+                current_value = int(raw_value)
+            except ValueError:
+                current_value = 0
+            if current_value >= min_bytes:
+                return False
+            lines[index] = f"project_doc_max_bytes = {min_bytes}"
+            changed = True
+            break
+
+    if not changed:
+        insert_at = first_table_index
+        if insert_at > 0 and lines[insert_at - 1].strip():
+            lines.insert(insert_at, "")
+        lines.insert(insert_at, f"project_doc_max_bytes = {min_bytes}")
+        changed = True
+
+    config_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return changed
 
 
 def print_session_start_context(context: str) -> None:
