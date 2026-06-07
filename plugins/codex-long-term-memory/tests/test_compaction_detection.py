@@ -413,6 +413,88 @@ class CompactionDetectionTests(unittest.TestCase):
                 common.COMPACTION_STATE_FILE = original_state_file
                 common.SESSIONS_DIR = original_sessions_dir
 
+    def test_model_summary_prompt_preserves_generic_retrieval_anchors(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_call(instructions: str, content: list[dict[str, object]], config: dict[str, object]) -> str:
+            captured["instructions"] = instructions
+            captured["content"] = content
+            return "summary"
+
+        original_call = common.call_openai_responses
+        try:
+            common.call_openai_responses = fake_call  # type: ignore[assignment]
+            result = common.generate_model_summary(
+                [{"role": "user", "content": "Book dinner at Via Roma on June 9 and keep /tmp/menu.pdf."}],
+                "temporary",
+                "Earlier context",
+                {},
+            )
+        finally:
+            common.call_openai_responses = original_call
+
+        self.assertEqual(result, "summary")
+        instructions = str(captured["instructions"])
+        content_text = "\n\n".join(str(block.get("text", "")) for block in captured["content"])  # type: ignore[index,union-attr]
+        self.assertIn("people, places, organizations", instructions)
+        self.assertIn("prices, amounts, confirmation numbers", instructions)
+        self.assertIn("commit hashes, issue or PR numbers", instructions)
+        self.assertIn('absolute file path beginning with "/"', instructions)
+        self.assertIn("Summarize ONLY the raw conversation segment", content_text)
+        self.assertIn("Do not summarize this context", content_text)
+
+    def test_consolidated_summary_uses_shared_dense_summary_task(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_call(instructions: str, content: list[dict[str, object]], config: dict[str, object]) -> str:
+            captured["instructions"] = instructions
+            captured["content"] = content
+            return "summary"
+
+        original_call = common.call_openai_responses
+        try:
+            common.call_openai_responses = fake_call  # type: ignore[assignment]
+            result = common.generate_model_summary(
+                [{"role": "assistant", "content": "The plan changed from A to B."}],
+                "consolidated",
+                "",
+                {},
+            )
+        finally:
+            common.call_openai_responses = original_call
+
+        self.assertEqual(result, "summary")
+        content_text = "\n\n".join(str(block.get("text", "")) for block in captured["content"])  # type: ignore[index,union-attr]
+        self.assertIn("larger historical conversation span", content_text)
+        self.assertIn("Maximize useful memory per token", content_text)
+        self.assertIn("do not generalize away concrete details", content_text)
+
+    def test_meta_summary_prompt_preserves_evolution_and_daily_life_details(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_call(instructions: str, content: list[dict[str, object]], config: dict[str, object]) -> str:
+            captured["instructions"] = instructions
+            captured["content"] = content
+            return "summary"
+
+        original_call = common.call_openai_responses
+        try:
+            common.call_openai_responses = fake_call  # type: ignore[assignment]
+            result = common.generate_model_summary(
+                [{"role": "summary", "content": "The user preferred morning appointments, then changed to afternoons."}],
+                "meta",
+                "",
+                {},
+            )
+        finally:
+            common.call_openai_responses = original_call
+
+        self.assertEqual(result, "summary")
+        content_text = "\n\n".join(str(block.get("text", "")) for block in captured["content"])  # type: ignore[index,union-attr]
+        self.assertIn("preserve changes over time", content_text)
+        self.assertIn("recurring preferences", content_text)
+        self.assertIn("people, places, organizations", content_text)
+
 
 if __name__ == "__main__":
     unittest.main()
