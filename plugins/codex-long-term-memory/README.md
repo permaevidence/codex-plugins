@@ -7,8 +7,9 @@ This plugin ports the core idea of `Claude-Code-Long-Term-Memory` to Codex hooks
 - Logs every submitted user prompt
 - Logs every final assistant reply
 - Captures file attachments and assistant file/tool references when transcript data is available
-- Injects recent cross-thread history at `SessionStart`
-- Reinjects full memory once on the next user turn after detected Codex auto-compaction
+- Injects recent cross-thread history at `SessionStart` for small/legacy hook-transport setups
+- Writes large memory overlays into a marked `AGENTS.md` block for modern Codex releases that spill large hook output
+- Refreshes the marked `AGENTS.md` block from a real `PreCompact` hook before Codex compacts
 - Extracts durable user facts from earlier conversations
 - Optionally injects upcoming calendar items via `gws`
 - Compacts older history into archive-backed summaries with temporary, consolidated, and meta tiers
@@ -38,6 +39,8 @@ The installer:
 - creates `~/.codex/long-term-memory/config.json` if missing
 
 Restart Codex after installing.
+
+After installation, inspect hook trust in Codex or through `codex app-server` `hooks/list`. Codex tracks hook hashes locally; newly added hooks may need to be trusted before they run in normal sessions.
 
 ## Files
 
@@ -93,23 +96,81 @@ Put secrets in `~/.codex/long-term-memory/.env` or the process environment rathe
 OPENAI_API_KEY=sk-...
 ```
 
-`max_injection_chars` is the only cap on injected chat-history size. The plugin does not apply a separate entry-count limit.
+`max_injection_chars` is the plugin's cap on rendered chat-history size. Modern Codex releases may still cap large hook output separately, so use `agents_md` transport when you need very large memory overlays to be visible inline.
 
 ## AGENTS.md transport
 
-Recent Codex releases spill large hook `additionalContext` output to temp files instead of embedding it inline. To avoid that for Telegram-driven sessions, set:
+Recent Codex releases spill large hook `additionalContext` output to temp files instead of embedding it inline. To avoid that for large memory overlays, use `agents_md` transport.
+
+For a single-user setup where Codex normally starts from your home directory, set:
 
 ```json
 {
   "injection_transport": "agents_md",
-  "agents_md_path": "/Users/alice/AGENTS.md",
+  "agents_md_path": "~/AGENTS.md",
+  "agents_project_doc_max_bytes": 524288
+}
+```
+
+Copy-paste helper for the single-user setup:
+
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path.home() / ".codex/long-term-memory/config.json"
+config = json.loads(path.read_text())
+config.update({
+    "injection_transport": "agents_md",
+    "agents_md_path": "~/AGENTS.md",
+    "agents_project_doc_max_bytes": 524288,
+})
+path.write_text(json.dumps(config, indent=2) + "\n")
+PY
+```
+
+For a project-specific setup, use that project's `AGENTS.md` and make the Telegram bridge `default_cwd` point to the same project directory:
+
+```json
+{
+  "injection_transport": "agents_md",
+  "agents_md_path": "/absolute/path/to/project/AGENTS.md",
   "agents_project_doc_max_bytes": 524288
 }
 ```
 
 When the Telegram bridge starts, and again when `/newsession` is received, it runs `scripts/update_agents_injection.py`. That helper rewrites only the marked long-term-memory block appended to the target `AGENTS.md`, updates `~/.codex/long-term-memory/injected_context.md`, and raises top-level `project_doc_max_bytes` in `~/.codex/config.toml` high enough for Codex to embed the whole file.
 
+You can also refresh the block manually:
+
+```bash
+python3 /absolute/path/to/plugins/codex-long-term-memory/scripts/update_agents_injection.py --cwd /absolute/path/to/project
+```
+
 In this mode the `SessionStart` hook no longer emits the full memory overlay, and the old compaction reinjection path on `UserPromptSubmit` is disabled. The `PreCompact` hook refreshes the marked `AGENTS.md` block before Codex compacts so the durable file is current before messages are removed from the live context. Codex reads `AGENTS.md` at fresh session start, so use `/newsession` after changing this mode or when a current thread needs to start with the refreshed embedded history.
+
+The target `AGENTS.md` is edited only between these markers:
+
+```md
+<!-- BEGIN CODEX LONG-TERM-MEMORY INJECTION -->
+...
+<!-- END CODEX LONG-TERM-MEMORY INJECTION -->
+```
+
+Existing instructions outside the marked block are preserved.
+
+## Hook transport
+
+Hook transport is still available:
+
+```json
+{
+  "injection_transport": "hook"
+}
+```
+
+Use it only when your rendered memory is small enough for your Codex version's hook-output behavior, or when you intentionally prefer temp-file spill/retrieval behavior. On recent Codex releases, large `SessionStart` or `UserPromptSubmit` `additionalContext` values are not fully embedded inline.
 
 ## Compaction tiers
 
@@ -154,6 +215,15 @@ One limitation remains: because hooks run on user submits, reinjection happens o
 ### Upgrade check after Codex updates
 
 After updating Codex, trigger a real compaction and confirm `PreCompact` still fires with the expected `trigger` values, currently `manual` and `auto`. For legacy hook-transport setups, also confirm the rollout logs still contain an `event_msg` record whose nested payload type is exactly `context_compacted`.
+
+Also check hook trust after updates or local edits. In `hooks/list`, the expected memory hooks are:
+
+- `preCompact`
+- `sessionStart`
+- `userPromptSubmit`
+- `stop`
+
+They should be enabled and trusted on the local machine.
 
 ## Data management
 

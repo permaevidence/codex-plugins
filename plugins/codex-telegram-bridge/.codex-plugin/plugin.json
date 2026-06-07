@@ -6,8 +6,8 @@
     "name": "Perma Evidence",
     "url": "https://github.com/permaevidence"
   },
-  "homepage": "https://github.com/permaevidence/claude-telegram-plugin",
-  "repository": "https://github.com/permaevidence/claude-telegram-plugin",
+  "homepage": "https://github.com/permaevidence/codex-plugins",
+  "repository": "https://github.com/permaevidence/codex-plugins",
   "license": "MIT",
   "keywords": [
     "codex",
@@ -28,7 +28,7 @@
       "Read",
       "Write"
     ],
-    "websiteURL": "https://github.com/permaevidence/claude-telegram-plugin",
+    "websiteURL": "https://github.com/permaevidence/codex-plugins",
     "defaultPrompt": [
       "If the user is interacting through Telegram, inbound messages may arrive wrapped as <channel source=\"telegram\" ...>. If the tag includes image_path, read that local file. If it includes attachment_file_id, use the bundled download_attachment MCP tool to fetch the file before relying on it.",
       "Use the bundled telegram-actions MCP tools for progress updates, replies, attachments, message edits, and reactions when helpful."

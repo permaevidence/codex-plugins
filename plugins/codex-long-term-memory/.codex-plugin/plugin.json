@@ -1,13 +1,13 @@
 {
   "name": "codex-long-term-memory",
   "version": "0.3.0",
-  "description": "Cross-thread conversation memory for Codex using SessionStart, UserPromptSubmit, and Stop hooks with model-backed summaries and captions.",
+  "description": "Cross-thread conversation memory for Codex using hooks, AGENTS.md transport, and model-backed summaries.",
   "author": {
     "name": "Perma Evidence",
     "url": "https://github.com/permaevidence"
   },
-  "homepage": "https://github.com/permaevidence/Claude-Code-Long-Term-Memory",
-  "repository": "https://github.com/permaevidence/Claude-Code-Long-Term-Memory",
+  "homepage": "https://github.com/permaevidence/codex-plugins",
+  "repository": "https://github.com/permaevidence/codex-plugins",
   "license": "MIT",
   "keywords": [
     "codex",
@@ -19,13 +19,13 @@
   "interface": {
     "displayName": "Codex Long-Term Memory",
     "shortDescription": "Install and manage Codex hook-based conversation memory.",
-    "longDescription": "Adds Codex hooks that log prompts, replies, and file context into local history, compacts history hierarchically, refreshes summaries in the background when model calls fail, and injects cross-thread context at session start.",
+    "longDescription": "Adds Codex hooks that log prompts, replies, and file context into local history, compacts history hierarchically, refreshes summaries in the background when model calls fail, and injects cross-thread context through hooks or a marked AGENTS.md block.",
     "developerName": "Perma Evidence",
     "category": "Productivity",
     "capabilities": [
       "Read",
       "Write"
     ],
-    "websiteURL": "https://github.com/permaevidence/Claude-Code-Long-Term-Memory"
+    "websiteURL": "https://github.com/permaevidence/codex-plugins"
   }
 }

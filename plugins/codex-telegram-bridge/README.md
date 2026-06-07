@@ -72,6 +72,67 @@ bridge child process. The supervisor then relaunches the bridge automatically,
 so the next Telegram message starts a fresh Codex thread on a fresh app-server
 process.
 
+## Fresh Setup
+
+1. Create a Telegram bot with BotFather and copy the bot token.
+2. Create the state directory and `.env`:
+
+```bash
+mkdir -p ~/.codex/telegram-bridge
+cat > ~/.codex/telegram-bridge/.env <<'EOF'
+TELEGRAM_BOT_TOKEN=123456789:AA_REPLACE_ME
+# Optional, used for voice transcription:
+# OPENAI_API_KEY=sk-...
+EOF
+```
+
+3. Create `config.json`. For a safer first run, start with workspace-write permissions:
+
+```bash
+cat > ~/.codex/telegram-bridge/config.json <<'EOF'
+{
+  "default_cwd": "/absolute/path/to/your/project",
+  "model": "gpt-5.5",
+  "effort": "high",
+  "approval_policy": "never",
+  "personality": "friendly",
+  "sandbox_mode": "workspaceWrite",
+  "network_access": false,
+  "writable_roots": [
+    "/absolute/path/to/your/project"
+  ],
+  "owner_chat_id": "",
+  "enable_voice_transcription": true,
+  "send_queue_confirmation": false,
+  "enable_reminders": true,
+  "enable_email_notifications": false
+}
+EOF
+```
+
+4. Start the supervisor:
+
+```bash
+bash /absolute/path/to/plugins/codex-telegram-bridge/scripts/start_bridge.sh
+```
+
+5. Send a DM to the bot. It should reply with a pairing code.
+6. Approve that code locally:
+
+```bash
+python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py pair a1b2c3
+```
+
+7. Send a normal message from Telegram. If you use the companion memory plugin in `agents_md` mode, send `/newsession` once after setup so the bridge refreshes `AGENTS.md` and starts a fresh Codex thread from `default_cwd`.
+
+Useful checks:
+
+```bash
+tail -n 0 -f ~/.codex/telegram-bridge/bridge.log
+python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py show
+ps -eo pid,lstart,command | grep -E 'telegram_bridge.py|codex app-server'
+```
+
 ## Generated Images
 
 When a Codex turn generates new image files under `~/.codex/generated_images/<thread_id>/`, the bridge now compares the directory state at turn start versus turn completion and automatically sends any newly created images back to the Telegram chat.
@@ -146,7 +207,7 @@ After editing `AGENTS.md`, start a new Codex session so those instructions are l
 
 The bridge passes its sandbox settings straight through to `codex app-server`.
 
-Current repo default:
+Broad remote-control mode:
 
 ```json
 {
@@ -155,7 +216,7 @@ Current repo default:
 }
 ```
 
-That matches the broad remote-control setup we used on this machine.
+Use this only when you intentionally want Telegram to act as a fully privileged remote control for the local Codex machine.
 
 Safer alternative:
 
@@ -210,6 +271,13 @@ bash /absolute/path/to/plugins/codex-telegram-bridge/scripts/start_bridge.sh
 ```
 
 It writes logs to `~/.codex/telegram-bridge/bridge.log` and tracks supervisor and child PIDs under the same state directory.
+
+Stop the supervisor cleanly:
+
+```bash
+touch ~/.codex/telegram-bridge/.stop-supervisor
+kill -TERM "$(cat ~/.codex/telegram-bridge/.bridge-supervisor.pid)"
+```
 
 The bridge also persists the latest Telegram long-polling offset in
 `runtime_state.json` as `telegram_update_offset`. This prevents restarted

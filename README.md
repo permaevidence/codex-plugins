@@ -9,51 +9,88 @@ The Telegram bridge now defaults to broad remote-control mode for parity with th
 
 This repo is structured as a local Codex plugin marketplace so both plugins can be installed from one workspace.
 
-## Install
+## Fresh Install
 
-For another Codex instance, the safest assumption is:
+Requirements:
+
+- Codex CLI installed and logged in.
+- Python 3.
+- A local clone of this repository.
+- For Telegram: a Telegram bot token from BotFather.
+- Optional: `OPENAI_API_KEY` for model-backed memory summaries and Telegram voice transcription.
+- Optional: `ffmpeg` for Telegram voice notes.
+- Optional: `gws` if you want Gmail, Calendar, or Google Workspace context.
+
+Install from a clean machine:
 
 1. Clone this repo locally.
 2. Open the cloned folder in Codex.
-3. Use the local marketplace file at `.agents/plugins/marketplace.json` so Codex can see both plugins from one repo.
-4. Install:
-   - `codex-long-term-memory`
-   - `codex-telegram-bridge`
-5. Run the memory installer after install:
+3. Register the repo as a local Codex plugin marketplace:
+
+```bash
+codex plugin marketplace add /absolute/path/to/repo
+codex plugin list --available --json
+```
+
+4. Add the plugins from the marketplace:
+
+```bash
+codex plugin add codex-long-term-memory@permaevidence-local
+codex plugin add codex-telegram-bridge@permaevidence-local
+```
+
+5. Run the memory installer:
 
 ```bash
 python3 /absolute/path/to/repo/plugins/codex-long-term-memory/scripts/install.py
 ```
 
-6. Create and fill:
-   - `~/.codex/telegram-bridge/config.json`
-   - `~/.codex/telegram-bridge/access.json`
-   - optionally `~/.codex/telegram-bridge/.env`
-7. Start the Telegram bridge:
+6. For modern Codex releases, choose the memory injection transport:
+   - Use `agents_md` for large memory overlays, especially with the Telegram bridge.
+   - Use `hook` only for small overlays or older Codex versions where large hook `additionalContext` is still embedded inline.
+7. For Telegram, create `~/.codex/telegram-bridge/config.json` and `~/.codex/telegram-bridge/.env`, then start the bridge:
 
 ```bash
 bash /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/start_bridge.sh
 ```
 
+8. Send a Telegram DM to the bot. The bridge replies with a pairing code. Approve it locally:
+
+```bash
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py pair a1b2c3
+```
+
+9. Send `/newsession` from Telegram after changing Codex, hook, or `AGENTS.md` memory settings.
+
 Use the supervisor script rather than launching `telegram_bridge.py` directly. The supervisor is the supported restart path, writes pid files under `~/.codex/telegram-bridge/`, and now guards against duplicate long-pollers for the same bot token.
 
-If you want Codex on the other machine to do this itself, giving it the repo URL should be enough only if it is also told to clone the repo locally and use the checked-out `.agents/plugins/marketplace.json`. The URL alone is not a complete install contract without those steps.
+If you want Codex on the other machine to do this itself, giving it the repo URL should be enough only if it is also told to clone the repo locally, run `codex plugin marketplace add /absolute/path/to/repo`, and then add the two plugins. The URL alone is not a complete install contract without those steps.
 
 The repo intentionally ignores local runtime state under `.codex/`, so secrets, chat history, and live bridge state do not belong in git.
 
-## Quick setup
+## Minimal Config
 
-Minimum secrets/config needed after cloning:
+Long-term memory:
 
-- Long-term memory:
-  - optional `OPENAI_API_KEY` if you want model-backed summaries, captions, and fact extraction
-- Telegram bridge:
-  - Telegram bot token
-  - `owner_chat_id` if you want owner-only notifications like email/version monitor
-  - optional `OPENAI_API_KEY` for voice transcription
-  - optional `ffmpeg` for Telegram voice-note transcription
-  - optional `gws` for Gmail and calendar integrations
-  - review the Telegram README before leaving `dangerFullAccess` and `network_access = true` enabled
+- Optional `OPENAI_API_KEY` if you want model-backed summaries, captions, and fact extraction.
+- For large memory overlays on modern Codex, configure `~/.codex/long-term-memory/config.json` with:
+
+```json
+{
+  "injection_transport": "agents_md",
+  "agents_md_path": "~/AGENTS.md",
+  "agents_project_doc_max_bytes": 524288
+}
+```
+
+Telegram bridge:
+
+- Telegram bot token in `~/.codex/telegram-bridge/.env`.
+- `owner_chat_id` in `config.json` if you want owner-only notifications like email/version monitor.
+- Optional `OPENAI_API_KEY` for voice transcription.
+- Optional `ffmpeg` for Telegram voice-note transcription.
+- Optional `gws` for Gmail and calendar integrations.
+- Review the Telegram README before leaving `dangerFullAccess` and `network_access = true` enabled.
 
 ## Tell Codex What It Can Use
 
@@ -118,8 +155,9 @@ After editing `AGENTS.md`, start a new Codex session so the updated instructions
 
 - logs user prompts and assistant replies
 - captures file attachments and assistant file references from transcript data
-- injects recent history at session start
-- reinjects memory once on the next turn after detected Codex auto-compaction
+- injects recent history through hooks for small/legacy setups
+- can write large memory overlays into a marked `AGENTS.md` block for modern Codex releases that spill large hook output
+- refreshes that `AGENTS.md` block from a real `PreCompact` hook before Codex compacts
 - extracts durable user facts
 - optionally injects calendar context via `gws`
 - compacts older history into temporary, consolidated, and meta archive-backed summaries
@@ -151,8 +189,9 @@ After editing `AGENTS.md`, start a new Codex session so the updated instructions
 
 - The original Claude plugin repos were used as local reference material during the port and are intentionally ignored by git in this repo.
 - Telegram parity and memory parity are now functionally closed relative to the original Claude plugins.
-- The current post-compaction memory reinjection path is a workaround for a Codex limitation. Claude Code exposes a hook after compaction; Codex does not yet, so this repo currently detects compaction by scanning rollout logs on the next user turn. If Codex later adds a real post-compaction hook, this workaround should be replaced with the direct hook path.
-- Post-compaction memory reinjection currently depends on Codex rollout logs continuing to emit the exact JSON event `type == "event_msg"` with `payload.type == "context_compacted"`. Revalidate that contract after Codex updates.
+- Current Codex releases expose `PreCompact` and `PostCompact`. This repo uses `PreCompact` to refresh the durable `AGENTS.md` memory block before compaction.
+- Current Codex releases still spill large hook `additionalContext` output to temp files. For large memory overlays, use `agents_md` transport instead of hook transport.
+- Hook trust is local machine state. After adding or changing hook scripts, check `codex app-server` `hooks/list` or the Codex UI and trust the hook hashes you intend to run.
 
 ## References
 
