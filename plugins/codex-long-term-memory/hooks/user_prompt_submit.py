@@ -35,7 +35,7 @@ def main() -> None:
         append_history_entry("user", prompt, payload)
 
     now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
-    context_parts = [f"[Current time: {now}]"]
+    context_parts = [f"[now: {now}]"]
 
     if needs_reinjection and consume_compaction_reinjection(payload):
         context_parts.extend(["", build_compaction_policy()])
