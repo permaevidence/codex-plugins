@@ -34,13 +34,13 @@ python3 /absolute/path/to/plugins/codex-long-term-memory/scripts/install.py
 
 The installer:
 
-- enables `features.codex_hooks = true` in `~/.codex/config.toml`
+- enables `features.hooks = true` in `~/.codex/config.toml`
 - registers the plugin hooks in `~/.codex/hooks.json`
 - creates `~/.codex/long-term-memory/config.json` if missing
 
 Restart Codex after installing.
 
-After installation, inspect hook trust in Codex or through `codex app-server` `hooks/list`. Codex tracks hook hashes locally; newly added hooks may need to be trusted before they run in normal sessions.
+After installation, inspect hook trust in Codex or through the app-server `hooks/list` method. Codex tracks hook hashes locally; newly added hooks may need to be trusted before they run in normal sessions.
 
 ## Files
 
@@ -216,7 +216,7 @@ One limitation remains: because hooks run on user submits, reinjection happens o
 
 After updating Codex, trigger a real compaction and confirm `PreCompact` still fires with the expected `trigger` values, currently `manual` and `auto`. For legacy hook-transport setups, also confirm the rollout logs still contain an `event_msg` record whose nested payload type is exactly `context_compacted`.
 
-Also check hook trust after updates or local edits. In `hooks/list`, the expected memory hooks are:
+Also check hook trust after updates or local edits. In the app-server `hooks/list` result, the expected memory hooks are:
 
 - `preCompact`
 - `sessionStart`

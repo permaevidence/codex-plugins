@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 import tempfile
@@ -22,8 +23,72 @@ from lib.common import (
     scan_rollout_log_for_compaction,
 )
 
+INSTALL_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "install.py"
+INSTALL_SPEC = importlib.util.spec_from_file_location("memory_install", INSTALL_SCRIPT)
+assert INSTALL_SPEC is not None
+memory_install = importlib.util.module_from_spec(INSTALL_SPEC)
+assert INSTALL_SPEC.loader is not None
+INSTALL_SPEC.loader.exec_module(memory_install)
+
 
 class CompactionDetectionTests(unittest.TestCase):
+    def test_installer_writes_canonical_hooks_feature_for_new_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.toml"
+            original_config_toml = memory_install.CONFIG_TOML
+            try:
+                memory_install.CONFIG_TOML = path
+                memory_install.ensure_hooks_feature_enabled()
+            finally:
+                memory_install.CONFIG_TOML = original_config_toml
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "[features]\nhooks = true\n")
+
+    def test_installer_migrates_deprecated_codex_hooks_feature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.toml"
+            path.write_text('model = "gpt-5.5"\n\n[features]\ncodex_hooks = true\n', encoding="utf-8")
+            original_config_toml = memory_install.CONFIG_TOML
+            try:
+                memory_install.CONFIG_TOML = path
+                memory_install.ensure_hooks_feature_enabled()
+            finally:
+                memory_install.CONFIG_TOML = original_config_toml
+
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("[features]\nhooks = true", text)
+            self.assertNotIn("codex_hooks", text)
+
+    def test_installer_forces_existing_hooks_feature_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.toml"
+            path.write_text('model = "gpt-5.5"\n\n[features]\nhooks = false\n', encoding="utf-8")
+            original_config_toml = memory_install.CONFIG_TOML
+            try:
+                memory_install.CONFIG_TOML = path
+                memory_install.ensure_hooks_feature_enabled()
+            finally:
+                memory_install.CONFIG_TOML = original_config_toml
+
+            self.assertIn("[features]\nhooks = true", path.read_text(encoding="utf-8"))
+
+    def test_installer_updates_only_features_hooks_key(self) -> None:
+        text = (
+            "[mcp_servers.example]\n"
+            'command = "node"\n'
+            "hooks = false\n\n"
+            "[features]\n"
+            "codex_hooks = true\n\n"
+            "[profiles.default]\n"
+            'model = "gpt-5.5"\n'
+        )
+
+        updated = memory_install.set_hooks_feature_enabled(text)
+
+        self.assertIn("[mcp_servers.example]\ncommand = \"node\"\nhooks = false", updated)
+        self.assertIn("[features]\nhooks = true", updated)
+        self.assertNotIn("codex_hooks", updated)
+
     def test_replace_marked_agents_block_preserves_surrounding_text(self) -> None:
         original = (
             "# Local Capabilities\n\n"

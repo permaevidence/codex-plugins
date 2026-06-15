@@ -191,7 +191,7 @@ After editing `AGENTS.md`, start a new Codex session so the updated instructions
 - Telegram parity and memory parity are now functionally closed relative to the original Claude plugins.
 - Current Codex releases expose `PreCompact` and `PostCompact`. This repo uses `PreCompact` to refresh the durable `AGENTS.md` memory block before compaction.
 - Current Codex releases still spill large hook `additionalContext` output to temp files. For large memory overlays, use `agents_md` transport instead of hook transport.
-- Hook trust is local machine state. After adding or changing hook scripts, check `codex app-server` `hooks/list` or the Codex UI and trust the hook hashes you intend to run.
+- Hook trust is local machine state. After adding or changing hook scripts, check the app-server `hooks/list` result or the Codex UI and trust the hook hashes you intend to run.
 
 ## References
 

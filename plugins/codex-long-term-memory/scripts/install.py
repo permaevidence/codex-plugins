@@ -85,6 +85,28 @@ OUR_HOOKS = {
 }
 
 
+def set_hooks_feature_enabled(text: str) -> str:
+    features_match = re.search(r"(?m)^\[features\]\s*$", text)
+    if not features_match:
+        return text.rstrip() + "\n\n[features]\nhooks = true\n"
+
+    section_start = features_match.end()
+    next_section = re.search(r"(?m)^\[[^\]]+\]\s*$", text[section_start:])
+    section_end = section_start + next_section.start() if next_section else len(text)
+
+    prefix = text[:section_start]
+    section = text[section_start:section_end]
+    suffix = text[section_end:]
+
+    section = re.sub(r"(?m)^\s*codex_hooks\s*=.*\n?", "", section)
+    if re.search(r"(?m)^\s*hooks\s*=", section):
+        section = re.sub(r"(?m)^(\s*hooks\s*=\s*).*$", r"\1true", section, count=1)
+    else:
+        section = "\nhooks = true" + section
+
+    return (prefix + section + suffix).rstrip() + "\n"
+
+
 def load_hooks() -> dict:
     if not HOOKS_FILE.exists():
         return {"hooks": {}}
@@ -123,24 +145,11 @@ def merge_hooks() -> None:
 def ensure_hooks_feature_enabled() -> None:
     CONFIG_TOML.parent.mkdir(parents=True, exist_ok=True)
     if not CONFIG_TOML.exists():
-        CONFIG_TOML.write_text("[features]\ncodex_hooks = true\n", encoding="utf-8")
+        CONFIG_TOML.write_text("[features]\nhooks = true\n", encoding="utf-8")
         return
 
     text = CONFIG_TOML.read_text(encoding="utf-8")
-    if re.search(r"(?m)^\s*codex_hooks\s*=", text):
-        updated = re.sub(r"(?m)^(\s*codex_hooks\s*=\s*).*$", r"\1true", text, count=1)
-        CONFIG_TOML.write_text(updated, encoding="utf-8")
-        return
-
-    features_match = re.search(r"(?m)^\[features\]\s*$", text)
-    if features_match:
-        insert_at = features_match.end()
-        updated = text[:insert_at] + "\ncodex_hooks = true" + text[insert_at:]
-        CONFIG_TOML.write_text(updated.rstrip() + "\n", encoding="utf-8")
-        return
-
-    updated = text.rstrip() + "\n\n[features]\ncodex_hooks = true\n"
-    CONFIG_TOML.write_text(updated, encoding="utf-8")
+    CONFIG_TOML.write_text(set_hooks_feature_enabled(text), encoding="utf-8")
 
 
 def ensure_state_files() -> None:
