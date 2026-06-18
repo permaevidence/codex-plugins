@@ -948,13 +948,22 @@ def extract_attachment_meta(message: dict[str, Any], token: str) -> dict[str, An
 
     document = message.get("document")
     if isinstance(document, dict) and document.get("file_id"):
-        return attachment_meta(
+        meta = attachment_meta(
             kind="document",
             file_id=document.get("file_id"),
             size=document.get("file_size"),
             mime=document.get("mime_type"),
             name=document.get("file_name"),
         )
+        file_path = download_attachment_to_dir(
+            token,
+            str(document.get("file_id") or ""),
+            INBOX_DIR,
+            preferred_name=document.get("file_name"),
+        )
+        if file_path:
+            meta["file_path"] = file_path
+        return meta
 
     audio = message.get("audio")
     if isinstance(audio, dict) and audio.get("file_id"):

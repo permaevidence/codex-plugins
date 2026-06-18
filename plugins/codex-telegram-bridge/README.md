@@ -12,7 +12,7 @@ This plugin ports the Telegram control loop from `claude-telegram-plugin` to Cod
 - Supports `/help`, `/status`, `/stop`, and `/newsession`
 - Supports DM pairing, allowlists, groups, mention policies, and mention regexes
 - Transcribes voice messages with OpenAI `gpt-4o-transcribe`
-- Forwards inbound photos as downloaded local paths and other Telegram attachments as downloadable file IDs
+- Forwards inbound photos and documents as downloaded local paths, with other Telegram attachments as downloadable file IDs
 - Auto-forwards newly generated images from `~/.codex/generated_images/<thread_id>/` when a turn completes
 - Injects due reminders from `~/.codex/telegram-bridge/scheduled_reminders.json`
 - Injects unread-email summaries via `gws gmail +triage`
@@ -339,7 +339,7 @@ The plugin bundles a local MCP server from [`.mcp.json`](./.mcp.json). After ins
 - `react`
 - `download_attachment`
 
-These tools default to the currently active Telegram chat tracked by the bridge, so Codex can post progress updates during a long-running task instead of waiting only for the final turn completion. `reply` also accepts file paths for attachments, and inbound `<channel ...>` messages may include `image_path` or `attachment_file_id` metadata.
+These tools default to the currently active Telegram chat tracked by the bridge, so Codex can post progress updates during a long-running task instead of waiting only for the final turn completion. `reply` also accepts file paths for attachments, and inbound `<channel ...>` messages may include `image_path`, `file_path`, or `attachment_file_id` metadata.
 
 ## Voice Transcription
 
