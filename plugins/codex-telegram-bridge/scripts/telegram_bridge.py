@@ -50,6 +50,7 @@ REMINDER_CHECK_INTERVAL = 60
 VERSION_CHECK_INTERVAL = 5 * 60
 TRANSCRIPTION_MAX_BYTES = 25 * 1024 * 1024
 GENERATED_IMAGES_DIR = Path.home() / ".codex" / "generated_images"
+OUTBOX_DIR = Path.home() / ".codex" / "telegram-bridge" / "outbox"
 LONG_TERM_MEMORY_AGENTS_SCRIPT = (
     Path(__file__).resolve().parents[2]
     / "codex-long-term-memory"
@@ -239,6 +240,26 @@ def list_generated_images(thread_id: str) -> list[str]:
     try:
         for path in directory.iterdir():
             if path.is_file() and path.suffix.lower() in PHOTO_EXTS:
+                files.append(path)
+    except Exception:
+        return []
+    files.sort(key=lambda item: (item.stat().st_mtime, item.name))
+    return [str(path.resolve()) for path in files]
+
+
+def outbox_path_for_thread(thread_id: str) -> Path:
+    safe_thread_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(thread_id or "").strip())
+    return OUTBOX_DIR / safe_thread_id
+
+
+def list_outbox_files(thread_id: str) -> list[str]:
+    directory = outbox_path_for_thread(thread_id)
+    if not directory.exists() or not directory.is_dir():
+        return []
+    files: list[Path] = []
+    try:
+        for path in directory.iterdir():
+            if path.is_file():
                 files.append(path)
     except Exception:
         return []
@@ -468,6 +489,7 @@ class CodexAppServerClient:
         result = self.request("turn/start", self._turn_params(thread_id, text))
         turn = result["turn"]
         turn_id = turn["id"]
+        outbox_path_for_thread(thread_id).mkdir(parents=True, exist_ok=True)
         self._turns[turn_id] = {
             "chat_id": chat_id,
             "thread_id": thread_id,
@@ -476,6 +498,7 @@ class CodexAppServerClient:
             "status": turn.get("status", "inProgress"),
             "error": None,
             "generated_images_seen": set(list_generated_images(thread_id)),
+            "outbox_files_seen": set(list_outbox_files(thread_id)),
         }
         self._active_turn_by_chat[chat_id] = turn_id
         save_runtime_state(
@@ -488,6 +511,15 @@ class CodexAppServerClient:
             }
         )
         return turn_id
+
+    def active_thread_id(self, chat_id: str) -> str | None:
+        turn_id = self._active_turn_by_chat.get(chat_id)
+        if not turn_id:
+            return None
+        state = self._turns.get(turn_id)
+        if not state:
+            return None
+        return str(state.get("thread_id") or "") or None
 
     def steer_turn(self, chat_id: str, text: str) -> str | None:
         turn_id = self._active_turn_by_chat.get(chat_id)
@@ -602,7 +634,10 @@ class CodexAppServerClient:
         text = state["text"].strip()
         current_images = list_generated_images(state["thread_id"])
         prior_images = state.get("generated_images_seen") or set()
+        current_outbox_files = list_outbox_files(state["thread_id"])
+        prior_outbox_files = state.get("outbox_files_seen") or set()
         files = [path for path in current_images if path not in prior_images]
+        files.extend(path for path in current_outbox_files if path not in prior_outbox_files)
         status = turn.get("status")
         runtime_state = load_runtime_state()
         runtime_state["active_chat_id"] = chat_id
@@ -1022,7 +1057,12 @@ def attachment_meta(kind: str, file_id: Any, size: Any, mime: Any, name: Any) ->
     return meta
 
 
-def build_channel_message(message: dict[str, Any], text: str, attachment: dict[str, Any]) -> str:
+def build_channel_message(
+    message: dict[str, Any],
+    text: str,
+    attachment: dict[str, Any],
+    thread_id: str | None = None,
+) -> str:
     chat = message.get("chat") or {}
     sender = message.get("from") or {}
     attrs = {
@@ -1032,6 +1072,8 @@ def build_channel_message(message: dict[str, Any], text: str, attachment: dict[s
         "user": str(sender.get("id") or ""),
         "ts": str(message.get("date") or ""),
     }
+    if thread_id:
+        attrs["outbox_path"] = str(outbox_path_for_thread(thread_id).resolve())
     attrs.update({key: str(value) for key, value in attachment.items() if value not in (None, "")})
     attr_text = " ".join(f'{key}="{safe_attr(value)}"' for key, value in attrs.items() if value)
     body = text.strip() or "(empty message)"
@@ -1254,8 +1296,6 @@ def main() -> None:
                         )
                     continue
 
-                text = build_channel_message(message, text, attachment)
-
                 send_chat_action(str(token), chat_id, "typing")
                 if message.get("message_id") is not None and access.get("ackReaction"):
                     set_message_reaction(
@@ -1265,6 +1305,9 @@ def main() -> None:
                         str(access.get("ackReaction") or ""),
                     )
 
+                active_thread_id = codex.active_thread_id(chat_id)
+                if active_thread_id:
+                    text = build_channel_message(message, text, attachment, active_thread_id)
                 active_turn = codex.steer_turn(chat_id, text)
                 if active_turn:
                     send_message(
@@ -1278,6 +1321,8 @@ def main() -> None:
 
                 with chat_map_lock:
                     thread_id = codex.ensure_thread(chat_id, chat_map)
+                    outbox_path_for_thread(thread_id).mkdir(parents=True, exist_ok=True)
+                    text = build_channel_message(message, text, attachment, thread_id)
                     save_chat_map(chat_map)
                     save_runtime_state(
                         {

@@ -174,6 +174,7 @@ After editing `AGENTS.md`, start a new Codex session so the updated instructions
 - transcribes voice messages with OpenAI audio transcription
 - injects reminders and unread-email summaries
 - forwards inbound attachment metadata plus downloaded photo and document paths
+- auto-forwards newly created files from Telegram turn outbox directories
 - bundles Telegram MCP tools for replies, attachments, inbound file download, message edits, and reactions
 - includes a simple restart-loop supervisor script
 - can run in either safer `workspaceWrite` mode or broader `dangerFullAccess` mode depending on your remote-control needs

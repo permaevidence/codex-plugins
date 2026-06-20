@@ -14,6 +14,7 @@ This plugin ports the Telegram control loop from `claude-telegram-plugin` to Cod
 - Transcribes voice messages with OpenAI `gpt-4o-transcribe`
 - Forwards inbound photos and documents as downloaded local paths, with other Telegram attachments as downloadable file IDs
 - Auto-forwards newly generated images from `~/.codex/generated_images/<thread_id>/` when a turn completes
+- Auto-forwards newly created files from the Telegram turn's `outbox_path` when a turn completes
 - Injects due reminders from `~/.codex/telegram-bridge/scheduled_reminders.json`
 - Injects unread-email summaries via `gws gmail +triage`
 - Monitors on-disk Codex CLI version changes and notifies the owner chat
@@ -133,17 +134,19 @@ python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py show
 ps -eo pid,lstart,command | grep -E 'telegram_bridge.py|codex app-server'
 ```
 
-## Generated Images
+## Generated Images And Outbox Files
 
 When a Codex turn generates new image files under `~/.codex/generated_images/<thread_id>/`, the bridge now compares the directory state at turn start versus turn completion and automatically sends any newly created images back to the Telegram chat.
+
+For ordinary files such as PDFs, text files, spreadsheets, or archives, the bridge also exposes an `outbox_path` attribute in each inbound Telegram `<channel ...>` message. Any new files Codex creates in that directory during the turn are automatically attached to the Telegram response at turn completion.
 
 Behavior:
 
 - text-only turn: sends the text reply as before
 - image-only turn: sends the generated image without the old `Turn completed with no final assistant text.` fallback
-- text plus images: sends the text reply and the generated images in the same Telegram response flow
+- text plus files: sends the text reply and the generated images/outbox files in the same Telegram response flow
 
-The bridge only forwards images that were newly created during that specific turn, so older images from the same thread are not resent automatically.
+The bridge only forwards files that were newly created during that specific turn, so older files from the same thread are not resent automatically.
 
 ## Tell Codex About Local Capabilities
 
@@ -339,7 +342,7 @@ The plugin bundles a local MCP server from [`.mcp.json`](./.mcp.json). After ins
 - `react`
 - `download_attachment`
 
-These tools default to the currently active Telegram chat tracked by the bridge, so Codex can post progress updates during a long-running task instead of waiting only for the final turn completion. `reply` also accepts file paths for attachments, and inbound `<channel ...>` messages may include `image_path`, `file_path`, or `attachment_file_id` metadata.
+These tools default to the currently active Telegram chat tracked by the bridge, so Codex can post progress updates during a long-running task instead of waiting only for the final turn completion. `reply` also accepts file paths for attachments, and inbound `<channel ...>` messages may include `image_path`, `file_path`, `outbox_path`, or `attachment_file_id` metadata. To deliver a new file immediately, call `reply` with `files`. To deliver a new file with the final turn response, write it into `outbox_path`.
 
 ## Voice Transcription
 
