@@ -1,6 +1,6 @@
 {
   "name": "codex-telegram-bridge",
-  "version": "0.4.1",
+  "version": "0.4.0",
   "description": "Telegram bridge for Codex backed by codex app-server.",
   "author": {
     "name": "Perma Evidence",
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Codex Telegram Bridge",
     "shortDescription": "Run Codex through Telegram using the local app-server.",
-    "longDescription": "Maps Telegram chats to Codex app-server threads, supports unattended approvals, voice transcription, reminders, email injection, inbound photo/document downloads, Telegram action tools with attachment download/send support, automatic outbox file forwarding, and local access-control helpers.",
+    "longDescription": "Maps Telegram chats to Codex app-server threads, supports unattended approvals, voice transcription, reminders, email injection, inbound photo/document downloads, Telegram action tools with attachment download/send support, and local access-control helpers.",
     "developerName": "Perma Evidence",
     "category": "Integrations",
     "capabilities": [
@@ -31,7 +31,7 @@
     "websiteURL": "https://github.com/permaevidence/codex-plugins",
     "defaultPrompt": [
       "If the user is interacting through Telegram, inbound messages may arrive wrapped as <channel source=\"telegram\" ...>. If the tag includes image_path or file_path, read that local file. If it includes attachment_file_id but no local path, use the bundled download_attachment MCP tool to fetch the file before relying on it.",
-      "Use the bundled telegram-actions MCP tools for progress updates, replies, attachments, message edits, and reactions when helpful. To deliver newly created non-image files at turn completion without an explicit reply tool call, write them into the outbox_path shown in the Telegram channel tag."
+      "Use the bundled telegram-actions MCP tools for progress updates, replies, attachments, message edits, and reactions when helpful."
     ]
   }
 }
