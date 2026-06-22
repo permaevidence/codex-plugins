@@ -422,6 +422,9 @@ class CodexAppServerClient:
                         "Codex asked for interactive tool input, and the bridge could not infer safe answers.",
                     )
             return
+        if method == "mcpServer/elicitation/request":
+            self._send_json({"jsonrpc": "2.0", "id": request_id, "result": {"action": "accept"}})
+            return
         self._send_json(
             {
                 "jsonrpc": "2.0",
