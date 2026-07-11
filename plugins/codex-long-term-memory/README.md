@@ -26,10 +26,20 @@ This implementation now mirrors the Claude plugin much more closely: durable use
 
 ## Install
 
+For a first-time setup with the companion Telegram bridge, prefer the repo-level wizard:
+
+```bash
+python3 /absolute/path/to/repo/scripts/setup.py
+```
+
+The wizard installs both plugins, requires an OpenAI API key, configures `agents_md`, writes the memory and Telegram `.env` files, and optionally starts the bridge.
+
+Manual memory-only install:
+
 Run:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-long-term-memory/scripts/install.py
+python3 /absolute/path/to/repo/plugins/codex-long-term-memory/scripts/install.py
 ```
 
 The installer:
@@ -90,7 +100,7 @@ Default config:
 }
 ```
 
-When an OpenAI API key is configured, the plugin uses the Responses API with `gpt-5.4-mini` and `reasoning.effort = "high"` for model-backed summaries, file descriptions, and richer user-fact extraction by default.
+When an OpenAI API key is configured, the plugin uses the Responses API with `gpt-5.4-mini` and `reasoning.effort = "high"` for model-backed summaries, file descriptions, and richer user-fact extraction by default. The repo-level setup wizard treats this key as required because memory quality is poor without model-backed summaries.
 
 Put secrets in `~/.codex/long-term-memory/.env` or the process environment rather than `config.json`:
 
@@ -98,7 +108,7 @@ Put secrets in `~/.codex/long-term-memory/.env` or the process environment rathe
 OPENAI_API_KEY=sk-...
 ```
 
-If you also use the Telegram bridge, you may use the same OpenAI key there for voice transcription, but it must be copied separately into `~/.codex/telegram-bridge/.env`. This memory plugin reads `~/.codex/long-term-memory/.env`; it does not automatically read the Telegram bridge `.env`.
+If you also use the Telegram bridge, use the same OpenAI key there for voice transcription, but it must be copied separately into `~/.codex/telegram-bridge/.env`. This memory plugin reads `~/.codex/long-term-memory/.env`; it does not automatically read the Telegram bridge `.env`.
 
 `max_injection_chars` is the plugin's cap on rendered chat-history size. Modern Codex releases may still cap large hook output separately, so use `agents_md` transport when you need very large memory overlays to be visible inline.
 
@@ -149,7 +159,7 @@ When the Telegram bridge starts, and again when `/newsession` is received, it ru
 You can also refresh the block manually:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-long-term-memory/scripts/update_agents_injection.py --cwd /absolute/path/to/project
+python3 /absolute/path/to/repo/plugins/codex-long-term-memory/scripts/update_agents_injection.py --cwd /absolute/path/to/project
 ```
 
 In this mode the `SessionStart` hook no longer emits the full memory overlay, and the old compaction reinjection path on `UserPromptSubmit` is disabled. The `PreCompact` hook refreshes the marked `AGENTS.md` block before Codex compacts so the durable file is current before messages are removed from the live context. Codex reads `AGENTS.md` at fresh session start, so use `/newsession` after changing this mode or when a current thread needs to start with the refreshed embedded history.
@@ -234,26 +244,26 @@ They should be enabled and trusted on the local machine.
 Create a backup:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-long-term-memory/scripts/backup.py
+python3 /absolute/path/to/repo/plugins/codex-long-term-memory/scripts/backup.py
 ```
 
 Reset memory data after making a backup:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-long-term-memory/scripts/reset.py
+python3 /absolute/path/to/repo/plugins/codex-long-term-memory/scripts/reset.py
 ```
 
 List backups or restore one:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-long-term-memory/scripts/restore.py
-python3 /absolute/path/to/plugins/codex-long-term-memory/scripts/restore.py <backup_name>
+python3 /absolute/path/to/repo/plugins/codex-long-term-memory/scripts/restore.py
+python3 /absolute/path/to/repo/plugins/codex-long-term-memory/scripts/restore.py <backup_name>
 ```
 
 ## Uninstall
 
 ```bash
-python3 /absolute/path/to/plugins/codex-long-term-memory/scripts/uninstall.py
+python3 /absolute/path/to/repo/plugins/codex-long-term-memory/scripts/uninstall.py
 ```
 
 This removes only this plugin's hook entries. It does not delete your saved history.

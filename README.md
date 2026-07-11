@@ -5,7 +5,7 @@ Codex-native ports of two Claude Code workflows:
 - `codex-long-term-memory`: long-term cross-session memory built with Codex hooks
 - `codex-telegram-bridge`: Telegram control of Codex through `codex app-server`
 
-The Telegram bridge now defaults to broad remote-control mode for parity with the setup we validated locally. Read the plugin README before using it that way on another machine.
+The Telegram bridge can run in broad remote-control mode for parity with the setup we validated locally, but the setup wizard starts with a safer `workspaceWrite` option by default. Read the plugin README before using `dangerFullAccess` on another machine.
 
 This repo is structured as a local Codex plugin marketplace so both plugins can be installed from one workspace. The Telegram bridge still runs as a companion local service, but that does not replace plugin installation: install the plugin first so Codex can see its skills and MCP tools, then start the bridge service.
 
@@ -17,11 +17,50 @@ Requirements:
 - Python 3.
 - A local clone of this repository.
 - For Telegram: a Telegram bot token from BotFather.
-- Optional but recommended: `OPENAI_API_KEY` for high-quality memory summaries and Telegram voice transcription.
+- `OPENAI_API_KEY` for high-quality memory summaries and Telegram voice transcription.
 - Optional: `ffmpeg` for Telegram voice notes.
 - Optional: `gws` if you want Gmail, Calendar, or Google Workspace context.
 
-This is the intended beginner path from a clean machine. Replace `/absolute/path/to/repo` and `/absolute/path/to/your/project` with real paths.
+This is the intended beginner path from a clean machine. Replace `/absolute/path/to/repo` with the real path to your local clone.
+
+### Recommended: run the setup wizard
+
+The easiest path is the interactive terminal wizard:
+
+```bash
+python3 /absolute/path/to/repo/scripts/setup.py
+```
+
+It asks for:
+
+- the default working directory for Telegram-launched Codex sessions
+- the Telegram bot token from BotFather
+- the OpenAI API key, required for memory summaries and voice transcription
+- the Codex sandbox level for Telegram sessions
+- whether to start the bridge immediately
+
+Then it:
+
+- installs both Codex plugins from this repo marketplace
+- runs the long-term-memory hook installer
+- configures memory to use `agents_md`
+- writes `~/.codex/long-term-memory/.env`
+- writes `~/.codex/telegram-bridge/.env`
+- writes `~/.codex/telegram-bridge/config.json`
+- optionally starts the bridge
+- runs `bridge.py doctor`
+
+After the wizard finishes, send a Telegram DM to your bot. If the bot replies with a pairing code, approve it locally:
+
+```bash
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py pair a1b2c3
+```
+
+Then send `/newsession` from Telegram so Codex starts fresh with the installed plugins and refreshed `AGENTS.md` memory.
+
+### Manual setup reference
+
+If you prefer to do each step by hand, use the manual flow below. Replace `/absolute/path/to/repo` and `/absolute/path/to/your/project` with real paths.
 
 ### 1. Clone the repo and install the Codex plugins
 
@@ -71,7 +110,7 @@ Use `hook` transport only for small overlays or older Codex versions where large
 
 ### 3. Add your OpenAI API key for memory
 
-If you want model-backed memory summaries, file descriptions, and durable user-fact extraction, put your OpenAI key here:
+For the intended plugin experience, the OpenAI key is required. It powers model-backed memory summaries, file descriptions, durable user-fact extraction, and Telegram voice transcription. Put it here for memory:
 
 ```bash
 mkdir -p ~/.codex/long-term-memory
@@ -103,9 +142,7 @@ mkdir -p ~/.codex/telegram-bridge
 cat > ~/.codex/telegram-bridge/.env <<'EOF'
 TELEGRAM_BOT_TOKEN=123456789:AA_REPLACE_ME
 
-# Optional. Needed only for Telegram voice-message transcription.
-# This can be the same key you put in ~/.codex/long-term-memory/.env.
-# OPENAI_API_KEY=sk_REPLACE_ME
+OPENAI_API_KEY=sk_REPLACE_ME
 EOF
 chmod 600 ~/.codex/telegram-bridge/.env
 ```
@@ -200,13 +237,13 @@ The repo intentionally ignores local runtime state under `.codex/`, so secrets, 
 Long-term memory:
 
 - `~/.codex/long-term-memory/.env`
-- Optional but recommended `OPENAI_API_KEY` for model-backed summaries, captions, and fact extraction.
+- Required `OPENAI_API_KEY` for model-backed summaries, captions, and fact extraction.
 
 Telegram bridge:
 
 - `~/.codex/telegram-bridge/.env`
 - Required `TELEGRAM_BOT_TOKEN`.
-- Optional `OPENAI_API_KEY` for voice transcription. This can be the same key used by long-term memory, but it must be present in this file too if you want voice transcription.
+- Required `OPENAI_API_KEY` for voice transcription. This can be the same key used by long-term memory, but it must be present in this file too.
 - `~/.codex/telegram-bridge/config.json`
 - `owner_chat_id` in `config.json` if you want owner-only notifications like email/version monitor.
 - Optional `ffmpeg` for Telegram voice-note transcription.

@@ -62,7 +62,7 @@ TELEGRAM_BOT_TOKEN=123456789:AA....
 OPENAI_API_KEY=sk-...
 ```
 
-`TELEGRAM_BOT_TOKEN` is required. `OPENAI_API_KEY` is optional and is used only for Telegram voice-message transcription. If you also use the companion long-term-memory plugin, put the OpenAI key in `~/.codex/long-term-memory/.env` too; the memory plugin does not automatically read this bridge `.env` file.
+`TELEGRAM_BOT_TOKEN` is required. For the intended setup, `OPENAI_API_KEY` is also required so Telegram voice-message transcription works. If you also use the companion long-term-memory plugin, put the same OpenAI key in `~/.codex/long-term-memory/.env` too; the memory plugin does not automatically read this bridge `.env` file.
 
 You do not need to know your Telegram chat ID for basic DM use. Leave `owner_chat_id` blank for first setup, send a DM to the bot after the bridge starts, and approve the pairing code locally. The bridge records the active chat ID automatically. Set `owner_chat_id` later only if you want owner-only features such as email notifications or version-monitor notifications.
 
@@ -77,6 +77,16 @@ so the next Telegram message starts a fresh Codex thread on a fresh app-server
 process.
 
 ## Fresh Setup
+
+For a first-time setup, prefer the repo-level wizard:
+
+```bash
+python3 /absolute/path/to/repo/scripts/setup.py
+```
+
+It installs the plugin, writes this bridge config, requires the OpenAI key for voice transcription, optionally starts the bridge, and runs `bridge.py doctor`.
+
+Manual setup:
 
 1. Create a Telegram bot with BotFather and copy the bot token.
 2. Install the plugin from this repo marketplace so Codex can see the bundled skills and `telegram-actions` MCP server:
@@ -97,8 +107,7 @@ codex plugin add codex-telegram-bridge@permaevidence-local
 mkdir -p ~/.codex/telegram-bridge
 cat > ~/.codex/telegram-bridge/.env <<'EOF'
 TELEGRAM_BOT_TOKEN=123456789:AA_REPLACE_ME
-# Optional, used for voice transcription:
-# OPENAI_API_KEY=sk-...
+OPENAI_API_KEY=sk_REPLACE_ME
 EOF
 ```
 
@@ -266,18 +275,18 @@ If you want narrower blast radius, switch back to `workspaceWrite`, restrict `wr
 ## Running
 
 ```bash
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py start
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py start
 ```
 
 Use `bridge.py` as the normal local operator interface:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py start
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py stop
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py restart
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py status
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py logs -f
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py doctor
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py start
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py stop
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py restart
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py status
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py logs -f
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py doctor
 ```
 
 `bridge.py start` launches `start_bridge.sh` in the background. The underlying supervisor:
@@ -294,8 +303,8 @@ For unattended use, run the supervisor inside `tmux`, `screen`, `launchd`, or an
 If you need to run the supervisor directly under another process manager, the lower-level command is still available:
 
 ```bash
-chmod +x /absolute/path/to/plugins/codex-telegram-bridge/scripts/start_bridge.sh
-bash /absolute/path/to/plugins/codex-telegram-bridge/scripts/start_bridge.sh
+chmod +x /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/start_bridge.sh
+bash /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/start_bridge.sh
 ```
 
 It writes logs to `~/.codex/telegram-bridge/bridge.log` and tracks supervisor and child PIDs under the same state directory.
@@ -303,7 +312,7 @@ It writes logs to `~/.codex/telegram-bridge/bridge.log` and tracks supervisor an
 Stop the supervisor cleanly:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py stop
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py stop
 ```
 
 The bridge also persists the latest Telegram long-polling offset in
@@ -325,34 +334,34 @@ That shows only new log lines from the current launch instead of mixing in older
 Show current state:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py show
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py show
 ```
 
 Allow yourself directly:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py allow 123456789
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py allow 123456789
 ```
 
 Approve a pairing code:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py pair a1b2c3
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py pair a1b2c3
 ```
 
 Enable a group:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py group-add -1001234567890
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py group-add -1001234567890
 ```
 
 Configure delivery behavior:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py set ackReaction 👀
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py set replyToMode all
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py set textChunkLimit 3500
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py set chunkMode newline
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py set ackReaction 👀
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py set replyToMode all
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py set textChunkLimit 3500
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py set chunkMode newline
 ```
 
 See [ACCESS.md](./ACCESS.md) for the full access and delivery model.

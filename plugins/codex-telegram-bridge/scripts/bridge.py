@@ -31,6 +31,7 @@ ACCESS_FILE = STATE_DIR / "access.json"
 RUNTIME_STATE_FILE = STATE_DIR / "runtime_state.json"
 
 MEMORY_CONFIG_FILE = Path.home() / ".codex" / "long-term-memory" / "config.json"
+MEMORY_ENV_FILE = Path.home() / ".codex" / "long-term-memory" / ".env"
 
 
 def parse_args() -> argparse.Namespace:
@@ -290,6 +291,7 @@ def doctor() -> int:
     env_values = load_env_keys(ENV_FILE)
     checks.append(("Telegram .env", ENV_FILE.exists(), str(ENV_FILE) if ENV_FILE.exists() else "missing"))
     checks.append(("TELEGRAM_BOT_TOKEN set", "TELEGRAM_BOT_TOKEN" in env_values, "set" if "TELEGRAM_BOT_TOKEN" in env_values else "missing"))
+    checks.append(("Telegram OPENAI_API_KEY set", "OPENAI_API_KEY" in env_values, "set" if "OPENAI_API_KEY" in env_values else "missing; voice transcription will not work"))
 
     access = load_json(ACCESS_FILE)
     allow_list = access.get("allowFrom", []) if isinstance(access, dict) else []
@@ -301,6 +303,8 @@ def doctor() -> int:
 
     memory_config = load_json(MEMORY_CONFIG_FILE)
     checks.append(("long-term-memory config", bool(memory_config), str(MEMORY_CONFIG_FILE) if memory_config else "missing or invalid"))
+    memory_env_values = load_env_keys(MEMORY_ENV_FILE)
+    checks.append(("memory OPENAI_API_KEY set", "OPENAI_API_KEY" in memory_env_values, "set" if "OPENAI_API_KEY" in memory_env_values else "missing; model-backed memory will not work"))
     if memory_config:
         transport = str(memory_config.get("injection_transport") or "")
         checks.append(("memory transport configured", bool(transport), transport or "not set"))
@@ -323,6 +327,7 @@ def doctor() -> int:
     if failures:
         print("Doctor found setup items to review.")
         print("Common fixes:")
+        print(f"- First-time setup wizard: python3 {REPO_ROOT}/scripts/setup.py")
         print(f"- Install plugins: python3 {REPO_ROOT}/scripts/install_plugins.py")
         print(f"- Configure Telegram: edit {CONFIG_FILE} and {ENV_FILE}")
         print(f"- Start bridge: python3 {SCRIPT_DIR}/bridge.py start")
