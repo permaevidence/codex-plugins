@@ -22,7 +22,7 @@ This plugin ports the core idea of `Claude-Code-Long-Term-Memory` to Codex hooks
 
 Codex already has a native Memories feature, but it is separate from hook-based full-history injection. This plugin focuses on explicit cross-thread recall using hook output.
 
-This implementation now mirrors the Claude plugin much more closely: durable user facts, richer calendar injection, hierarchical summary tiers, raw archives, transcript-driven file capture, model-backed summaries, and model-backed file descriptions are all in place. If the OpenAI API is unavailable, the plugin falls back to deterministic local summaries and descriptions so memory capture still works.
+This implementation now mirrors the Claude plugin much more closely: durable user facts, richer calendar injection, hierarchical summary tiers, raw archives, transcript-driven file capture, model-backed summaries, and model-backed file descriptions are all in place. When model-backed summaries are enabled, failed or too-short model summaries leave the source material in place for retry instead of saving weak fallback memory. Deterministic summaries are used only when model-backed summaries are intentionally disabled.
 
 ## Install
 
@@ -97,6 +97,8 @@ Put secrets in `~/.codex/long-term-memory/.env` or the process environment rathe
 ```dotenv
 OPENAI_API_KEY=sk-...
 ```
+
+If you also use the Telegram bridge, you may use the same OpenAI key there for voice transcription, but it must be copied separately into `~/.codex/telegram-bridge/.env`. This memory plugin reads `~/.codex/long-term-memory/.env`; it does not automatically read the Telegram bridge `.env`.
 
 `max_injection_chars` is the plugin's cap on rendered chat-history size. Modern Codex releases may still cap large hook output separately, so use `agents_md` transport when you need very large memory overlays to be visible inline.
 

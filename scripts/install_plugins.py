@@ -75,7 +75,10 @@ def main() -> None:
             "- Run the memory installer: "
             f"python3 {root}/plugins/codex-long-term-memory/scripts/install.py"
         )
+        print("- Optional memory OpenAI key: ~/.codex/long-term-memory/.env")
     if "codex-telegram-bridge" in selected:
+        print("- Telegram bot token goes in: ~/.codex/telegram-bridge/.env")
+        print("- Basic DM setup does not require knowing your chat ID upfront; use pairing.")
         print(
             "- Configure Telegram, then run: "
             f"python3 {root}/plugins/codex-telegram-bridge/scripts/bridge.py start"

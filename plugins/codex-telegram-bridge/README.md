@@ -62,6 +62,10 @@ TELEGRAM_BOT_TOKEN=123456789:AA....
 OPENAI_API_KEY=sk-...
 ```
 
+`TELEGRAM_BOT_TOKEN` is required. `OPENAI_API_KEY` is optional and is used only for Telegram voice-message transcription. If you also use the companion long-term-memory plugin, put the OpenAI key in `~/.codex/long-term-memory/.env` too; the memory plugin does not automatically read this bridge `.env` file.
+
+You do not need to know your Telegram chat ID for basic DM use. Leave `owner_chat_id` blank for first setup, send a DM to the bot after the bridge starts, and approve the pairing code locally. The bridge records the active chat ID automatically. Set `owner_chat_id` later only if you want owner-only features such as email notifications or version-monitor notifications.
+
 If you change `config.json`, restart the bridge so the new settings take effect.
 
 `/newsession` is the remote restart path from Telegram. It clears the chat's
@@ -125,14 +129,14 @@ EOF
 5. Start the bridge:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py start
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py start
 ```
 
 6. Send a DM to the bot. It should reply with a pairing code.
 7. Approve that code locally:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py pair a1b2c3
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py pair a1b2c3
 ```
 
 8. Send a normal message from Telegram. If you use the companion memory plugin in `agents_md` mode, send `/newsession` once after setup so the bridge refreshes `AGENTS.md` and starts a fresh Codex thread from `default_cwd`.
@@ -140,10 +144,10 @@ python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py pair a
 Useful checks:
 
 ```bash
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py status
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py doctor
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py logs -f
-python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py show
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py status
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py doctor
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py logs -f
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py show
 ```
 
 ## Generated Images
