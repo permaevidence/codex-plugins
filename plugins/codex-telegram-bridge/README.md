@@ -111,7 +111,7 @@ OPENAI_API_KEY=sk_REPLACE_ME
 EOF
 ```
 
-4. Create `config.json`. For a safer first run, start with workspace-write permissions:
+4. Create `config.json`. For the intended dedicated-computer setup, give Telegram-launched Codex broad autonomous permissions:
 
 ```bash
 cat > ~/.codex/telegram-bridge/config.json <<'EOF'
@@ -121,11 +121,9 @@ cat > ~/.codex/telegram-bridge/config.json <<'EOF'
   "effort": "high",
   "approval_policy": "never",
   "personality": "friendly",
-  "sandbox_mode": "workspaceWrite",
-  "network_access": false,
-  "writable_roots": [
-    "/absolute/path/to/your/project"
-  ],
+  "sandbox_mode": "dangerFullAccess",
+  "network_access": true,
+  "writable_roots": [],
   "owner_chat_id": "",
   "enable_voice_transcription": true,
   "send_queue_confirmation": false,
@@ -242,7 +240,7 @@ Broad remote-control mode:
 }
 ```
 
-Use this only when you intentionally want Telegram to act as a fully privileged remote control for the local Codex machine.
+This is the recommended profile for a trusted, dedicated Codex computer that you intentionally want to leave unattended and control remotely through Telegram.
 
 Safer alternative:
 
@@ -258,7 +256,7 @@ Safer alternative:
 
 ## Risks
 
-Be careful with the default combination of `dangerFullAccess`, `network_access: true`, and `approval_policy: "never"`.
+Be careful with the combination of `dangerFullAccess`, `network_access: true`, and `approval_policy: "never"`.
 
 That setup means a Telegram-triggered Codex turn can:
 
@@ -268,9 +266,9 @@ That setup means a Telegram-triggered Codex turn can:
 - make outbound network requests
 - use any configured credentials reachable from the local environment
 
-Only use that mode if you trust the Telegram account(s) that can reach the bot and you are comfortable treating Telegram as a fully privileged remote control for your Codex machine.
+Only use that mode if the machine is dedicated to this workflow, you trust the Telegram account(s) that can reach the bot, and you are comfortable treating Telegram as a fully privileged remote control for your Codex machine.
 
-If you want narrower blast radius, switch back to `workspaceWrite`, restrict `writable_roots`, and disable `network_access` unless it is actually needed.
+If you are not using a dedicated machine, switch back to `workspaceWrite`, restrict `writable_roots`, and disable `network_access` unless it is actually needed.
 
 ## Running
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
+import io
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -43,6 +46,10 @@ class SetupWizardTests(unittest.TestCase):
                 "OPENAI_API_KEY=sk-test\n",
             )
             self.assertEqual(setup_wizard.read_env_value(path, "OPENAI_API_KEY"), "sk-test")
+
+    def test_recommended_sandbox_mode_is_danger_full_access(self) -> None:
+        with mock.patch.object(setup_wizard, "prompt", return_value="1"), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(setup_wizard.choose_sandbox_mode(), "dangerFullAccess")
 
 
 if __name__ == "__main__":

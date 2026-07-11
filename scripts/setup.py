@@ -65,6 +65,7 @@ def main() -> int:
     print("- configure long-term memory with AGENTS.md transport")
     print("- require one OpenAI API key for memory summaries and voice transcription")
     print("- configure the Telegram bridge using your BotFather token")
+    print("- default to broad autonomous Codex permissions for a dedicated remote-control computer")
     print("- optionally start the bridge and run the doctor check")
     print()
 
@@ -178,14 +179,14 @@ def resolve_secret(*, supplied: str | None, existing: str, label: str, required_
 
 def choose_sandbox_mode() -> str:
     print("Choose Telegram-launched Codex permissions:")
-    print("1. workspaceWrite (recommended): can edit only the chosen project directory")
-    print("2. dangerFullAccess: broad local filesystem access; only use for a trusted personal setup")
+    print("1. dangerFullAccess (recommended for a dedicated remote-control machine): broad local filesystem access")
+    print("2. workspaceWrite: can edit only the chosen project directory")
     while True:
         choice = prompt("Sandbox mode", default="1")
-        if choice in {"1", "workspaceWrite", "workspacewrite"}:
-            return "workspaceWrite"
-        if choice in {"2", "dangerFullAccess", "dangerfullaccess"}:
+        if choice in {"1", "dangerFullAccess", "dangerfullaccess"}:
             return "dangerFullAccess"
+        if choice in {"2", "workspaceWrite", "workspacewrite"}:
+            return "workspaceWrite"
         print("Choose 1 or 2.")
 
 

@@ -5,7 +5,7 @@ Codex-native ports of two Claude Code workflows:
 - `codex-long-term-memory`: long-term cross-session memory built with Codex hooks
 - `codex-telegram-bridge`: Telegram control of Codex through `codex app-server`
 
-The Telegram bridge can run in broad remote-control mode for parity with the setup we validated locally, but the setup wizard starts with a safer `workspaceWrite` option by default. Read the plugin README before using `dangerFullAccess` on another machine.
+These plugins are designed for a trusted, dedicated computer that you are comfortable leaving unattended and controlling remotely. The setup wizard therefore defaults to broad autonomous Codex permissions: `dangerFullAccess`, network access enabled, and no per-command approval prompts. Read the security notes before using that profile on any shared or sensitive machine.
 
 This repo is structured as a local Codex plugin marketplace so both plugins can be installed from one workspace. The Telegram bridge still runs as a companion local service, but that does not replace plugin installation: install the plugin first so Codex can see its skills and MCP tools, then start the bridge service.
 
@@ -36,7 +36,7 @@ It asks for:
 - the default working directory for Telegram-launched Codex sessions
 - the Telegram bot token from BotFather
 - the OpenAI API key, required for memory summaries and voice transcription
-- the Codex sandbox level for Telegram sessions
+- the Codex sandbox level for Telegram sessions, defaulting to broad autonomous access
 - whether to start the bridge immediately
 
 Then it:
@@ -147,7 +147,7 @@ EOF
 chmod 600 ~/.codex/telegram-bridge/.env
 ```
 
-Create `config.json`. For a safer first run, this example starts with workspace-write permissions:
+Create `config.json`. For the intended dedicated-computer setup, this example gives Telegram-launched Codex broad autonomous permissions:
 
 ```bash
 cat > ~/.codex/telegram-bridge/config.json <<'EOF'
@@ -157,11 +157,9 @@ cat > ~/.codex/telegram-bridge/config.json <<'EOF'
   "effort": "high",
   "approval_policy": "never",
   "personality": "friendly",
-  "sandbox_mode": "workspaceWrite",
-  "network_access": false,
-  "writable_roots": [
-    "/absolute/path/to/your/project"
-  ],
+  "sandbox_mode": "dangerFullAccess",
+  "network_access": true,
+  "writable_roots": [],
   "owner_chat_id": "",
   "enable_voice_transcription": true,
   "send_queue_confirmation": false,
@@ -248,7 +246,7 @@ Telegram bridge:
 - `owner_chat_id` in `config.json` if you want owner-only notifications like email/version monitor.
 - Optional `ffmpeg` for Telegram voice-note transcription.
 - Optional `gws` for Gmail and calendar integrations.
-- Review the Telegram README before leaving `dangerFullAccess` and `network_access = true` enabled.
+- Review the Telegram README security notes before using `dangerFullAccess` and `network_access = true` on anything other than a trusted dedicated machine.
 
 ## Tell Codex What It Can Use
 
