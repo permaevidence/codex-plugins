@@ -51,6 +51,29 @@ class SetupWizardTests(unittest.TestCase):
         with mock.patch.object(setup_wizard, "prompt", return_value="1"), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(setup_wizard.choose_sandbox_mode(), "dangerFullAccess")
 
+    def test_danger_full_access_uses_whole_mac_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp).resolve()
+            config_path = project_dir / "telegram-config.json"
+            with mock.patch.object(setup_wizard, "TELEGRAM_CONFIG", config_path), mock.patch.object(
+                setup_wizard, "TELEGRAM_ENV", project_dir / ".env"
+            ):
+                setup_wizard.configure_telegram(
+                    telegram_token="123:token",
+                    openai_key="sk-test",
+                    project_dir=project_dir,
+                    model="gpt-5.5",
+                    effort="high",
+                    sandbox_mode="dangerFullAccess",
+                    network_access=True,
+                )
+
+            config = setup_wizard.load_json(config_path)
+            self.assertEqual(config["default_cwd"], str(project_dir))
+            self.assertEqual(config["sandbox_mode"], "dangerFullAccess")
+            self.assertTrue(config["network_access"])
+            self.assertEqual(config["writable_roots"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

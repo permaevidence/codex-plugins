@@ -37,7 +37,7 @@ Example `config.json`:
 
 ```json
 {
-  "default_cwd": "/absolute/path/to/your/project",
+  "default_cwd": "/Users/your-name",
   "model": "gpt-5.5",
   "effort": "high",
   "approval_policy": "never",
@@ -65,6 +65,8 @@ OPENAI_API_KEY=sk-...
 `TELEGRAM_BOT_TOKEN` is required. For the intended setup, `OPENAI_API_KEY` is also required so Telegram voice-message transcription works. If you also use the companion long-term-memory plugin, put the same OpenAI key in `~/.codex/long-term-memory/.env` too; the memory plugin does not automatically read this bridge `.env` file.
 
 You do not need to know your Telegram chat ID for basic DM use. Leave `owner_chat_id` blank for first setup, send a DM to the bot after the bridge starts, and approve the pairing code locally. The bridge records the active chat ID automatically. Set `owner_chat_id` later only if you want owner-only features such as email notifications or version-monitor notifications.
+
+In `dangerFullAccess` mode, `default_cwd` is only the folder where Codex starts and where the companion memory plugin can place `AGENTS.md`. It does not restrict Codex to that folder.
 
 If you change `config.json`, restart the bridge so the new settings take effect.
 
@@ -116,7 +118,7 @@ EOF
 ```bash
 cat > ~/.codex/telegram-bridge/config.json <<'EOF'
 {
-  "default_cwd": "/absolute/path/to/your/project",
+  "default_cwd": "/Users/your-name",
   "model": "gpt-5.5",
   "effort": "high",
   "approval_policy": "never",
@@ -249,7 +251,7 @@ Safer alternative:
   "sandbox_mode": "workspaceWrite",
   "network_access": false,
   "writable_roots": [
-    "/absolute/path/to/your/project"
+    "/Users/your-name"
   ]
 }
 ```

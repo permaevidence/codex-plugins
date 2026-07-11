@@ -21,7 +21,45 @@ Requirements:
 - Optional: `ffmpeg` for Telegram voice notes.
 - Optional: `gws` if you want Gmail, Calendar, or Google Workspace context.
 
-This is the intended beginner path from a clean machine. Replace `/absolute/path/to/repo` with the real path to your local clone.
+This is the intended beginner path from a clean machine. In the recommended setup, Codex is allowed to control the whole Mac as your local user. The folder chosen during setup is only Codex's starting folder and the place where `AGENTS.md` memory instructions live; it is not a limit on what Codex can access.
+
+### Non-technical Mac install: exact steps
+
+1. Install Codex CLI and log in.
+2. Create an OpenAI API key and keep it ready to paste.
+3. In Telegram, open `@BotFather`, send `/newbot`, follow the prompts, and keep the bot token ready to paste.
+4. Open the Mac app called Terminal.
+5. Paste this whole block into Terminal and press Enter:
+
+```bash
+cd ~/Downloads
+curl -L https://github.com/permaevidence/codex-plugins/archive/refs/heads/main.zip -o codex-plugins.zip
+rm -rf codex-plugins-main
+unzip -q codex-plugins.zip
+cd codex-plugins-main
+python3 scripts/setup.py
+```
+
+6. When the setup asks for the Codex starting folder, press Enter to use your home folder. This does **not** limit Codex to that folder in the recommended autonomous mode.
+7. Paste the Telegram bot token when asked.
+8. Paste the OpenAI API key when asked.
+9. When asked about permissions, choose the recommended `dangerFullAccess` option or just press Enter.
+10. When asked about network access, press Enter.
+11. When asked whether to start the bridge, press Enter.
+12. Message your new Telegram bot.
+13. If the bot replies with a pairing code, copy the code and run this in the same Terminal window:
+
+```bash
+python3 plugins/codex-telegram-bridge/scripts/access.py pair PASTE_CODE_HERE
+```
+
+14. In Telegram, send:
+
+```text
+/newsession
+```
+
+After that, you can talk to Codex from Telegram. This setup is intended for a dedicated Mac you trust Codex to control remotely.
 
 ### Recommended: run the setup wizard
 
@@ -33,7 +71,7 @@ python3 /absolute/path/to/repo/scripts/setup.py
 
 It asks for:
 
-- the default working directory for Telegram-launched Codex sessions
+- the starting folder for Telegram-launched Codex sessions; this is not a permission boundary in autonomous mode
 - the Telegram bot token from BotFather
 - the OpenAI API key, required for memory summaries and voice transcription
 - the Codex sandbox level for Telegram sessions, defaulting to broad autonomous access
@@ -60,7 +98,7 @@ Then send `/newsession` from Telegram so Codex starts fresh with the installed p
 
 ### Manual setup reference
 
-If you prefer to do each step by hand, use the manual flow below. Replace `/absolute/path/to/repo` and `/absolute/path/to/your/project` with real paths.
+If you prefer to do each step by hand, use the manual flow below. Replace `/absolute/path/to/repo` with the real path to the repo. Replace `/Users/your-name` with your Mac home folder.
 
 ### 1. Clone the repo and install the Codex plugins
 
@@ -152,7 +190,7 @@ Create `config.json`. For the intended dedicated-computer setup, this example gi
 ```bash
 cat > ~/.codex/telegram-bridge/config.json <<'EOF'
 {
-  "default_cwd": "/absolute/path/to/your/project",
+  "default_cwd": "/Users/your-name",
   "model": "gpt-5.5",
   "effort": "high",
   "approval_policy": "never",
@@ -172,6 +210,8 @@ EOF
 You do **not** need to know your Telegram chat ID for basic DM use. Leave `owner_chat_id` blank, start the bridge, send the bot a DM, and approve the pairing code. The bridge will learn the active chat ID automatically.
 
 Set `owner_chat_id` later only if you want owner-only features such as email notifications or version-monitor notifications.
+
+In `dangerFullAccess` mode, `default_cwd` is only Codex's starting folder. It does not restrict Codex to that folder.
 
 ### 6. Start the Telegram bridge
 

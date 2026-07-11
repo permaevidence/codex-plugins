@@ -33,7 +33,13 @@ def parse_args() -> argparse.Namespace:
             "bridge Codex plugins."
         )
     )
-    parser.add_argument("--project-dir", help="Default working directory for Telegram-launched Codex sessions.")
+    parser.add_argument(
+        "--project-dir",
+        help=(
+            "Starting folder for Telegram-launched Codex sessions and AGENTS.md memory. "
+            "In dangerFullAccess mode this is not a permission boundary."
+        ),
+    )
     parser.add_argument("--telegram-token", help="Telegram bot token from BotFather.")
     parser.add_argument("--openai-api-key", help="OpenAI API key. Required for setup.")
     parser.add_argument("--model", default="gpt-5.5", help="Codex model for Telegram sessions.")
@@ -66,6 +72,7 @@ def main() -> int:
     print("- require one OpenAI API key for memory summaries and voice transcription")
     print("- configure the Telegram bridge using your BotFather token")
     print("- default to broad autonomous Codex permissions for a dedicated remote-control computer")
+    print("- use your home folder as Codex's starting point unless you choose another folder")
     print("- optionally start the bridge and run the doctor check")
     print()
 
@@ -100,7 +107,8 @@ def main() -> int:
     print()
     print("Setup summary")
     print(f"- repo: {REPO_ROOT}")
-    print(f"- Telegram/Codex working directory: {project_dir}")
+    print(f"- Telegram/Codex starting folder: {project_dir}")
+    print("- access scope: whole Mac as your local user when dangerFullAccess is selected")
     print(f"- AGENTS.md memory target: {agents_md_path}")
     print(f"- Telegram token: {'set' if telegram_token else 'missing'}")
     print(f"- OpenAI API key: {'set' if openai_key else 'missing'}")
@@ -155,7 +163,10 @@ def require_codex() -> None:
 def resolve_project_dir(value: str | None) -> Path:
     default = str(Path.home())
     while True:
-        raw = value or prompt("Codex working directory for Telegram sessions", default=default)
+        raw = value or prompt(
+            "Codex starting folder (press Enter for your home folder; not a permission limit in autonomous mode)",
+            default=default,
+        )
         path = Path(raw).expanduser().resolve()
         if path.is_dir():
             return path
@@ -180,7 +191,7 @@ def resolve_secret(*, supplied: str | None, existing: str, label: str, required_
 def choose_sandbox_mode() -> str:
     print("Choose Telegram-launched Codex permissions:")
     print("1. dangerFullAccess (recommended for a dedicated remote-control machine): broad local filesystem access")
-    print("2. workspaceWrite: can edit only the chosen project directory")
+    print("2. workspaceWrite: narrower mode; can edit only the chosen starting folder")
     while True:
         choice = prompt("Sandbox mode", default="1")
         if choice in {"1", "dangerFullAccess", "dangerfullaccess"}:
