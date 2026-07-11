@@ -1,6 +1,6 @@
 {
   "name": "codex-long-term-memory",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Cross-thread conversation memory for Codex using hooks, AGENTS.md transport, and model-backed summaries.",
   "author": {
     "name": "Perma Evidence",
@@ -26,6 +26,11 @@
       "Read",
       "Write"
     ],
-    "websiteURL": "https://github.com/permaevidence/codex-plugins"
+    "websiteURL": "https://github.com/permaevidence/codex-plugins",
+    "defaultPrompt": [
+      "Install Codex long-term memory hooks.",
+      "Check my memory plugin status.",
+      "Refresh the AGENTS.md memory block."
+    ]
   }
 }

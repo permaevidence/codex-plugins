@@ -75,7 +75,19 @@ process.
 ## Fresh Setup
 
 1. Create a Telegram bot with BotFather and copy the bot token.
-2. Create the state directory and `.env`:
+2. Install the plugin from this repo marketplace so Codex can see the bundled skills and `telegram-actions` MCP server:
+
+```bash
+python3 /absolute/path/to/repo/scripts/install_plugins.py --only codex-telegram-bridge
+```
+
+If you already registered the marketplace manually, the equivalent install command is:
+
+```bash
+codex plugin add codex-telegram-bridge@permaevidence-local
+```
+
+3. Create the state directory and `.env`:
 
 ```bash
 mkdir -p ~/.codex/telegram-bridge
@@ -86,7 +98,7 @@ TELEGRAM_BOT_TOKEN=123456789:AA_REPLACE_ME
 EOF
 ```
 
-3. Create `config.json`. For a safer first run, start with workspace-write permissions:
+4. Create `config.json`. For a safer first run, start with workspace-write permissions:
 
 ```bash
 cat > ~/.codex/telegram-bridge/config.json <<'EOF'
@@ -110,27 +122,28 @@ cat > ~/.codex/telegram-bridge/config.json <<'EOF'
 EOF
 ```
 
-4. Start the supervisor:
+5. Start the bridge:
 
 ```bash
-bash /absolute/path/to/plugins/codex-telegram-bridge/scripts/start_bridge.sh
+python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py start
 ```
 
-5. Send a DM to the bot. It should reply with a pairing code.
-6. Approve that code locally:
+6. Send a DM to the bot. It should reply with a pairing code.
+7. Approve that code locally:
 
 ```bash
 python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py pair a1b2c3
 ```
 
-7. Send a normal message from Telegram. If you use the companion memory plugin in `agents_md` mode, send `/newsession` once after setup so the bridge refreshes `AGENTS.md` and starts a fresh Codex thread from `default_cwd`.
+8. Send a normal message from Telegram. If you use the companion memory plugin in `agents_md` mode, send `/newsession` once after setup so the bridge refreshes `AGENTS.md` and starts a fresh Codex thread from `default_cwd`.
 
 Useful checks:
 
 ```bash
-tail -n 0 -f ~/.codex/telegram-bridge/bridge.log
+python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py status
+python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py doctor
+python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py logs -f
 python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/access.py show
-ps -eo pid,lstart,command | grep -E 'telegram_bridge.py|codex app-server'
 ```
 
 ## Generated Images
@@ -249,10 +262,21 @@ If you want narrower blast radius, switch back to `workspaceWrite`, restrict `wr
 ## Running
 
 ```bash
-bash /absolute/path/to/plugins/codex-telegram-bridge/scripts/start_bridge.sh
+python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py start
 ```
 
-Use `start_bridge.sh` as the normal launch and restart path. It is a singleton supervisor:
+Use `bridge.py` as the normal local operator interface:
+
+```bash
+python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py start
+python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py stop
+python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py restart
+python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py status
+python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py logs -f
+python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py doctor
+```
+
+`bridge.py start` launches `start_bridge.sh` in the background. The underlying supervisor:
 
 - it writes `.bridge-supervisor.pid` and `.bridge-child.pid` under `~/.codex/telegram-bridge/`
 - it cleans stale pid files on startup
@@ -263,7 +287,7 @@ Avoid launching `telegram_bridge.py` directly for normal use. Running the raw Py
 
 For unattended use, run the supervisor inside `tmux`, `screen`, `launchd`, or another process manager.
 
-This repo also includes a simple restart loop:
+If you need to run the supervisor directly under another process manager, the lower-level command is still available:
 
 ```bash
 chmod +x /absolute/path/to/plugins/codex-telegram-bridge/scripts/start_bridge.sh
@@ -275,8 +299,7 @@ It writes logs to `~/.codex/telegram-bridge/bridge.log` and tracks supervisor an
 Stop the supervisor cleanly:
 
 ```bash
-touch ~/.codex/telegram-bridge/.stop-supervisor
-kill -TERM "$(cat ~/.codex/telegram-bridge/.bridge-supervisor.pid)"
+python3 /absolute/path/to/plugins/codex-telegram-bridge/scripts/bridge.py stop
 ```
 
 The bridge also persists the latest Telegram long-polling offset in

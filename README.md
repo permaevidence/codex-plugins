@@ -7,7 +7,7 @@ Codex-native ports of two Claude Code workflows:
 
 The Telegram bridge now defaults to broad remote-control mode for parity with the setup we validated locally. Read the plugin README before using it that way on another machine.
 
-This repo is structured as a local Codex plugin marketplace so both plugins can be installed from one workspace.
+This repo is structured as a local Codex plugin marketplace so both plugins can be installed from one workspace. The Telegram bridge still runs as a companion local service, but that does not replace plugin installation: install the plugin first so Codex can see its skills and MCP tools, then start the bridge service.
 
 ## Fresh Install
 
@@ -25,46 +25,55 @@ Install from a clean machine:
 
 1. Clone this repo locally.
 2. Open the cloned folder in Codex.
-3. Register the repo as a local Codex plugin marketplace:
+3. Register the repo as a local Codex plugin marketplace and install the bundled plugins:
+
+```bash
+python3 /absolute/path/to/repo/scripts/install_plugins.py
+```
+
+This helper runs the equivalent of:
 
 ```bash
 codex plugin marketplace add /absolute/path/to/repo
-codex plugin list --available --json
-```
-
-4. Add the plugins from the marketplace:
-
-```bash
 codex plugin add codex-long-term-memory@permaevidence-local
 codex plugin add codex-telegram-bridge@permaevidence-local
 ```
 
-5. Run the memory installer:
+4. Run the memory installer:
 
 ```bash
 python3 /absolute/path/to/repo/plugins/codex-long-term-memory/scripts/install.py
 ```
 
-6. For modern Codex releases, choose the memory injection transport:
+5. For modern Codex releases, choose the memory injection transport:
    - Use `agents_md` for large memory overlays, especially with the Telegram bridge.
    - Use `hook` only for small overlays or older Codex versions where large hook `additionalContext` is still embedded inline.
-7. For Telegram, create `~/.codex/telegram-bridge/config.json` and `~/.codex/telegram-bridge/.env`, then start the bridge:
+6. For Telegram, create `~/.codex/telegram-bridge/config.json` and `~/.codex/telegram-bridge/.env`, then start the bridge:
 
 ```bash
-bash /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/start_bridge.sh
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py start
 ```
 
-8. Send a Telegram DM to the bot. The bridge replies with a pairing code. Approve it locally:
+Useful bridge commands:
+
+```bash
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py status
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py doctor
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py logs -f
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py stop
+```
+
+7. Send a Telegram DM to the bot. The bridge replies with a pairing code. Approve it locally:
 
 ```bash
 python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py pair a1b2c3
 ```
 
-9. Send `/newsession` from Telegram after changing Codex, hook, or `AGENTS.md` memory settings.
+8. Send `/newsession` from Telegram after changing Codex, hook, plugin, MCP, or `AGENTS.md` memory settings.
 
-Use the supervisor script rather than launching `telegram_bridge.py` directly. The supervisor is the supported restart path, writes pid files under `~/.codex/telegram-bridge/`, and now guards against duplicate long-pollers for the same bot token.
+Use `bridge.py start`/`stop`/`restart` rather than launching `telegram_bridge.py` directly. The wrapper controls the singleton supervisor, writes pid files under `~/.codex/telegram-bridge/`, and guards against duplicate long-pollers for the same bot token.
 
-If you want Codex on the other machine to do this itself, giving it the repo URL should be enough only if it is also told to clone the repo locally, run `codex plugin marketplace add /absolute/path/to/repo`, and then add the two plugins. The URL alone is not a complete install contract without those steps.
+If you want Codex on the other machine to do this itself, giving it the repo URL should be enough only if it is also told to clone the repo locally and run `python3 scripts/install_plugins.py`. The URL alone is not a complete install contract without those steps.
 
 The repo intentionally ignores local runtime state under `.codex/`, so secrets, chat history, and live bridge state do not belong in git.
 
@@ -176,6 +185,7 @@ After editing `AGENTS.md`, start a new Codex session so the updated instructions
 - forwards inbound attachment metadata plus downloaded photo and document paths
 - bundles Telegram MCP tools for replies, attachments, inbound file download, message edits, and reactions
 - includes a simple restart-loop supervisor script
+- includes a small `bridge.py` operator CLI for `start`, `stop`, `restart`, `status`, `logs`, and `doctor`
 - can run in either safer `workspaceWrite` mode or broader `dangerFullAccess` mode depending on your remote-control needs
 
 ## Repo layout
