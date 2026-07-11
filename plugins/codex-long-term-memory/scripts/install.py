@@ -37,6 +37,8 @@ DEFAULT_STATE_CONFIG = {
     "openai_model": "gpt-5.4-mini",
     "openai_reasoning_effort": "high",
     "openai_timeout_seconds": 240,
+    "minimum_model_summary_words": 100,
+    "summary_max_chars": 10000,
     "pending_retry_enabled": True,
     "pending_retry_base_seconds": 30,
     "pending_retry_max_seconds": 480,

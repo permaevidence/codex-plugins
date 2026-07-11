@@ -110,6 +110,8 @@ DEFAULT_CONFIG = {
     "openai_model": "gpt-5.4-mini",
     "openai_reasoning_effort": "high",
     "openai_timeout_seconds": 240,
+    "minimum_model_summary_words": 100,
+    "summary_max_chars": 10000,
     "pending_retry_enabled": True,
     "pending_retry_base_seconds": 30,
     "pending_retry_max_seconds": 480,
@@ -795,6 +797,8 @@ def maybe_compact_history(config: dict[str, Any] | None = None) -> None:
                 "covers_to": chunk_entries[-1].get("timestamp", "?"),
             },
         )
+        if summary_text is None:
+            break
         archive_name = archive_temp_chunk(chunk_entries, summary_text)
         temp_entry = {
             "role": "summary",
@@ -836,6 +840,8 @@ def maybe_compact_history(config: dict[str, Any] | None = None) -> None:
                     "covers_to": to_consolidate[-1].get("covers_to", ""),
                 },
             )
+            if cons_summary is None:
+                break
             cons_archive = archive_consolidated_chunk(raw_entries, to_consolidate, cons_summary)
             cons_entry = {
                 "role": "summary",
@@ -867,6 +873,8 @@ def maybe_compact_history(config: dict[str, Any] | None = None) -> None:
                     "covers_to": to_consolidate[-1].get("covers_to", ""),
                 },
             )
+            if cons_summary is None:
+                break
             cons_entry = {
                 "role": "summary",
                 "summary_type": "consolidated",
@@ -883,8 +891,7 @@ def maybe_compact_history(config: dict[str, Any] | None = None) -> None:
         temporary = remaining_temp
 
     if len(consolidated) > max_visible_consolidated + 1:
-        to_keep = consolidated[:max_visible_consolidated]
-        overflow = consolidated[max_visible_consolidated:]
+        to_keep, overflow = split_consolidated_for_meta(consolidated, max_visible_consolidated)
         existing_meta = meta_temp[-1] if meta_temp else None
         source_archives: list[str] = []
         covers_from = overflow[0].get("covers_from", "") if overflow else ""
@@ -909,6 +916,9 @@ def maybe_compact_history(config: dict[str, Any] | None = None) -> None:
                 "covers_to": covers_to,
             },
         )
+        if summary_content is None:
+            rewrite_history(meta_perm + consolidated + meta_temp + temporary + conversation)
+            return
 
         new_meta = {
             "role": "summary",
@@ -983,6 +993,16 @@ def select_conversation_chunk(
     return chunk_entries, remaining
 
 
+def split_consolidated_for_meta(
+    consolidated: list[dict[str, Any]], max_visible_consolidated: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return (recent_visible, historical_overflow)."""
+    if max_visible_consolidated <= 0:
+        return [], consolidated
+    keep_count = min(max_visible_consolidated, len(consolidated))
+    return consolidated[-keep_count:], consolidated[:-keep_count]
+
+
 def archive_temp_chunk(entries: list[dict[str, Any]], summary: str) -> str:
     ensure_state_dir()
     first_ts = safe_date_stamp(entries[0].get("timestamp", "unknown"))
@@ -1055,17 +1075,16 @@ def summarize_entries(
     config: dict[str, Any] | None = None,
     context_entries: list[dict[str, Any]] | None = None,
     pending_meta: dict[str, Any] | None = None,
-) -> tuple[str, str | None]:
+) -> tuple[str | None, str | None]:
     config = config or load_config()
     context_text = format_entries_for_model(context_entries or [], max_chars=MODEL_CONTEXT_MAX_CHARS)
-    if config.get("enable_model_summaries") and openai_settings(config):
-        summary_text = generate_model_summary(entries, label, context_text, config)
-        if summary_text:
-            return summary_text, None
-        pending_id = None
-        if pending_meta and config.get("pending_retry_enabled", True):
-            pending_id = queue_pending_summary(entries, label, context_entries or [], pending_meta, config)
-        return summarize_entries_deterministic(entries, label), pending_id
+    if config.get("enable_model_summaries"):
+        if openai_settings(config):
+            summary_text = generate_model_summary(entries, label, context_text, config)
+            validated = validate_generated_summary(summary_text, entries, config)
+            if validated:
+                return validated, None
+        return None, None
     return summarize_entries_deterministic(entries, label), None
 
 
@@ -1075,18 +1094,46 @@ def summarize_summary_entries(
     config: dict[str, Any] | None = None,
     context_entries: list[dict[str, Any]] | None = None,
     pending_meta: dict[str, Any] | None = None,
-) -> tuple[str, str | None]:
+) -> tuple[str | None, str | None]:
     config = config or load_config()
     context_text = format_entries_for_model(context_entries or [], max_chars=MODEL_CONTEXT_MAX_CHARS)
-    if config.get("enable_model_summaries") and openai_settings(config):
-        summary_text = generate_model_summary(entries, label, context_text, config)
-        if summary_text:
-            return summary_text, None
-        pending_id = None
-        if pending_meta and config.get("pending_retry_enabled", True):
-            pending_id = queue_pending_summary(entries, label, context_entries or [], pending_meta, config)
-        return summarize_summary_entries_deterministic(entries, label), pending_id
+    if config.get("enable_model_summaries"):
+        if openai_settings(config):
+            summary_text = generate_model_summary(entries, label, context_text, config)
+            validated = validate_generated_summary(summary_text, entries, config)
+            if validated:
+                return validated, None
+        return None, None
     return summarize_summary_entries_deterministic(entries, label), None
+
+
+def validate_generated_summary(
+    summary_text: str | None,
+    source_entries: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> str | None:
+    if not summary_text:
+        return None
+
+    stripped = summary_text.strip()
+    if not stripped:
+        return None
+
+    max_chars = int(config.get("summary_max_chars", DEFAULT_CONFIG["summary_max_chars"]))
+    clipped = stripped[:max_chars].rstrip()
+    source_text = format_entries_for_model(source_entries, max_chars=MODEL_INPUT_MAX_CHARS)
+    source_words = len(re.findall(r"\S+", source_text))
+    summary_words = len(re.findall(r"\S+", clipped))
+
+    if source_words >= 80:
+        configured_minimum = int(
+            config.get("minimum_model_summary_words", DEFAULT_CONFIG["minimum_model_summary_words"])
+        )
+        required_words = min(configured_minimum, max(20, source_words // 8))
+        if summary_words < required_words:
+            return None
+
+    return clipped
 
 
 def summarize_entries_deterministic(entries: list[dict[str, Any]], label: str = "temporary") -> str:

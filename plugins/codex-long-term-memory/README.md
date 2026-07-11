@@ -79,6 +79,8 @@ Default config:
   "openai_model": "gpt-5.4-mini",
   "openai_reasoning_effort": "high",
   "openai_timeout_seconds": 240,
+  "minimum_model_summary_words": 100,
+  "summary_max_chars": 10000,
   "pending_retry_enabled": true,
   "pending_retry_base_seconds": 30,
   "pending_retry_max_seconds": 480,
@@ -177,9 +179,9 @@ Use it only when your rendered memory is small enough for your Codex version's h
 - Raw history: newest messages and file entries remain verbatim.
 - Temporary summaries: oldest raw chunks are archived into `temp_*` files and replaced with compact summaries.
 - Consolidated summaries: older temporary chunks are merged into `cons_*` archive files and re-expressed as one summary.
-- Meta summaries: overflow consolidated summaries are folded into meta summaries with source-archive references.
+- Meta summaries: older overflow consolidated summaries are folded into meta summaries with source-archive references, while the most recent consolidated summaries stay visible individually.
 
-When model-backed summarization is enabled, compaction tries the API first and falls back to a deterministic placeholder summary if the API fails. That placeholder is then refreshed by a background retry worker when the API becomes available again.
+When model-backed summarization is enabled, compaction requires a non-empty, substantive model summary. If the API is unavailable or returns an output that is too short, the source material is left in place and compaction retries on a later stop/start cycle. Deterministic fallback summaries are used only when model-backed summaries are intentionally disabled.
 
 ## Codex compaction hooks
 

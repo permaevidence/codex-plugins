@@ -560,6 +560,71 @@ class CompactionDetectionTests(unittest.TestCase):
         self.assertIn("recurring preferences", content_text)
         self.assertIn("people, places, organizations", content_text)
 
+    def test_meta_rollover_keeps_recent_consolidated_summaries_visible(self) -> None:
+        consolidated = [
+            {"summary_type": "consolidated", "content": f"summary {index}", "covers_from": str(index)}
+            for index in range(7)
+        ]
+
+        to_keep, overflow = common.split_consolidated_for_meta(consolidated, 5)
+
+        self.assertEqual([entry["covers_from"] for entry in overflow], ["0", "1"])
+        self.assertEqual([entry["covers_from"] for entry in to_keep], ["2", "3", "4", "5", "6"])
+
+    def test_model_summary_failure_does_not_create_deterministic_fallback(self) -> None:
+        def fake_call(instructions: str, content: list[dict[str, object]], config: dict[str, object]) -> str | None:
+            return None
+
+        original_call = common.call_openai_responses
+        try:
+            common.call_openai_responses = fake_call  # type: ignore[assignment]
+            summary, pending_id = common.summarize_entries(
+                [{"role": "user", "content": "Important project detail. " * 200}],
+                "temporary",
+                {
+                    "enable_model_summaries": True,
+                    "openai_api_key": "test-key",
+                    "minimum_model_summary_words": 100,
+                },
+            )
+        finally:
+            common.call_openai_responses = original_call
+
+        self.assertIsNone(summary)
+        self.assertIsNone(pending_id)
+
+    def test_model_summary_too_short_is_rejected(self) -> None:
+        def fake_call(instructions: str, content: list[dict[str, object]], config: dict[str, object]) -> str:
+            return "Too short."
+
+        original_call = common.call_openai_responses
+        try:
+            common.call_openai_responses = fake_call  # type: ignore[assignment]
+            summary, _ = common.summarize_entries(
+                [{"role": "user", "content": "Important project detail. " * 200}],
+                "temporary",
+                {
+                    "enable_model_summaries": True,
+                    "openai_api_key": "test-key",
+                    "minimum_model_summary_words": 100,
+                },
+            )
+        finally:
+            common.call_openai_responses = original_call
+
+        self.assertIsNone(summary)
+
+    def test_deterministic_summary_still_used_when_model_summaries_disabled(self) -> None:
+        summary, pending_id = common.summarize_entries(
+            [{"role": "user", "content": "Use deterministic summaries when models are disabled."}],
+            "temporary",
+            {"enable_model_summaries": False},
+        )
+
+        self.assertIsNotNone(summary)
+        self.assertIn("Temporary summary over 1 archived entries", summary or "")
+        self.assertIsNone(pending_id)
+
     def test_user_context_extraction_prompt_includes_budget_and_durable_work_context(self) -> None:
         captured: dict[str, object] = {}
 
