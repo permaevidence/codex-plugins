@@ -24,6 +24,7 @@ from lib.telegram_api import (
     fetch_telegram_file,
     send_chat_action,
     send_message,
+    set_bot_commands,
     set_message_reaction,
     telegram_request,
 )
@@ -56,6 +57,14 @@ LONG_TERM_MEMORY_AGENTS_SCRIPT = (
     / "scripts"
     / "update_agents_injection.py"
 )
+
+BOT_COMMANDS = [
+    {"command": "start", "description": "Show the welcome/help message"},
+    {"command": "help", "description": "Show available commands"},
+    {"command": "status", "description": "Show current Codex status"},
+    {"command": "stop", "description": "Interrupt the active Codex turn"},
+    {"command": "newsession", "description": "Restart Codex and start a fresh thread"},
+]
 
 
 def normalize_command(text: str, bot_username: str) -> str:
@@ -1079,14 +1088,20 @@ def build_auto_user_input_answers(params: dict[str, Any]) -> dict[str, str]:
 
 
 def help_text() -> str:
+    command_lines = "\n".join(f"/{item['command']} - {item['description']}" for item in BOT_COMMANDS)
     return (
-        "Available commands:\n"
-        "/help - show this message\n"
-        "/status - show current Codex status\n"
-        "/stop - interrupt the active turn\n"
-        "/newsession - restart the bridge/app-server; next message starts a fresh Codex thread\n\n"
+        f"Available commands:\n{command_lines}\n\n"
         "Text, voice, photos, and file metadata are forwarded to Codex."
     )
+
+
+def configure_bot_command_menu(token: str) -> bool:
+    try:
+        set_bot_commands(token, BOT_COMMANDS)
+        return True
+    except Exception as exc:
+        print(f"telegram command menu setup failed: {exc}", file=sys.stderr)
+        return False
 
 
 def main() -> None:
@@ -1098,6 +1113,7 @@ def main() -> None:
         )
 
     bot_username = get_bot_username(str(token))
+    configure_bot_command_menu(str(token))
     chat_map = load_chat_map()
     chat_map_lock = threading.Lock()
     # Resume from the last seen Telegram update to avoid re-processing

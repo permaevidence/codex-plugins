@@ -385,6 +385,7 @@ After editing `AGENTS.md`, start a new Codex session so the updated instructions
 
 - maps Telegram chats to persistent Codex threads
 - supports `/help`, `/status`, `/stop`, and `/newsession`
+- registers Telegram's native bot command menu for those commands
 - supports DM pairing, allowlists, groups, and mention rules
 - auto-approves unattended Codex approval requests
 - transcribes voice messages with OpenAI audio transcription

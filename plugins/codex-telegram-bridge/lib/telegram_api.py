@@ -36,6 +36,16 @@ def send_chat_action(token: str, chat_id: str, action: str = "typing") -> None:
         return
 
 
+def set_bot_commands(token: str, commands: list[dict[str, str]]) -> dict[str, Any]:
+    return telegram_request(
+        token,
+        "setMyCommands",
+        {
+            "commands": json.dumps(commands),
+        },
+    )
+
+
 def set_message_reaction(token: str, chat_id: str, message_id: int, emoji: str) -> None:
     if not emoji:
         return

@@ -10,6 +10,7 @@ This plugin ports the Telegram control loop from `claude-telegram-plugin` to Cod
 - Auto-approves command, file-change, and permission approval requests
 - Auto-answers structured `item/tool/requestUserInput` prompts with default options when possible
 - Supports `/help`, `/status`, `/stop`, and `/newsession`
+- Registers Telegram's native bot command menu for `/start`, `/help`, `/status`, `/stop`, and `/newsession`
 - Supports DM pairing, allowlists, groups, mention policies, and mention regexes
 - Transcribes voice messages with OpenAI `gpt-4o-transcribe`
 - Forwards inbound photos and documents as downloaded local paths, with other Telegram attachments as downloadable file IDs
@@ -149,6 +150,14 @@ python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py p
 ```
 
 8. Send a normal message from Telegram. If you use the companion memory plugin in `agents_md` mode, send `/newsession` once after setup so the bridge refreshes `AGENTS.md` and starts a fresh Codex thread from `default_cwd`.
+
+When the bridge starts, it registers Telegram's native bot command menu. In Telegram, tap the bot menu or type `/` to see:
+
+- `/start` - show the welcome/help message
+- `/help` - show available commands
+- `/status` - show current Codex status
+- `/stop` - interrupt the active Codex turn
+- `/newsession` - restart Codex and start a fresh thread
 
 Useful checks:
 
