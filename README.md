@@ -82,6 +82,8 @@ Then it:
 - installs both Codex plugins from this repo marketplace
 - runs the long-term-memory hook installer
 - configures memory to use `agents_md`
+- writes the `AGENTS.md` local-capabilities instructions Codex needs for Telegram, reminders, whole-Mac control, files, `gws`, and communication trust
+- refreshes the long-term-memory `AGENTS.md` block
 - writes `~/.codex/long-term-memory/.env`
 - writes `~/.codex/telegram-bridge/.env`
 - writes `~/.codex/telegram-bridge/config.json`
@@ -290,7 +292,9 @@ Telegram bridge:
 
 ## Tell Codex What It Can Use
 
-Installing the plugins is not enough by itself. If the machine also has local capabilities such as Telegram-backed reminders or a configured Google Workspace CLI, tell Codex about them in `AGENTS.md` so they are visible at session start.
+The setup wizard writes the recommended `AGENTS.md` local-capabilities block automatically. This is what teaches future Codex sessions how to use Telegram reminders, Telegram files, the active chat id, whole-Mac remote-control assumptions, optional `gws`, and communication trust boundaries.
+
+If you are doing manual setup or want to audit what the wizard writes, this is the pattern:
 
 This is especially useful for:
 
@@ -302,6 +306,22 @@ Recommended `AGENTS.md` pattern:
 
 ~~~md
 ## Local Capabilities
+
+### Whole-Mac Codex Control
+
+- This setup is intended for a trusted, dedicated Mac controlled remotely through Telegram.
+- Telegram-launched Codex sessions normally use `dangerFullAccess`, `network_access = true`, and `approval_policy = "never"`.
+- In that mode, the configured `default_cwd` is only Codex's starting folder and the location for `AGENTS.md`; it is not a permission boundary.
+- Codex may read and modify files, run commands, use reachable local credentials, and make network requests as the local macOS user.
+
+### Telegram Bridge
+
+- The Telegram bridge state lives in `~/.codex/telegram-bridge/`.
+- Runtime state, including the active chat id and latest message ids, is in `~/.codex/telegram-bridge/runtime_state.json`.
+- Per-chat thread mappings are in `~/.codex/telegram-bridge/chat-map.json`.
+- Inbound Telegram photos and documents are downloaded into `~/.codex/telegram-bridge/inbox` and are exposed to Codex as local paths when available.
+- Codex can send files back to Telegram through the bundled `telegram-actions` MCP `reply` tool using a `files` array of absolute paths. Images are sent as photos; other files are sent as documents.
+- Do not auto-send arbitrary local files unless the user explicitly asks to send them.
 
 ### Telegram Reminders
 
@@ -343,7 +363,7 @@ Recommended `AGENTS.md` pattern:
 
 In this repo's current split of responsibilities, the Telegram bridge injects reminders and unread Gmail summaries, while the memory plugin can inject calendar context through `gws`.
 
-After editing `AGENTS.md`, start a new Codex session so the updated instructions are loaded.
+After editing `AGENTS.md`, start a new Codex session so the updated instructions are loaded. From Telegram, send `/newsession`.
 
 ## Included plugins
 

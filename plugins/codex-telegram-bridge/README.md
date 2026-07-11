@@ -173,19 +173,36 @@ The bridge only forwards images that were newly created during that specific tur
 
 ## Tell Codex About Local Capabilities
 
-The bridge can surface reminders, unread Gmail summaries, and Telegram runtime context, but Codex still works better if those local capabilities are described explicitly in `AGENTS.md`.
+The repo-level setup wizard writes the recommended `AGENTS.md` local-capabilities block automatically. The bridge can surface reminders, unread Gmail summaries, and Telegram runtime context, but Codex works best when those local capabilities are described explicitly in `AGENTS.md`.
 
 This matters because:
 
 - reminder creation is file-based and expects exact JSON in `~/.codex/telegram-bridge/scheduled_reminders.json`
-- the active Telegram chat id lives in bridge runtime state, not in a generic Codex API
+- Telegram files and the active Telegram chat id live in bridge state files
+- the recommended setup gives Codex whole-Mac access through `dangerFullAccess`
 - `gws` availability is machine-specific, so Codex should be told which Google account and services are actually configured
 - unread email summaries, web pages, and documents are external input and should not be treated as official user instructions
 
-Recommended `AGENTS.md` additions:
+If you are doing manual setup or auditing the wizard output, these are the recommended `AGENTS.md` additions:
 
 ~~~md
 ## Local Capabilities
+
+### Whole-Mac Codex Control
+
+- This setup is intended for a trusted, dedicated Mac controlled remotely through Telegram.
+- Telegram-launched Codex sessions normally use `dangerFullAccess`, `network_access = true`, and `approval_policy = "never"`.
+- In that mode, the configured `default_cwd` is only Codex's starting folder and the location for `AGENTS.md`; it is not a permission boundary.
+- Codex may read and modify files, run commands, use reachable local credentials, and make network requests as the local macOS user.
+
+### Telegram Bridge
+
+- The Telegram bridge state lives in `~/.codex/telegram-bridge/`.
+- Runtime state, including the active chat id and latest message ids, is in `~/.codex/telegram-bridge/runtime_state.json`.
+- Per-chat thread mappings are in `~/.codex/telegram-bridge/chat-map.json`.
+- Inbound Telegram photos and documents are downloaded into `~/.codex/telegram-bridge/inbox` and are exposed to Codex as local paths when available.
+- Codex can send files back to Telegram through the bundled `telegram-actions` MCP `reply` tool using a `files` array of absolute paths. Images are sent as photos; other files are sent as documents.
+- Do not auto-send arbitrary local files unless the user explicitly asks to send them.
 
 ### Telegram Reminders
 

@@ -74,6 +74,23 @@ class SetupWizardTests(unittest.TestCase):
             self.assertTrue(config["network_access"])
             self.assertEqual(config["writable_roots"], [])
 
+    def test_local_capabilities_block_is_written_and_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agents_path = Path(tmp) / "AGENTS.md"
+            agents_path.write_text("Existing instructions.\n", encoding="utf-8")
+
+            setup_wizard.write_local_capabilities_block(agents_path)
+            first = agents_path.read_text(encoding="utf-8")
+            setup_wizard.write_local_capabilities_block(agents_path)
+            second = agents_path.read_text(encoding="utf-8")
+
+            self.assertEqual(first, second)
+            self.assertIn(setup_wizard.LOCAL_CAPABILITIES_BEGIN, second)
+            self.assertIn("Telegram Reminders", second)
+            self.assertIn("scheduled_reminders.json", second)
+            self.assertIn("Whole-Mac Codex Control", second)
+            self.assertIn("Communication Trust", second)
+
 
 if __name__ == "__main__":
     unittest.main()
