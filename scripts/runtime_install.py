@@ -65,7 +65,6 @@ def install_runtime(source_root: Path, *, cachebuster: str | None = None) -> Pat
     next_link.unlink(missing_ok=True)
     next_link.symlink_to(destination)
     os.replace(next_link, CURRENT_LINK)
-    _prune_old_versions(active=destination)
     return CURRENT_LINK
 
 
@@ -119,9 +118,16 @@ def _validate_runtime(root: Path) -> None:
             raise RuntimeError(f"Invalid installed plugin manifest: {manifest}")
 
 
-def _prune_old_versions(*, active: Path) -> None:
+def prune_old_versions(*, active: Path) -> None:
+    """Prune only after the replacement runtime is configured and healthy.
+
+    The previous runtime may still be executing a Telegram turn or a Codex
+    hook while a new version is staged. Deleting it during installation makes
+    those in-flight absolute script paths disappear before handoff completes.
+    """
+    active = active.resolve()
     versions = sorted(
-        (path for path in VERSIONS_DIR.iterdir() if path.is_dir() and path != active),
+        (path for path in VERSIONS_DIR.iterdir() if path.is_dir() and path.resolve() != active),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )

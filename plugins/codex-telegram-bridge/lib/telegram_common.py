@@ -50,6 +50,9 @@ DEFAULT_CONFIG = {
     "send_queue_confirmation": False,
     "enable_reminders": True,
     "enable_email_notifications": False,
+    "enable_turn_recovery": True,
+    "turn_recovery_poll_seconds": 30,
+    "turn_recovery_reset_buffer_seconds": 60,
 }
 
 

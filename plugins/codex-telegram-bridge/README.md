@@ -185,6 +185,31 @@ python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py l
 python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py show
 ```
 
+## Automatic Turn Recovery
+
+Every started Telegram turn is journaled in
+`~/.codex/telegram-bridge/turn_recovery_queue.json` until a final response is
+delivered. If Codex reaches a usage limit, completes without final assistant
+text, or the bridge/app-server process disappears mid-turn, the bridge keeps the
+original request and thread id on disk.
+
+The recovery worker reads Codex's account rate-limit window, waits until the
+exhausted window resets, and resumes the task in the same thread. The recovery
+prompt tells Codex to inspect partial work and avoid repeating actions that
+already completed. `/status` shows queued recoveries. `/stop` cancels both an
+active turn and any queued recovery for that chat; `/newsession` also clears the
+old thread's recovery intentionally.
+
+These settings are optional in `config.json`:
+
+```json
+{
+  "enable_turn_recovery": true,
+  "turn_recovery_poll_seconds": 30,
+  "turn_recovery_reset_buffer_seconds": 60
+}
+```
+
 ## Generated Images
 
 When a Codex turn generates new image files under `~/.codex/generated_images/<thread_id>/`, the bridge now compares the directory state at turn start versus turn completion and automatically sends any newly created images back to the Telegram chat.

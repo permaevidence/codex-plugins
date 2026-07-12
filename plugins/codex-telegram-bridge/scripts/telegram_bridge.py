@@ -14,6 +14,7 @@ import threading
 import time
 import traceback
 import urllib.request
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,58 @@ BOT_COMMANDS = [
 MODEL_CALLBACK_PREFIX = "model:"
 PENDING_UPDATE_FILE = STATE_DIR / "pending_update.json"
 FAILED_UPDATES_DIR = STATE_DIR / "failed_updates"
+TURN_RECOVERY_FILE = STATE_DIR / "turn_recovery_queue.json"
+
+
+def rate_limit_retry_at(snapshot: dict[str, Any], *, now: float | None = None, buffer_seconds: int = 60) -> float | None:
+    """Return a safe retry timestamp when the account is currently exhausted."""
+    current = time.time() if now is None else now
+    candidates: list[dict[str, Any]] = []
+    by_id = snapshot.get("rateLimitsByLimitId")
+    if isinstance(by_id, dict):
+        candidates.extend(item for item in by_id.values() if isinstance(item, dict))
+    legacy = snapshot.get("rateLimits")
+    if isinstance(legacy, dict):
+        candidates.append(legacy)
+
+    exhausted_resets: list[float] = []
+    reached_without_window = False
+    for limits in candidates:
+        reached = bool(limits.get("rateLimitReachedType"))
+        exhausted_here = False
+        for name in ("primary", "secondary"):
+            window = limits.get(name)
+            if not isinstance(window, dict) or int(window.get("usedPercent") or 0) < 100:
+                continue
+            exhausted_here = True
+            reset = window.get("resetsAt")
+            if isinstance(reset, (int, float)):
+                exhausted_resets.append(float(reset))
+        individual = limits.get("individualLimit")
+        if isinstance(individual, dict) and int(individual.get("remainingPercent") or 0) <= 0:
+            exhausted_here = True
+            reset = individual.get("resetsAt")
+            if isinstance(reset, (int, float)):
+                exhausted_resets.append(float(reset))
+        reached_without_window = reached_without_window or (reached and not exhausted_here)
+
+    if exhausted_resets:
+        return max(current + 1, max(exhausted_resets) + max(0, buffer_seconds))
+    if reached_without_window:
+        return current + 15 * 60
+    return None
+
+
+def recovery_prompt(record: dict[str, Any]) -> str:
+    original = str(record.get("original_input") or "").strip()
+    return (
+        "The previous Codex turn ended before it could deliver a final assistant response, "
+        "most likely because the account usage window was exhausted. Resume the same task now. "
+        "Inspect the conversation, repository, filesystem, and any existing partial work first; "
+        "do not repeat actions that already completed. Finish all remaining work, verify it, and "
+        "send the user a self-contained final response.\n\n"
+        f"Original Telegram request:\n{original}"
+    )
 
 
 def normalize_command(text: str, bot_username: str) -> str:
@@ -539,6 +592,7 @@ class CodexAppServerClient:
         self._turns: dict[str, dict[str, Any]] = {}
         self._active_turn_by_chat: dict[str, str] = {}
         self._thread_to_chat: dict[str, str] = {}
+        self._recovery_lock = threading.Lock()
         self._restart_on_exit = True
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
@@ -573,7 +627,7 @@ class CodexAppServerClient:
             self.process.kill()
             self.process.wait(timeout=timeout)
 
-    def request(self, method: str, params: dict[str, Any], timeout: float = 180.0) -> Any:
+    def request(self, method: str, params: Any, timeout: float = 180.0) -> Any:
         request_id = self._reserve_id()
         reply_queue: queue.Queue = queue.Queue(maxsize=1)
         self._pending[request_id] = reply_queue
@@ -759,10 +813,20 @@ class CodexAppServerClient:
         self._active_turn_by_chat.pop(chat_id, None)
         return thread_id
 
-    def start_turn(self, chat_id: str, thread_id: str, text: str) -> str:
+    def start_turn(
+        self,
+        chat_id: str,
+        thread_id: str,
+        text: str,
+        *,
+        recovery_id: str | None = None,
+        original_input: str | None = None,
+    ) -> str:
+        recovery_id = recovery_id or str(uuid.uuid4())
         result = self.request("turn/start", self._turn_params(thread_id, text))
         turn = result["turn"]
         turn_id = turn["id"]
+        source_input = original_input if original_input is not None else text
         self._turns[turn_id] = {
             "chat_id": chat_id,
             "thread_id": thread_id,
@@ -771,7 +835,10 @@ class CodexAppServerClient:
             "status": turn.get("status", "inProgress"),
             "error": None,
             "generated_images_seen": set(list_generated_images(thread_id)),
+            "input_text": source_input,
+            "recovery_id": recovery_id,
         }
+        self._track_inflight_turn(recovery_id, chat_id, thread_id, turn_id, source_input)
         self._active_turn_by_chat[chat_id] = turn_id
         save_runtime_state(
             {
@@ -783,6 +850,184 @@ class CodexAppServerClient:
             }
         )
         return turn_id
+
+    def pending_recovery_count(self, chat_id: str | None = None) -> int:
+        with self._recovery_lock:
+            records = load_json(TURN_RECOVERY_FILE, [])
+        if not isinstance(records, list):
+            return 0
+        if chat_id is None:
+            return len(records)
+        return sum(1 for item in records if isinstance(item, dict) and str(item.get("chat_id")) == chat_id)
+
+    def cancel_recovery(self, chat_id: str) -> bool:
+        with self._recovery_lock:
+            records = load_json(TURN_RECOVERY_FILE, [])
+            if not isinstance(records, list):
+                records = []
+            kept = [item for item in records if not isinstance(item, dict) or str(item.get("chat_id")) != chat_id]
+            changed = len(kept) != len(records)
+            if changed:
+                save_json(TURN_RECOVERY_FILE, kept)
+        return changed
+
+    def _remove_recovery(self, recovery_id: str) -> None:
+        with self._recovery_lock:
+            records = load_json(TURN_RECOVERY_FILE, [])
+            if not isinstance(records, list):
+                return
+            save_json(
+                TURN_RECOVERY_FILE,
+                [item for item in records if not isinstance(item, dict) or str(item.get("id")) != recovery_id],
+            )
+
+    def _track_inflight_turn(
+        self,
+        recovery_id: str,
+        chat_id: str,
+        thread_id: str,
+        turn_id: str,
+        original_input: str,
+    ) -> None:
+        with self._recovery_lock:
+            records = load_json(TURN_RECOVERY_FILE, [])
+            if not isinstance(records, list):
+                records = []
+            record = next(
+                (item for item in records if isinstance(item, dict) and str(item.get("id")) == recovery_id),
+                None,
+            )
+            if record is None:
+                record = {
+                    "id": recovery_id,
+                    "chat_id": chat_id,
+                    "thread_id": thread_id,
+                    "original_turn_id": turn_id,
+                    "original_input": original_input,
+                    "created_at": time.time(),
+                    "attempts": 0,
+                }
+                records.append(record)
+            record.update(
+                {
+                    "active_retry_turn_id": turn_id,
+                    "due_at": time.time() + 10 * 60,
+                    "state": "in_progress",
+                }
+            )
+            save_json(TURN_RECOVERY_FILE, records)
+
+    def _queue_recovery(self, state: dict[str, Any], reason: str) -> None:
+        if not self.config.get("enable_turn_recovery", True):
+            return
+        with self._recovery_lock:
+            records = load_json(TURN_RECOVERY_FILE, [])
+            if not isinstance(records, list):
+                records = []
+            recovery_id = str(state.get("recovery_id") or uuid.uuid4())
+            existing = next(
+                (item for item in records if isinstance(item, dict) and str(item.get("id")) == recovery_id),
+                None,
+            )
+            record = existing if existing is not None else {
+                "id": recovery_id,
+                "chat_id": state["chat_id"],
+                "thread_id": state["thread_id"],
+                "original_turn_id": state.get("turn_id"),
+                "original_input": state.get("input_text", ""),
+                "created_at": time.time(),
+                "attempts": 0,
+            }
+            record.update(
+                {
+                    "reason": reason,
+                    "due_at": time.time() + 5,
+                    "last_failed_at": time.time(),
+                    "active_retry_turn_id": None,
+                    "state": "pending",
+                }
+            )
+            if existing is None:
+                records.append(record)
+            save_json(TURN_RECOVERY_FILE, records)
+
+    def start_recovery_loop(self) -> None:
+        if not self.config.get("enable_turn_recovery", True):
+            return
+
+        def worker() -> None:
+            poll_seconds = max(5, int(self.config.get("turn_recovery_poll_seconds") or 30))
+            reset_buffer = max(0, int(self.config.get("turn_recovery_reset_buffer_seconds") or 60))
+            while True:
+                try:
+                    with self._recovery_lock:
+                        records = load_json(TURN_RECOVERY_FILE, [])
+                        if not isinstance(records, list):
+                            records = []
+                        now = time.time()
+                        record = next(
+                            (
+                                item for item in records
+                                if isinstance(item, dict)
+                                and float(item.get("due_at") or 0) <= now
+                                and not self._active_turn_by_chat.get(str(item.get("chat_id")))
+                            ),
+                            None,
+                        )
+                        record = dict(record) if record is not None else None
+                    if record is not None:
+                        try:
+                            limits = self.request("account/rateLimits/read", None, timeout=30)
+                        except Exception:
+                            limits = {}
+                        retry_at = rate_limit_retry_at(limits if isinstance(limits, dict) else {}, now=now, buffer_seconds=reset_buffer)
+                        if retry_at is not None:
+                            self._update_recovery_record(
+                                str(record["id"]),
+                                due_at=retry_at,
+                                waiting_for_rate_limit_reset=True,
+                                state="pending",
+                            )
+                        else:
+                            chat_id = str(record.get("chat_id"))
+                            thread_id = str(record.get("thread_id"))
+                            if thread_id not in self._thread_to_chat:
+                                self.request("thread/resume", {"threadId": thread_id})
+                                self._thread_to_chat[thread_id] = chat_id
+                            attempts = int(record.get("attempts") or 0) + 1
+                            self._update_recovery_record(
+                                str(record["id"]),
+                                attempts=attempts,
+                                last_attempt_at=now,
+                                waiting_for_rate_limit_reset=False,
+                                due_at=now + min(3600, 60 * (2 ** min(attempts, 6))),
+                                state="starting",
+                            )
+                            retry_turn_id = self.start_turn(
+                                chat_id,
+                                thread_id,
+                                recovery_prompt(record),
+                                recovery_id=str(record["id"]),
+                                original_input=str(record.get("original_input") or ""),
+                            )
+                            self._update_recovery_record(str(record["id"]), active_retry_turn_id=retry_turn_id, state="in_progress")
+                            self.send_callback(chat_id, "Codex capacity is available again. Resuming the interrupted task automatically.")
+                except Exception as exc:
+                    print(f"turn recovery loop failed: {exc}", file=sys.stderr)
+                time.sleep(poll_seconds)
+
+        threading.Thread(target=worker, daemon=True, name="turn-recovery").start()
+
+    def _update_recovery_record(self, recovery_id: str, **changes: Any) -> None:
+        with self._recovery_lock:
+            records = load_json(TURN_RECOVERY_FILE, [])
+            if not isinstance(records, list):
+                return
+            for record in records:
+                if isinstance(record, dict) and str(record.get("id")) == recovery_id:
+                    record.update(changes)
+                    save_json(TURN_RECOVERY_FILE, records)
+                    return
 
     def steer_turn(self, chat_id: str, text: str) -> str | None:
         turn_id = self._active_turn_by_chat.get(chat_id)
@@ -858,7 +1103,9 @@ class CodexAppServerClient:
             )
         if entry and entry.get("thread_id"):
             suffix = f"\nCLI: {version}" if version else ""
-            return f"Idle.\nCurrent thread: {entry['thread_id']}{model_line}{last_seen}{suffix}"
+            recovery = self.pending_recovery_count(chat_id)
+            recovery_line = f"\nInterrupted tasks awaiting automatic recovery: {recovery}" if recovery else ""
+            return f"Idle.\nCurrent thread: {entry['thread_id']}{model_line}{last_seen}{recovery_line}{suffix}"
         suffix = f"\nCLI: {version}" if version else ""
         return f"Idle.\nNo thread has been created for this chat yet.{model_line}{suffix}"
 
@@ -895,6 +1142,7 @@ class CodexAppServerClient:
         if state is None:
             return
         state["status"] = turn.get("status")
+        state["turn_id"] = turn_id
         chat_id = state["chat_id"]
         self._active_turn_by_chat.pop(chat_id, None)
 
@@ -912,13 +1160,31 @@ class CodexAppServerClient:
         save_runtime_state(runtime_state)
         if status == "completed":
             if text or files:
+                if state.get("recovery_id"):
+                    self._remove_recovery(str(state["recovery_id"]))
                 self.send_callback(chat_id, text, files)
             else:
-                self.send_callback(chat_id, "Turn completed with no final assistant text.")
+                self._queue_recovery(state, "completed without final assistant text")
+                self.send_callback(
+                    chat_id,
+                    "Codex stopped before delivering a final response. The task was saved and will resume "
+                    "automatically in the same thread when usage capacity is available. Use /stop to cancel it.",
+                )
         elif status == "interrupted":
+            if state.get("recovery_id"):
+                self._remove_recovery(str(state["recovery_id"]))
             self.send_callback(chat_id, "Turn interrupted.")
         elif status == "failed":
-            self.send_callback(chat_id, f"Turn failed: {state.get('error') or 'Unknown error'}")
+            turn_error = turn.get("error")
+            turn_error_message = turn_error.get("message") if isinstance(turn_error, dict) else turn_error
+            error = str(state.get("error") or turn_error_message or "Unknown error")
+            if re.search(r"usage|rate.?limit|quota|credit", error, flags=re.IGNORECASE):
+                self._queue_recovery(state, error)
+                self.send_callback(chat_id, "Codex hit a usage limit. The task was saved and will resume automatically after the limit resets.")
+            else:
+                if state.get("recovery_id"):
+                    self._remove_recovery(str(state["recovery_id"]))
+                self.send_callback(chat_id, f"Turn failed: {error}")
         else:
             self.send_callback(chat_id, f"Turn ended with status: {status}")
 
@@ -1480,6 +1746,7 @@ def main() -> None:
 
     update_long_term_memory_agents_file(config)
     codex = CodexAppServerClient(config, send_callback)
+    codex.start_recovery_loop()
     maybe_start_reminder_loop(config, codex, chat_map, chat_map_lock)
     maybe_start_email_loop(config, codex, chat_map, chat_map_lock)
     maybe_start_version_monitor_loop(config, str(token), codex, chat_map, chat_map_lock)
@@ -1589,6 +1856,7 @@ def main() -> None:
                     PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
                 if command == "/newsession":
+                    codex.cancel_recovery(chat_id)
                     update_long_term_memory_agents_file(config)
                     with chat_map_lock:
                         entry = chat_map.setdefault(chat_id, {})
@@ -1616,8 +1884,13 @@ def main() -> None:
                     codex.shutdown()
                     return
                 if command == "/stop":
-                    if codex.interrupt_turn(chat_id):
-                        send_message(str(token), chat_id, "Interrupt requested.", message.get("message_id"), access=access)
+                    interrupted = codex.interrupt_turn(chat_id)
+                    cancelled = codex.cancel_recovery(chat_id)
+                    if interrupted:
+                        suffix = " Pending automatic recovery was also cancelled." if cancelled else ""
+                        send_message(str(token), chat_id, f"Interrupt requested.{suffix}", message.get("message_id"), access=access)
+                    elif cancelled:
+                        send_message(str(token), chat_id, "Cancelled the pending automatic recovery.", message.get("message_id"), access=access)
                     else:
                         send_message(
                             str(token),

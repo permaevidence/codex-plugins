@@ -230,6 +230,29 @@ class RuntimeInstallTests(unittest.TestCase):
             # A bare interpreter name resolves via PATH and must stay untouched.
             self.assertEqual(servers["telegram-actions"]["command"], "python3")
 
+    def test_runtime_install_keeps_previous_version_until_health_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self.make_source(root)
+            app = root / "Application Support/PermaEvidenceCodex"
+            with mock.patch.object(runtime_install, "APP_SUPPORT_ROOT", app), mock.patch.object(
+                runtime_install, "VERSIONS_DIR", app / "versions"
+            ), mock.patch.object(runtime_install, "CURRENT_LINK", app / "current"):
+                installed = [
+                    runtime_install.install_runtime(source, cachebuster=name).resolve()
+                    for name in ("first", "second", "third", "fourth")
+                ]
+                for index, path in enumerate(installed, start=1):
+                    os.utime(path, (index, index))
+                self.assertTrue(all(path.exists() for path in installed))
+
+                runtime_install.prune_old_versions(active=installed[-1])
+                self.assertTrue(installed[-1].exists())
+                self.assertEqual(
+                    len([path for path in (app / "versions").iterdir() if path.is_dir()]),
+                    runtime_install.KEEP_VERSIONS,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

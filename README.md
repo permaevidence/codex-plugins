@@ -412,6 +412,7 @@ After editing `AGENTS.md`, start a new Codex session so the updated instructions
 - injects reminders and unread-email summaries
 - forwards inbound attachment metadata plus downloaded photo and document paths
 - bundles Telegram MCP tools for replies, attachments, inbound file download, message edits, and reactions
+- durably journals active turns and resumes them after usage-limit resets or process interruption
 - includes a simple restart-loop supervisor script
 - includes a small `bridge.py` operator CLI for `start`, `stop`, `restart`, `status`, `logs`, and `doctor`
 - can run in either safer `workspaceWrite` mode or broader `dangerFullAccess` mode depending on your remote-control needs

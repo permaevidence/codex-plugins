@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runtime_install import install_runtime
+from runtime_install import install_runtime, prune_old_versions
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -213,6 +213,7 @@ def main() -> int:
         if not start_bridge:
             doctor_command.append("--allow-stopped")
         run(doctor_command)
+        prune_old_versions(active=installed_root.resolve())
     except BaseException:
         restore_setup_backup(backup_dir, agents_md_path)
         restore_runtime_link(previous_runtime)

@@ -108,6 +108,102 @@ class AppServerResilienceTests(unittest.TestCase):
         self.assertNotIn("effort", params)
 
 
+class TurnRecoveryTests(unittest.TestCase):
+    def test_rate_limit_retry_uses_exhausted_window_reset(self):
+        bridge = load_bridge_module()
+        retry_at = bridge.rate_limit_retry_at(
+            {
+                "rateLimits": {
+                    "primary": {"usedPercent": 100, "resetsAt": 2000},
+                    "secondary": {"usedPercent": 36, "resetsAt": 9000},
+                }
+            },
+            now=1000,
+            buffer_seconds=60,
+        )
+        self.assertEqual(retry_at, 2060)
+
+    def test_rate_limit_retry_returns_none_when_capacity_is_available(self):
+        bridge = load_bridge_module()
+        self.assertIsNone(
+            bridge.rate_limit_retry_at(
+                {"rateLimits": {"primary": {"usedPercent": 99, "resetsAt": 2000}}},
+                now=1000,
+            )
+        )
+
+    def test_recovery_prompt_preserves_original_request_and_resume_guardrails(self):
+        bridge = load_bridge_module()
+        prompt = bridge.recovery_prompt({"original_input": "Fix all nine plugin issues."})
+        self.assertIn("Fix all nine plugin issues.", prompt)
+        self.assertIn("do not repeat actions that already completed", prompt)
+        self.assertIn("Finish all remaining work", prompt)
+
+    def test_empty_completed_turn_is_durably_queued(self):
+        bridge = load_bridge_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recovery_file = Path(tmpdir) / "turn_recovery_queue.json"
+            client = object.__new__(bridge.CodexAppServerClient)
+            client.config = {"enable_turn_recovery": True}
+            client._recovery_lock = bridge.threading.Lock()
+            client._active_turn_by_chat = {"123": "turn-1"}
+            client._turns = {
+                "turn-1": {
+                    "chat_id": "123",
+                    "thread_id": "thread-1",
+                    "text": "",
+                    "input_text": "Do the durable task",
+                    "recovery_id": "recovery-1",
+                    "generated_images_seen": set(),
+                }
+            }
+            sent = []
+            client.send_callback = lambda chat_id, text, files=None: sent.append((chat_id, text, files))
+            with mock.patch.object(bridge, "TURN_RECOVERY_FILE", recovery_file), mock.patch.object(
+                bridge, "list_generated_images", return_value=[]
+            ), mock.patch.object(bridge, "load_runtime_state", return_value={}), mock.patch.object(
+                bridge, "save_runtime_state"
+            ):
+                client._finish_turn("turn-1", {"id": "turn-1", "status": "completed"})
+
+            records = json.loads(recovery_file.read_text(encoding="utf-8"))
+            self.assertEqual(records[0]["id"], "recovery-1")
+            self.assertEqual(records[0]["original_input"], "Do the durable task")
+            self.assertEqual(records[0]["state"], "pending")
+            self.assertIn("resume automatically", sent[0][1])
+
+    def test_successful_recovery_removes_durable_record(self):
+        bridge = load_bridge_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recovery_file = Path(tmpdir) / "turn_recovery_queue.json"
+            recovery_file.write_text(json.dumps([{"id": "recovery-1", "chat_id": "123"}]), encoding="utf-8")
+            client = object.__new__(bridge.CodexAppServerClient)
+            client.config = {"enable_turn_recovery": True}
+            client._recovery_lock = bridge.threading.Lock()
+            client._active_turn_by_chat = {"123": "turn-2"}
+            client._turns = {
+                "turn-2": {
+                    "chat_id": "123",
+                    "thread_id": "thread-1",
+                    "text": "Finished safely.",
+                    "input_text": "Do the durable task",
+                    "recovery_id": "recovery-1",
+                    "generated_images_seen": set(),
+                }
+            }
+            sent = []
+            client.send_callback = lambda chat_id, text, files=None: sent.append((chat_id, text, files))
+            with mock.patch.object(bridge, "TURN_RECOVERY_FILE", recovery_file), mock.patch.object(
+                bridge, "list_generated_images", return_value=[]
+            ), mock.patch.object(bridge, "load_runtime_state", return_value={}), mock.patch.object(
+                bridge, "save_runtime_state"
+            ):
+                client._finish_turn("turn-2", {"id": "turn-2", "status": "completed"})
+
+            self.assertEqual(json.loads(recovery_file.read_text(encoding="utf-8")), [])
+            self.assertEqual(sent[0][1], "Finished safely.")
+
+
 class ModelDefaultTests(unittest.TestCase):
     def test_first_start_inherits_and_persists_codex_defaults(self):
         common = load_common_module()

@@ -112,6 +112,8 @@ def main() -> int:
         try:
             installed = activate_runtime(roots[0], commit)
             configure_runtime(installed)
+            runtime_module = import_module(installed / "scripts/runtime_install.py", "installed_runtime_cleanup")
+            runtime_module.prune_old_versions(active=installed.resolve())
         except Exception:
             restore(previous)
             raise
