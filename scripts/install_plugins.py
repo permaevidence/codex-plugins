@@ -30,6 +30,11 @@ def parse_args() -> argparse.Namespace:
         help="Do not run `codex plugin marketplace add`; only run plugin add commands.",
     )
     parser.add_argument(
+        "--replace-marketplace",
+        action="store_true",
+        help="Replace an existing marketplace registration with this repository path.",
+    )
+    parser.add_argument(
         "--only",
         choices=PLUGIN_NAMES,
         action="append",
@@ -61,6 +66,8 @@ def main() -> None:
         raise SystemExit(f"missing marketplace file: {marketplace}")
 
     if not args.skip_marketplace:
+        if args.replace_marketplace and marketplace_is_registered(codex):
+            run([codex, "plugin", "marketplace", "remove", MARKETPLACE_NAME])
         run([codex, "plugin", "marketplace", "add", str(root)])
 
     selected = tuple(args.only) if args.only else PLUGIN_NAMES
@@ -75,19 +82,30 @@ def main() -> None:
             "- Run the memory installer: "
             f"python3 {root}/plugins/codex-long-term-memory/scripts/install.py"
         )
-        print("- Optional memory OpenAI key: ~/.codex/long-term-memory/.env")
+        print("- Required memory OpenAI key: ~/.codex/long-term-memory/.env")
     if "codex-telegram-bridge" in selected:
         print("- Telegram bot token goes in: ~/.codex/telegram-bridge/.env")
         print("- Basic DM setup does not require knowing your chat ID upfront; use pairing.")
         print(
             "- Configure Telegram, then run: "
-            f"python3 {root}/plugins/codex-telegram-bridge/scripts/bridge.py start"
+            f"python3 {root}/plugins/codex-telegram-bridge/scripts/bridge.py install-service"
         )
         print(
             "- Check setup with: "
             f"python3 {root}/plugins/codex-telegram-bridge/scripts/bridge.py doctor"
         )
     print("- Start a new Codex thread or send /newsession after changing plugin setup.")
+
+
+def marketplace_is_registered(codex: str) -> bool:
+    completed = subprocess.run(
+        [codex, "plugin", "marketplace", "list"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = (completed.stdout or "") + "\n" + (completed.stderr or "")
+    return MARKETPLACE_NAME in output
 
 
 if __name__ == "__main__":

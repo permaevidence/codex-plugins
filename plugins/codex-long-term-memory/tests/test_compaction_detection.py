@@ -32,6 +32,16 @@ INSTALL_SPEC.loader.exec_module(memory_install)
 
 
 class CompactionDetectionTests(unittest.TestCase):
+    def test_installer_recognizes_hooks_from_an_older_runtime_version(self) -> None:
+        group = {
+            "hooks": [
+                {
+                    "command": "/usr/bin/python3 /old/runtime/plugins/codex-long-term-memory/hooks/stop.py"
+                }
+            ]
+        }
+        self.assertTrue(memory_install.is_our_group(group))
+
     def test_installer_writes_canonical_hooks_feature_for_new_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "config.toml"

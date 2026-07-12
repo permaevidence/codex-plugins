@@ -2,6 +2,7 @@
 import json
 import os
 import secrets
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -76,7 +77,15 @@ def load_json(path: Path, default: Any) -> Any:
 
 def save_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    descriptor, raw_path = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    temp_path = Path(raw_path)
+    try:
+        with open(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+            handle.write(json.dumps(data, indent=2) + "\n")
+        temp_path.chmod(0o600)
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def load_config() -> dict[str, Any]:

@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -120,13 +121,13 @@ def load_hooks() -> dict:
 
 def save_hooks(payload: dict) -> None:
     HOOKS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    HOOKS_FILE.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(HOOKS_FILE, json.dumps(payload, indent=2) + "\n")
 
 
 def is_our_group(group: dict) -> bool:
     for hook in group.get("hooks", []):
         command = str(hook.get("command", ""))
-        if str(PLUGIN_ROOT / "hooks") in command:
+        if str(PLUGIN_ROOT / "hooks") in command or "codex-long-term-memory/hooks/" in command:
             return True
     return False
 
@@ -147,17 +148,31 @@ def merge_hooks() -> None:
 def ensure_hooks_feature_enabled() -> None:
     CONFIG_TOML.parent.mkdir(parents=True, exist_ok=True)
     if not CONFIG_TOML.exists():
-        CONFIG_TOML.write_text("[features]\nhooks = true\n", encoding="utf-8")
+        atomic_write_text(CONFIG_TOML, "[features]\nhooks = true\n")
         return
 
     text = CONFIG_TOML.read_text(encoding="utf-8")
-    CONFIG_TOML.write_text(set_hooks_feature_enabled(text), encoding="utf-8")
+    atomic_write_text(CONFIG_TOML, set_hooks_feature_enabled(text))
 
 
 def ensure_state_files() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if not STATE_CONFIG.exists():
-        STATE_CONFIG.write_text(json.dumps(DEFAULT_STATE_CONFIG, indent=2) + "\n", encoding="utf-8")
+        atomic_write_text(STATE_CONFIG, json.dumps(DEFAULT_STATE_CONFIG, indent=2) + "\n")
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_path = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    temp_path = Path(raw_path)
+    try:
+        with open(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+            handle.write(text)
+        if path.exists():
+            shutil.copymode(path, temp_path)
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def main() -> None:

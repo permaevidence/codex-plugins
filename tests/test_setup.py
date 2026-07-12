@@ -5,6 +5,8 @@ import contextlib
 import io
 import tempfile
 import unittest
+import json
+import os
 from unittest import mock
 from pathlib import Path
 
@@ -16,6 +18,12 @@ spec = importlib.util.spec_from_file_location("setup_wizard", SETUP_PATH)
 assert spec and spec.loader
 setup_wizard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(setup_wizard)
+
+RUNTIME_PATH = REPO_ROOT / "scripts" / "runtime_install.py"
+runtime_spec = importlib.util.spec_from_file_location("runtime_install_test", RUNTIME_PATH)
+assert runtime_spec and runtime_spec.loader
+runtime_install = importlib.util.module_from_spec(runtime_spec)
+runtime_spec.loader.exec_module(runtime_install)
 
 
 class SetupWizardTests(unittest.TestCase):
@@ -90,6 +98,66 @@ class SetupWizardTests(unittest.TestCase):
             self.assertIn("scheduled_reminders.json", second)
             self.assertIn("Whole-Mac Codex Control", second)
             self.assertIn("Communication Trust", second)
+
+    def test_hook_trust_is_added_and_updated_without_duplicates(self) -> None:
+        original = "[features]\nhooks = true\n\n[hooks.state]\n"
+        first = setup_wizard.set_hook_trust(original, "/tmp/hooks.json:stop:0:0", "sha256:first")
+        second = setup_wizard.set_hook_trust(first, "/tmp/hooks.json:stop:0:0", "sha256:second")
+        self.assertEqual(second.count('[hooks.state."/tmp/hooks.json:stop:0:0"]'), 1)
+        self.assertNotIn("sha256:first", second)
+        self.assertIn('trusted_hash = "sha256:second"', second)
+
+    def test_setup_backup_preserves_existing_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex = root / ".codex"
+            agents = root / "AGENTS.md"
+            (codex / "long-term-memory").mkdir(parents=True)
+            (codex / "config.toml").write_text("model = 'test'\n", encoding="utf-8")
+            agents.write_text("instructions\n", encoding="utf-8")
+            with mock.patch.object(setup_wizard, "CODEX_DIR", codex), mock.patch.object(
+                setup_wizard, "MEMORY_ENV", codex / "long-term-memory/.env"
+            ), mock.patch.object(
+                setup_wizard, "MEMORY_CONFIG", codex / "long-term-memory/config.json"
+            ), mock.patch.object(
+                setup_wizard, "TELEGRAM_ENV", codex / "telegram-bridge/.env"
+            ), mock.patch.object(
+                setup_wizard, "TELEGRAM_CONFIG", codex / "telegram-bridge/config.json"
+            ):
+                backup = setup_wizard.create_setup_backup(agents)
+            self.assertEqual((backup / "config.toml").read_text(encoding="utf-8"), "model = 'test'\n")
+            self.assertEqual((backup / "AGENTS.md").read_text(encoding="utf-8"), "instructions\n")
+
+
+class RuntimeInstallTests(unittest.TestCase):
+    def make_source(self, root: Path, version: str = "1.2.3") -> Path:
+        source = root / "source"
+        (source / ".agents/plugins").mkdir(parents=True)
+        (source / ".agents/plugins/marketplace.json").write_text(
+            json.dumps({"name": "permaevidence-local", "plugins": []}), encoding="utf-8"
+        )
+        for name in ("codex-long-term-memory", "codex-telegram-bridge"):
+            manifest = source / "plugins" / name / ".codex-plugin" / "plugin.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(json.dumps({"name": name, "version": version}), encoding="utf-8")
+        return source
+
+    def test_runtime_install_uses_atomic_current_link_and_cachebuster(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self.make_source(root)
+            app = root / "Application Support/PermaEvidenceCodex"
+            with mock.patch.object(runtime_install, "APP_SUPPORT_ROOT", app), mock.patch.object(
+                runtime_install, "VERSIONS_DIR", app / "versions"
+            ), mock.patch.object(runtime_install, "CURRENT_LINK", app / "current"):
+                current = runtime_install.install_runtime(source, cachebuster="commit-abc123")
+                target = current.resolve()
+            self.assertTrue(current.is_symlink())
+            self.assertTrue(target.is_dir())
+            manifest = json.loads(
+                (current / "plugins/codex-telegram-bridge/.codex-plugin/plugin.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["version"], "1.2.3+codex.commit-abc123")
 
 
 if __name__ == "__main__":

@@ -566,7 +566,7 @@ class CodexAppServerClient:
             self.process.kill()
             self.process.wait(timeout=timeout)
 
-    def request(self, method: str, params: dict[str, Any]) -> Any:
+    def request(self, method: str, params: dict[str, Any], timeout: float = 180.0) -> Any:
         request_id = self._reserve_id()
         reply_queue: queue.Queue = queue.Queue(maxsize=1)
         self._pending[request_id] = reply_queue
@@ -578,7 +578,11 @@ class CodexAppServerClient:
                 "params": params,
             }
         )
-        result = reply_queue.get()
+        try:
+            result = reply_queue.get(timeout=timeout)
+        except queue.Empty as exc:
+            self._pending.pop(request_id, None)
+            raise RuntimeError(f"Codex app-server request timed out: {method}") from exc
         if "error" in result:
             raise RuntimeError(result["error"])
         return result["result"]
@@ -603,15 +607,24 @@ class CodexAppServerClient:
     def _read_loop(self) -> None:
         if self.process.stdout is None:
             return
-        for raw_line in self.process.stdout:
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            self._handle_message(message)
+        try:
+            for raw_line in self.process.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                self._handle_message(message)
+        finally:
+            error = {"error": {"code": -32000, "message": "Codex app-server exited before replying"}}
+            for request_id, pending in list(self._pending.items()):
+                self._pending.pop(request_id, None)
+                try:
+                    pending.put_nowait(error)
+                except queue.Full:
+                    pass
 
     def _handle_message(self, message: dict[str, Any]) -> None:
         if "id" in message and "method" not in message:

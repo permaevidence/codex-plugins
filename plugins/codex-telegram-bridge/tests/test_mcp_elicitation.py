@@ -4,14 +4,24 @@ import io
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
 BRIDGE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "telegram_bridge.py"
+OPERATOR_PATH = Path(__file__).resolve().parents[1] / "scripts" / "bridge.py"
 
 
 def load_bridge_module():
     spec = importlib.util.spec_from_file_location("telegram_bridge", BRIDGE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_operator_module():
+    spec = importlib.util.spec_from_file_location("bridge_operator", OPERATOR_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -43,6 +53,46 @@ class McpElicitationTests(unittest.TestCase):
             client.sent,
             [{"jsonrpc": "2.0", "id": 7, "result": {"action": "accept"}}],
         )
+
+
+class AppServerResilienceTests(unittest.TestCase):
+    def test_pending_requests_are_failed_when_app_server_exits(self):
+        bridge = load_bridge_module()
+
+        class EmptyStdout:
+            def __iter__(self):
+                return iter(())
+
+        class FakeProcess:
+            stdout = EmptyStdout()
+
+        client = object.__new__(bridge.CodexAppServerClient)
+        pending = bridge.queue.Queue(maxsize=1)
+        client.process = FakeProcess()
+        client._pending = {9: pending}
+        client._read_loop()
+        result = pending.get_nowait()
+        self.assertIn("error", result)
+        self.assertEqual(client._pending, {})
+
+
+class LaunchAgentTests(unittest.TestCase):
+    def test_install_service_writes_persistent_launch_agent(self):
+        operator = load_operator_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            plist = root / "LaunchAgents/service.plist"
+            state = root / "state"
+            with mock.patch.object(operator, "LAUNCH_AGENTS_DIR", plist.parent), mock.patch.object(
+                operator, "LAUNCH_AGENT_FILE", plist
+            ), mock.patch.object(operator, "STATE_DIR", state), mock.patch.object(
+                operator, "stop_bridge", return_value=0
+            ), mock.patch.object(operator, "start_launch_service", return_value=0):
+                self.assertEqual(operator.install_service(), 0)
+            payload = operator.plistlib.loads(plist.read_bytes())
+            self.assertTrue(payload["RunAtLoad"])
+            self.assertTrue(payload["KeepAlive"])
+            self.assertEqual(payload["Label"], operator.SERVICE_LABEL)
 
 
 class BotCommandMenuTests(unittest.TestCase):

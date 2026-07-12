@@ -87,7 +87,7 @@ For a first-time setup, prefer the repo-level wizard:
 python3 /absolute/path/to/repo/scripts/setup.py
 ```
 
-It installs the plugin, writes this bridge config, requires the OpenAI key for voice transcription, optionally starts the bridge, and runs `bridge.py doctor`.
+It validates credentials and model availability, installs a permanent versioned runtime, writes this bridge config, requires the OpenAI key for voice transcription, installs a per-user LaunchAgent, guides pairing, and runs `bridge.py doctor`.
 
 Manual setup:
 
@@ -136,10 +136,10 @@ cat > ~/.codex/telegram-bridge/config.json <<'EOF'
 EOF
 ```
 
-5. Start the bridge:
+5. Install and start the persistent bridge service:
 
 ```bash
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py start
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py install-service
 ```
 
 6. Send a DM to the bot. It should reply with a pairing code.
@@ -312,22 +312,29 @@ If you are not using a dedicated machine, switch back to `workspaceWrite`, restr
 
 ## Running
 
+The normal installed path is:
+
 ```bash
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py start
+BRIDGE="$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py"
+```
+
+```bash
+python3 "$BRIDGE" install-service
 ```
 
 Use `bridge.py` as the normal local operator interface:
 
 ```bash
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py start
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py stop
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py restart
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py status
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py logs -f
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py doctor
+python3 "$BRIDGE" start
+python3 "$BRIDGE" stop
+python3 "$BRIDGE" restart
+python3 "$BRIDGE" status
+python3 "$BRIDGE" logs -f
+python3 "$BRIDGE" doctor
+python3 "$BRIDGE" uninstall-service
 ```
 
-`bridge.py start` launches `start_bridge.sh` in the background. The underlying supervisor:
+`install-service` writes `~/Library/LaunchAgents/com.permaevidence.codex-telegram-bridge.plist` with `RunAtLoad` and `KeepAlive`, then loads it. `bridge.py start` controls that LaunchAgent after installation. The underlying supervisor:
 
 - it writes `.bridge-supervisor.pid` and `.bridge-child.pid` under `~/.codex/telegram-bridge/`
 - it cleans stale pid files on startup
@@ -336,7 +343,7 @@ python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py d
 
 Avoid launching `telegram_bridge.py` directly for normal use. Running the raw Python script alongside the supervisor can create duplicate Telegram long-pollers and produce `HTTP Error 409: Conflict` in `bridge.log`.
 
-For unattended use, run the supervisor inside `tmux`, `screen`, `launchd`, or another process manager.
+For unattended use, prefer the installed LaunchAgent. If FileVault is enabled, a local unlock may still be required after a full reboot before per-user services can start.
 
 If you need to run the supervisor directly under another process manager, the lower-level command is still available:
 

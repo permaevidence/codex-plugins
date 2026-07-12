@@ -6,10 +6,21 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
+import re
+import select
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from runtime_install import install_runtime
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -43,10 +54,10 @@ def parse_args() -> argparse.Namespace:
             "In dangerFullAccess mode this is not a permission boundary."
         ),
     )
-    parser.add_argument("--telegram-token", help="Telegram bot token from BotFather.")
-    parser.add_argument("--openai-api-key", help="OpenAI API key. Required for setup.")
-    parser.add_argument("--model", default="gpt-5.5", help="Codex model for Telegram sessions.")
-    parser.add_argument("--effort", default="high", choices=["minimal", "low", "medium", "high"], help="Codex reasoning effort.")
+    parser.add_argument("--telegram-token", help="Telegram bot token from BotFather. Prefer the interactive prompt so it does not enter shell history.")
+    parser.add_argument("--openai-api-key", help="OpenAI API key. Prefer the interactive prompt so it does not enter shell history.")
+    parser.add_argument("--model", help="Codex model for Telegram sessions. Defaults to an available catalog model.")
+    parser.add_argument("--effort", help="Codex reasoning effort. Must be supported by the selected model.")
     parser.add_argument(
         "--sandbox-mode",
         choices=["workspaceWrite", "dangerFullAccess"],
@@ -61,6 +72,16 @@ def parse_args() -> argparse.Namespace:
         "--start-bridge",
         choices=["yes", "no"],
         help="Start the bridge after writing configuration.",
+    )
+    parser.add_argument(
+        "--pair-now",
+        choices=["yes", "no"],
+        help="Wait for and approve the first Telegram pairing request during setup.",
+    )
+    parser.add_argument(
+        "--skip-credential-checks",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     return parser.parse_args()
 
@@ -103,13 +124,17 @@ def main() -> int:
         if not prompt_yes_no("That OpenAI key does not start with 'sk-'. Continue anyway?", default=False):
             raise SystemExit("Setup cancelled.")
 
+    model, effort = resolve_model_selection(args.model, args.effort)
+
     sandbox_mode = args.sandbox_mode or choose_sandbox_mode()
     network_access = resolve_network_access(args.network_access, sandbox_mode)
     start_bridge = resolve_start_bridge(args.start_bridge)
+    pair_now = start_bridge and resolve_pair_now(args.pair_now)
 
     print()
     print("Setup summary")
-    print(f"- repo: {REPO_ROOT}")
+    print(f"- installer source: {REPO_ROOT}")
+    print("- permanent runtime: ~/Library/Application Support/PermaEvidenceCodex/current")
     print(f"- Telegram/Codex starting folder: {project_dir}")
     print("- access scope: whole Mac as your local user when dangerFullAccess is selected")
     print(f"- AGENTS.md memory target: {agents_md_path}")
@@ -118,25 +143,44 @@ def main() -> int:
     print(f"- sandbox: {sandbox_mode}")
     print(f"- network access for Codex sessions: {network_access}")
     print(f"- start bridge after setup: {start_bridge}")
+    print(f"- guide Telegram pairing now: {pair_now}")
+    print("- memory hooks: trust this plugin's four registered hooks")
     print()
     if not prompt_yes_no("Proceed with these changes?", default=True):
         raise SystemExit("Setup cancelled.")
 
-    run([sys.executable, str(INSTALL_PLUGINS)])
-    run([sys.executable, str(MEMORY_INSTALLER)])
+    if args.telegram_token or args.openai_api_key:
+        print("Warning: command-line secrets can be visible in shell history and process listings.")
+
+    if not args.skip_credential_checks:
+        validate_telegram_token(telegram_token)
+        validate_openai_key(openai_key)
+
+    backup_dir = create_setup_backup(agents_md_path)
+    print(f"Configuration backup: {backup_dir}")
+
+    installed_root = install_runtime(REPO_ROOT)
+    install_plugins = installed_root / "scripts" / "install_plugins.py"
+    memory_installer = installed_root / "plugins" / "codex-long-term-memory" / "scripts" / "install.py"
+    memory_agents_updater = installed_root / "plugins" / "codex-long-term-memory" / "scripts" / "update_agents_injection.py"
+    bridge_cli = installed_root / "plugins" / "codex-telegram-bridge" / "scripts" / "bridge.py"
+
+    run([sys.executable, str(install_plugins), "--replace-marketplace"])
+    run([sys.executable, str(memory_installer)])
 
     configure_memory(openai_key=openai_key, agents_md_path=agents_md_path)
     configure_telegram(
         telegram_token=telegram_token,
         openai_key=openai_key,
         project_dir=project_dir,
-        model=args.model,
-        effort=args.effort,
+        model=model,
+        effort=effort,
         sandbox_mode=sandbox_mode,
         network_access=network_access,
     )
     write_local_capabilities_block(agents_md_path)
-    run([sys.executable, str(MEMORY_AGENTS_UPDATER), "--cwd", str(project_dir)], check=False)
+    trust_memory_hooks(project_dir)
+    run([sys.executable, str(memory_agents_updater), "--cwd", str(project_dir)])
 
     print()
     print("Configuration written.")
@@ -147,23 +191,121 @@ def main() -> int:
     print(f"- AGENTS.md:    {agents_md_path}")
 
     if start_bridge:
-        run([sys.executable, str(BRIDGE_CLI), "start"], check=False)
+        run([sys.executable, str(bridge_cli), "install-service"])
+
+    paired = False
+    if pair_now:
+        paired = guided_pairing(installed_root)
 
     print()
-    run([sys.executable, str(BRIDGE_CLI), "doctor"], check=False)
+    doctor_command = [sys.executable, str(bridge_cli), "doctor"]
+    if not paired and not existing_allowed_chat():
+        doctor_command.append("--allow-unpaired")
+    if not start_bridge:
+        doctor_command.append("--allow-stopped")
+    run(doctor_command)
 
     print()
     print("Next:")
     print("1. Send a Telegram DM to your bot.")
     print("2. If the bot replies with a pairing code, approve it locally:")
-    print(f"   python3 {REPO_ROOT}/plugins/codex-telegram-bridge/scripts/access.py pair <code>")
+    print(f"   python3 '{installed_root}/plugins/codex-telegram-bridge/scripts/access.py' pair <code>")
     print("3. Send /newsession in Telegram after pairing so Codex starts fresh with the new plugin setup.")
     return 0
 
 
 def require_codex() -> None:
-    if not shutil.which("codex"):
+    codex = shutil.which("codex")
+    if not codex:
         raise SystemExit("codex CLI was not found on PATH. Install Codex and run `codex login` first.")
+    completed = subprocess.run([codex, "login", "status"], capture_output=True, text=True, check=False, timeout=20)
+    if completed.returncode != 0:
+        raise SystemExit("Codex is installed but is not logged in. Run `codex login`, then rerun setup.")
+
+
+def resolve_model_selection(requested_model: str | None, requested_effort: str | None) -> tuple[str, str]:
+    codex = shutil.which("codex") or "codex"
+    completed = subprocess.run(
+        [codex, "debug", "models"], capture_output=True, text=True, check=False, timeout=30
+    )
+    if completed.returncode != 0:
+        raise SystemExit("Could not read the Codex model catalog. Run `codex doctor` and try again.")
+    try:
+        raw_models = json.loads(completed.stdout).get("models", [])
+    except (json.JSONDecodeError, AttributeError) as exc:
+        raise SystemExit("Codex returned an invalid model catalog.") from exc
+    models = []
+    for item in raw_models:
+        if not isinstance(item, dict) or item.get("visibility") == "hide" or not item.get("slug"):
+            continue
+        efforts = [
+            str(level.get("effort"))
+            for level in item.get("supported_reasoning_levels", [])
+            if isinstance(level, dict) and level.get("effort")
+        ]
+        models.append((str(item["slug"]), str(item.get("display_name") or item["slug"]), efforts, str(item.get("default_reasoning_level") or "")))
+    if not models:
+        raise SystemExit("No selectable Codex models were found for this account.")
+
+    by_slug = {item[0]: item for item in models}
+    model = requested_model
+    if not model:
+        print("Available Codex models:")
+        for index, item in enumerate(models[:8], 1):
+            print(f"{index}. {item[1]} ({item[0]})")
+        choice = prompt("Initial model", default="1")
+        if choice.isdigit() and 1 <= int(choice) <= min(8, len(models)):
+            model = models[int(choice) - 1][0]
+        else:
+            model = choice
+    if model not in by_slug:
+        raise SystemExit(f"Model `{model}` is not available in this Codex installation.")
+
+    selected = by_slug[model]
+    efforts = selected[2]
+    effort = requested_effort
+    if not effort:
+        default_effort = "high" if "high" in efforts else (selected[3] or (efforts[0] if efforts else "medium"))
+        if efforts:
+            print(f"Available thinking efforts for {selected[1]}: {', '.join(efforts)}")
+            effort = prompt("Initial thinking effort", default=default_effort)
+        else:
+            effort = default_effort
+    if efforts and effort not in efforts:
+        raise SystemExit(f"Model `{model}` does not support effort `{effort}`. Available: {', '.join(efforts)}")
+    return model, effort
+
+
+def validate_telegram_token(token: str) -> None:
+    print("Validating Telegram bot token...")
+    request = urllib.request.Request(f"https://api.telegram.org/bot{token}/getMe")
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Telegram rejected the bot token or could not be reached: {exc}") from exc
+    if not payload.get("ok") or not (payload.get("result") or {}).get("id"):
+        raise SystemExit("Telegram did not recognize that bot token.")
+    print(f"Telegram bot verified: @{(payload.get('result') or {}).get('username', 'unknown')}")
+
+
+def validate_openai_key(key: str) -> None:
+    print("Validating OpenAI API key...")
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/models?limit=1",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            ok = 200 <= response.status < 300
+    except (OSError, urllib.error.HTTPError) as exc:
+        raise SystemExit(
+            "OpenAI rejected the API key or could not be reached. An API key with active API billing is required; a ChatGPT subscription alone is not an API key. "
+            f"Details: {exc}"
+        ) from exc
+    if not ok:
+        raise SystemExit("OpenAI API key validation failed.")
+    print("OpenAI API key verified.")
 
 
 def resolve_project_dir(value: str | None) -> Path:
@@ -220,6 +362,45 @@ def resolve_start_bridge(value: str | None) -> bool:
     return prompt_yes_no("Start the Telegram bridge after setup?", default=True)
 
 
+def resolve_pair_now(value: str | None) -> bool:
+    if value:
+        return value == "yes"
+    return prompt_yes_no("Complete Telegram pairing inside this wizard?", default=True)
+
+
+def existing_allowed_chat() -> bool:
+    access_path = TELEGRAM_DIR / "access.json"
+    access = load_json(access_path)
+    return bool(access.get("allowFrom"))
+
+
+def guided_pairing(installed_root: Path) -> bool:
+    if existing_allowed_chat():
+        print("Telegram already has an approved chat.")
+        return True
+    print()
+    print("Open Telegram now, find your new bot, and send it any message.")
+    input("Press Enter here after you have sent the message: ")
+    access_path = TELEGRAM_DIR / "access.json"
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        access = load_json(access_path)
+        pending = access.get("pending") if isinstance(access, dict) else None
+        if isinstance(pending, dict) and pending:
+            code, entry = next(iter(pending.items()))
+            sender = str((entry or {}).get("senderId") or "unknown")
+            print(f"Pairing request received from Telegram user {sender} (code {code}).")
+            if not prompt_yes_no("Approve this Telegram user?", default=False):
+                raise SystemExit("Pairing was not approved. Setup stopped without granting Telegram access.")
+            access_script = installed_root / "plugins/codex-telegram-bridge/scripts/access.py"
+            run([sys.executable, str(access_script), "pair", str(code)])
+            return True
+        time.sleep(1)
+    raise SystemExit(
+        "No pairing request arrived within two minutes. Confirm that you messaged the correct bot, then rerun setup or use the access.py pair command shown in the documentation."
+    )
+
+
 def configure_memory(*, openai_key: str, agents_md_path: Path) -> None:
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     update_env_file(MEMORY_ENV, {"OPENAI_API_KEY": openai_key})
@@ -237,6 +418,131 @@ def configure_memory(*, openai_key: str, agents_md_path: Path) -> None:
         }
     )
     write_json(MEMORY_CONFIG, config)
+
+
+def create_setup_backup(agents_md_path: Path) -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    backup_dir = CODEX_DIR / "setup-backups" / stamp
+    backup_dir.mkdir(parents=True, mode=0o700)
+    files = {
+        "config.toml": CODEX_DIR / "config.toml",
+        "hooks.json": CODEX_DIR / "hooks.json",
+        "long-term-memory.env": MEMORY_ENV,
+        "long-term-memory.config.json": MEMORY_CONFIG,
+        "telegram-bridge.env": TELEGRAM_ENV,
+        "telegram-bridge.config.json": TELEGRAM_CONFIG,
+        "AGENTS.md": agents_md_path,
+    }
+    for name, source in files.items():
+        if source.is_file():
+            destination = backup_dir / name
+            shutil.copy2(source, destination)
+            destination.chmod(0o600)
+    return backup_dir
+
+
+def trust_memory_hooks(cwd: Path) -> None:
+    hooks = query_memory_hooks(cwd)
+    expected = {"sessionStart", "userPromptSubmit", "preCompact", "stop"}
+    found = {str(hook.get("eventName")) for hook in hooks}
+    if not expected.issubset(found):
+        missing = ", ".join(sorted(expected - found))
+        raise SystemExit(f"Codex did not discover all memory hooks. Missing: {missing}")
+
+    config_path = CODEX_DIR / "config.toml"
+    text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    if not re.search(r"(?m)^\[hooks\.state\]\s*$", text):
+        text = text.rstrip() + "\n\n[hooks.state]\n"
+    for hook in hooks:
+        key = str(hook.get("key") or "")
+        current_hash = str(hook.get("currentHash") or "")
+        if not key or not current_hash.startswith("sha256:"):
+            raise SystemExit("Codex returned an incomplete hook trust record.")
+        text = set_hook_trust(text, key, current_hash)
+    atomic_write_text(config_path, text.rstrip() + "\n", preserve_mode=True)
+
+    verified = query_memory_hooks(cwd)
+    untrusted = [
+        hook for hook in verified
+        if not hook.get("enabled") or hook.get("trustStatus") != "trusted"
+    ]
+    if untrusted:
+        names = ", ".join(str(hook.get("eventName") or "unknown") for hook in untrusted)
+        raise SystemExit(f"Memory hooks were registered but are not enabled and trusted: {names}")
+    print("Memory hooks verified and trusted.")
+
+
+def query_memory_hooks(cwd: Path) -> list[dict]:
+    codex = shutil.which("codex") or "codex"
+    process = subprocess.Popen(
+        [codex, "app-server"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(cwd),
+    )
+    assert process.stdin is not None and process.stdout is not None
+    messages = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "permaevidence_setup", "title": "Perma Evidence Setup", "version": "1"}}},
+        {"jsonrpc": "2.0", "method": "initialized", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "hooks/list", "params": {}},
+    ]
+    try:
+        for message in messages:
+            process.stdin.write(json.dumps(message) + "\n")
+        process.stdin.flush()
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            readable, _, _ = select.select([process.stdout], [], [], 0.5)
+            if not readable:
+                if process.poll() is not None:
+                    break
+                continue
+            line = process.stdout.readline()
+            if not line:
+                break
+            try:
+                reply = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if reply.get("id") != 2:
+                continue
+            if reply.get("error"):
+                raise SystemExit(f"Could not inspect Codex hooks: {reply['error']}")
+            hooks: list[dict] = []
+            for group in (reply.get("result") or {}).get("data", []):
+                for hook in group.get("hooks", []):
+                    if "codex-long-term-memory/hooks/" in str(hook.get("command") or ""):
+                        hooks.append(hook)
+            return hooks
+        raise SystemExit("Timed out while asking Codex to inspect memory hooks.")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+
+def set_hook_trust(text: str, key: str, current_hash: str) -> str:
+    quoted_key = key.replace("\\", "\\\\").replace('"', '\\"')
+    header = f'[hooks.state."{quoted_key}"]'
+    pattern = re.compile(rf"(?ms)^{re.escape(header)}\s*\n(?P<body>.*?)(?=^\[|\Z)")
+    match = pattern.search(text)
+    if match:
+        body = match.group("body")
+        if re.search(r"(?m)^\s*trusted_hash\s*=", body):
+            body = re.sub(
+                r'(?m)^(\s*trusted_hash\s*=\s*).+$',
+                rf'\1"{current_hash}"',
+                body,
+                count=1,
+            )
+        else:
+            body = f'trusted_hash = "{current_hash}"\n' + body
+        return text[: match.start()] + header + "\n" + body.rstrip() + "\n\n" + text[match.end() :].lstrip("\n")
+    return text.rstrip() + f'\n\n{header}\ntrusted_hash = "{current_hash}"\n'
 
 
 def configure_telegram(
@@ -390,11 +696,7 @@ def update_env_file(path: Path, updates: dict[str, str]) -> None:
     for key, value in updates.items():
         if key not in seen:
             output.append(f"{key}={value}")
-    path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+    atomic_write_text(path, "\n".join(output).rstrip() + "\n", mode=0o600)
 
 
 def read_env_value(path: Path, key: str) -> str:
@@ -422,12 +724,29 @@ def load_json(path: Path) -> dict:
 
 
 def write_json(path: Path, payload: dict) -> None:
+    atomic_write_text(path, json.dumps(payload, indent=2) + "\n", mode=0o600)
+
+
+def atomic_write_text(
+    path: Path,
+    text: str,
+    *,
+    mode: int | None = None,
+    preserve_mode: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    descriptor, raw_path = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    temp_path = Path(raw_path)
     try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+        with open(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+            handle.write(text)
+        if preserve_mode and path.exists():
+            shutil.copymode(path, temp_path)
+        elif mode is not None:
+            temp_path.chmod(mode)
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def prompt(label: str, *, default: str = "") -> str:

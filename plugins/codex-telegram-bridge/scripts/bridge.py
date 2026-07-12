@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
+import select
 import shutil
 import signal
 import subprocess
@@ -18,6 +20,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PLUGIN_ROOT = SCRIPT_DIR.parent
 REPO_ROOT = PLUGIN_ROOT.parents[1]
 START_SCRIPT = SCRIPT_DIR / "start_bridge.sh"
+SERVICE_LABEL = "com.permaevidence.codex-telegram-bridge"
+LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
+LAUNCH_AGENT_FILE = LAUNCH_AGENTS_DIR / f"{SERVICE_LABEL}.plist"
 
 STATE_DIR = Path.home() / ".codex" / "telegram-bridge"
 SUPERVISOR_PID_FILE = STATE_DIR / ".bridge-supervisor.pid"
@@ -38,12 +43,25 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Start, stop, and inspect the Codex Telegram bridge.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("start", help="Start the singleton bridge supervisor in the background.")
+    subparsers.add_parser("start", help="Start the bridge, using its LaunchAgent when installed.")
     subparsers.add_parser("stop", help="Stop the bridge supervisor cleanly.")
     subparsers.add_parser("quit", help="Alias for stop.")
     subparsers.add_parser("restart", help="Stop and then start the bridge supervisor.")
     subparsers.add_parser("status", help="Show bridge process/runtime status.")
     subparsers.add_parser("doctor", help="Check common setup problems.")
+    doctor_parser = subparsers.choices["doctor"]
+    doctor_parser.add_argument(
+        "--allow-unpaired",
+        action="store_true",
+        help="Treat the expected first-run unpaired state as pending rather than a failure.",
+    )
+    doctor_parser.add_argument(
+        "--allow-stopped",
+        action="store_true",
+        help="Do not fail when the LaunchAgent and bridge are intentionally not started.",
+    )
+    subparsers.add_parser("install-service", help="Install and start the per-user macOS LaunchAgent.")
+    subparsers.add_parser("uninstall-service", help="Stop and remove the macOS LaunchAgent.")
 
     logs = subparsers.add_parser("logs", help="Show bridge logs.")
     logs.add_argument("-f", "--follow", action="store_true", help="Follow new log lines.")
@@ -128,8 +146,60 @@ def bridge_running() -> bool:
     return is_pid_alive(supervisor_pid())
 
 
+def launch_domain() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def service_loaded() -> bool:
+    completed = subprocess.run(
+        ["launchctl", "print", f"{launch_domain()}/{SERVICE_LABEL}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def start_launch_service() -> int:
+    if not LAUNCH_AGENT_FILE.exists():
+        return 1
+    was_loaded = service_loaded()
+    if not was_loaded:
+        completed = subprocess.run(
+            ["launchctl", "bootstrap", launch_domain(), str(LAUNCH_AGENT_FILE)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            print((completed.stderr or completed.stdout or "launchctl bootstrap failed").strip(), file=sys.stderr)
+            return completed.returncode
+    else:
+        subprocess.run(
+            ["launchctl", "kickstart", "-k", f"{launch_domain()}/{SERVICE_LABEL}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    return wait_for_bridge_start()
+
+
+def wait_for_bridge_start() -> int:
+    deadline = time.time() + 12
+    while time.time() < deadline:
+        if bridge_running() and is_pid_alive(child_pid()):
+            print(f"Bridge supervisor started (pid {supervisor_pid()}).")
+            print(f"Log: {LOG_FILE}")
+            return 0
+        time.sleep(0.2)
+    print("Bridge did not become healthy. Check the bridge log.", file=sys.stderr)
+    return 1
+
+
 def start_bridge() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    if LAUNCH_AGENT_FILE.exists():
+        return start_launch_service()
     pid = supervisor_pid()
     if is_pid_alive(pid):
         print(f"Bridge supervisor already running (pid {pid}).")
@@ -149,25 +219,20 @@ def start_bridge() -> int:
         cwd=str(PLUGIN_ROOT),
     )
 
-    deadline = time.time() + 8
-    while time.time() < deadline:
-        pid = supervisor_pid()
-        if is_pid_alive(pid):
-            print(f"Bridge supervisor started (pid {pid}).")
-            if LOG_FILE.exists():
-                print(f"Log: {LOG_FILE}")
-            return 0
-        time.sleep(0.2)
-
-    print("Bridge start was requested, but no live supervisor pid appeared.", file=sys.stderr)
-    if LOG_FILE.exists():
-        print(f"Check log: {LOG_FILE}", file=sys.stderr)
-    return 1
+    return wait_for_bridge_start()
 
 
 def stop_bridge() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     STOP_FILE.touch()
+
+    if service_loaded():
+        subprocess.run(
+            ["launchctl", "bootout", f"{launch_domain()}/{SERVICE_LABEL}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
 
     sup = supervisor_pid()
     child = child_pid()
@@ -210,6 +275,40 @@ def restart_bridge() -> int:
     return start_bridge()
 
 
+def install_service() -> int:
+    if sys.platform != "darwin":
+        print("Automatic bridge startup is currently supported only on macOS.", file=sys.stderr)
+        return 1
+    LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    stop_bridge()
+    path = os.environ.get("PATH") or "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    payload = {
+        "Label": SERVICE_LABEL,
+        "ProgramArguments": ["/bin/zsh", str(START_SCRIPT)],
+        "WorkingDirectory": str(PLUGIN_ROOT),
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ProcessType": "Background",
+        "EnvironmentVariables": {"PATH": path, "HOME": str(Path.home())},
+        "StandardOutPath": str(STATE_DIR / "launchd.log"),
+        "StandardErrorPath": str(STATE_DIR / "launchd-error.log"),
+    }
+    temp = LAUNCH_AGENT_FILE.with_suffix(".plist.tmp")
+    temp.write_bytes(plistlib.dumps(payload, sort_keys=True))
+    temp.chmod(0o600)
+    temp.replace(LAUNCH_AGENT_FILE)
+    print(f"Installed LaunchAgent: {LAUNCH_AGENT_FILE}")
+    return start_launch_service()
+
+
+def uninstall_service() -> int:
+    stop_bridge()
+    LAUNCH_AGENT_FILE.unlink(missing_ok=True)
+    print(f"Removed LaunchAgent: {LAUNCH_AGENT_FILE}")
+    return 0
+
+
 def show_status() -> int:
     sup = supervisor_pid()
     child = child_pid()
@@ -223,6 +322,8 @@ def show_status() -> int:
     print(f"- config: {CONFIG_FILE if CONFIG_FILE.exists() else 'missing'}")
     print(f"- env: {ENV_FILE if ENV_FILE.exists() else 'missing'}")
     print(f"- log: {LOG_FILE if LOG_FILE.exists() else 'missing'}")
+    print(f"- LaunchAgent: {'installed' if LAUNCH_AGENT_FILE.exists() else 'not installed'}")
+    print(f"- launchd service: {'loaded' if service_loaded() else 'not loaded'}")
 
     runtime = load_json(RUNTIME_STATE_FILE)
     if runtime:
@@ -252,7 +353,7 @@ def show_logs(lines: int, follow: bool) -> int:
     return subprocess.call(command)
 
 
-def doctor() -> int:
+def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
     checks: list[tuple[str, bool, str]] = []
 
     codex = shutil.which("codex")
@@ -261,7 +362,7 @@ def doctor() -> int:
         version = run_text([codex, "--version"])
         checks.append(("codex version", bool(version), version or "unknown"))
 
-    checks.append(("repo marketplace file", (REPO_ROOT / ".agents/plugins/marketplace.json").exists(), str(REPO_ROOT)))
+    checks.append(("runtime marketplace file", (REPO_ROOT / ".agents/plugins/marketplace.json").exists(), str(REPO_ROOT)))
     plugin_list = run_text([codex, "plugin", "list"]) if codex else ""
     checks.append(
         (
@@ -296,9 +397,12 @@ def doctor() -> int:
     access = load_json(ACCESS_FILE)
     allow_list = access.get("allowFrom", []) if isinstance(access, dict) else []
     pending = access.get("pending", {}) if isinstance(access, dict) else {}
-    checks.append(("access.json", isinstance(access, dict), str(ACCESS_FILE) if isinstance(access, dict) else "missing or invalid"))
-    checks.append(("at least one allowed chat", bool(allow_list), f"{len(allow_list)} allowed" if allow_list else "none yet"))
-    if pending:
+    if allow_unpaired and not allow_list:
+        print("[PENDING] Telegram pairing: send the bot a DM, then approve the displayed code.")
+    else:
+        checks.append(("access.json", isinstance(access, dict), str(ACCESS_FILE) if isinstance(access, dict) else "missing or invalid"))
+        checks.append(("at least one allowed chat", bool(allow_list), f"{len(allow_list)} allowed" if allow_list else "none yet"))
+    if pending and not allow_unpaired:
         checks.append(("pending pairing codes", False, f"{len(pending)} pending; approve with scripts/access.py pair <code>"))
 
     memory_config = load_json(MEMORY_CONFIG_FILE)
@@ -309,11 +413,28 @@ def doctor() -> int:
         transport = str(memory_config.get("injection_transport") or "")
         checks.append(("memory transport configured", bool(transport), transport or "not set"))
         if transport == "agents_md":
-            agents_path = Path(str(memory_config.get("agents_md_path") or "")).expanduser()
-            checks.append(("AGENTS.md memory target set", bool(str(agents_path)), str(agents_path) if str(agents_path) else "missing"))
+            agents_raw = str(memory_config.get("agents_md_path") or "").strip()
+            agents_path = Path(agents_raw).expanduser() if agents_raw else None
+            checks.append(("AGENTS.md memory target set", bool(agents_path and agents_path.is_file()), str(agents_path) if agents_path else "missing"))
 
-    checks.append(("bridge supervisor running", bridge_running(), format_pid(supervisor_pid())))
-    checks.append(("bridge child running", is_pid_alive(child_pid()), format_pid(child_pid())))
+    hook_records = query_memory_hooks(config.get("default_cwd") if config else None)
+    expected_hooks = {"sessionStart", "userPromptSubmit", "preCompact", "stop"}
+    trusted_hooks = {
+        str(item.get("eventName"))
+        for item in hook_records
+        if item.get("enabled") and item.get("trustStatus") == "trusted"
+    }
+    checks.append(("memory hooks enabled and trusted", expected_hooks.issubset(trusted_hooks), f"{len(trusted_hooks & expected_hooks)}/4 trusted"))
+
+    if not allow_stopped:
+        checks.append(("LaunchAgent installed", LAUNCH_AGENT_FILE.is_file(), str(LAUNCH_AGENT_FILE) if LAUNCH_AGENT_FILE.exists() else "missing"))
+        checks.append(("launchd service loaded", service_loaded(), SERVICE_LABEL if service_loaded() else "not loaded"))
+
+    if not allow_stopped:
+        checks.append(("bridge supervisor running", bridge_running(), format_pid(supervisor_pid())))
+        checks.append(("bridge child running", is_pid_alive(child_pid()), format_pid(child_pid())))
+        child_command = process_command(child_pid())
+        checks.append(("bridge child command valid", "telegram_bridge.py" in child_command, child_command or "not running"))
 
     failures = 0
     print("Codex Telegram bridge doctor")
@@ -353,6 +474,60 @@ def run_text(command: list[str]) -> str:
     return (proc.stdout or proc.stderr or "").strip()
 
 
+def query_memory_hooks(cwd: str | None) -> list[dict]:
+    codex = shutil.which("codex")
+    working_dir = Path(str(cwd or Path.home())).expanduser()
+    if not codex or not working_dir.is_dir():
+        return []
+    try:
+        process = subprocess.Popen(
+            [codex, "app-server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            cwd=str(working_dir),
+        )
+    except Exception:
+        return []
+    assert process.stdin is not None and process.stdout is not None
+    try:
+        for message in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "permaevidence_doctor", "title": "Perma Evidence Doctor", "version": "1"}}},
+            {"jsonrpc": "2.0", "method": "initialized", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "hooks/list", "params": {}},
+        ):
+            process.stdin.write(json.dumps(message) + "\n")
+        process.stdin.flush()
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            ready, _, _ = select.select([process.stdout], [], [], 0.5)
+            if not ready:
+                continue
+            line = process.stdout.readline()
+            if not line:
+                break
+            reply = json.loads(line)
+            if reply.get("id") != 2:
+                continue
+            records: list[dict] = []
+            for group in (reply.get("result") or {}).get("data", []):
+                records.extend(
+                    hook for hook in group.get("hooks", [])
+                    if "codex-long-term-memory/hooks/" in str(hook.get("command") or "")
+                )
+            return records
+    except Exception:
+        return []
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+    return []
+
+
 def load_json(path: Path) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -390,7 +565,11 @@ def main() -> int:
     if command == "logs":
         return show_logs(args.lines, args.follow)
     if command == "doctor":
-        return doctor()
+        return doctor(allow_unpaired=args.allow_unpaired, allow_stopped=args.allow_stopped)
+    if command == "install-service":
+        return install_service()
+    if command == "uninstall-service":
+        return uninstall_service()
     raise AssertionError(f"unhandled command: {command}")
 
 

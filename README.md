@@ -7,7 +7,7 @@ Codex-native ports of two Claude Code workflows:
 
 These plugins are designed for a trusted, dedicated computer that you are comfortable leaving unattended and controlling remotely. The setup wizard therefore defaults to broad autonomous Codex permissions: `dangerFullAccess`, network access enabled, and no per-command approval prompts. Read the security notes before using that profile on any shared or sensitive machine.
 
-This repo is structured as a local Codex plugin marketplace so both plugins can be installed from one workspace. The Telegram bridge still runs as a companion local service, but that does not replace plugin installation: install the plugin first so Codex can see its skills and MCP tools, then start the bridge service.
+This repo is structured as a local Codex plugin marketplace so both plugins can be installed from one workspace. The setup wizard copies it into a permanent, versioned runtime under `~/Library/Application Support/PermaEvidenceCodex/`; the downloaded ZIP is only an installer and can be deleted afterward. The Telegram bridge runs as a companion per-user macOS LaunchAgent, while Codex plugin installation exposes its skills and MCP tools.
 
 ## Start Here: Fresh Install
 
@@ -45,21 +45,18 @@ python3 scripts/setup.py
 8. Paste the OpenAI API key when asked.
 9. When asked about permissions, choose the recommended `dangerFullAccess` option or just press Enter.
 10. When asked about network access, press Enter.
-11. When asked whether to start the bridge, press Enter.
-12. Message your new Telegram bot.
-13. If the bot replies with a pairing code, copy the code and run this in the same Terminal window:
-
-```bash
-python3 plugins/codex-telegram-bridge/scripts/access.py pair PASTE_CODE_HERE
-```
-
+11. When asked whether to start the bridge and complete pairing, press Enter.
+12. The wizard validates both keys, installs a persistent background service, and asks you to message the bot.
+13. Message your new Telegram bot, return to Terminal, and press Enter. Confirm the Telegram user shown by the wizard to approve pairing.
 14. In Telegram, send:
 
 ```text
 /newsession
 ```
 
-After that, you can talk to Codex from Telegram. This setup is intended for a dedicated Mac you trust Codex to control remotely.
+After that, you can talk to Codex from Telegram. You may delete `~/Downloads/codex-plugins-main` and `codex-plugins.zip`; the live runtime is in Application Support. This setup is intended for a dedicated Mac you trust Codex to control remotely.
+
+The LaunchAgent starts the bridge automatically whenever this macOS user logs in and restarts it after crashes. If FileVault is enabled, someone may still need to unlock the Mac locally after a full reboot before user services can start.
 
 ### Recommended: run the setup wizard
 
@@ -76,6 +73,8 @@ It asks for:
 - the OpenAI API key, required for memory summaries and voice transcription
 - the Codex sandbox level for Telegram sessions, defaulting to broad autonomous access
 - whether to start the bridge immediately
+- an available Codex model and only the thinking efforts supported by that model
+- whether to complete secure local pairing inside the wizard
 
 Then it:
 
@@ -89,16 +88,31 @@ Then it:
 - writes `~/.codex/telegram-bridge/config.json`
 - optionally starts the bridge
 - runs `bridge.py doctor`
+- validates Codex login, the Telegram bot with `getMe`, and the OpenAI API key before modifying the installation
+- backs up existing Codex/plugin configuration
+- installs versioned runtime code in Application Support with plugin cachebusters
+- explicitly verifies and trusts the four memory hooks being installed
+- installs a `launchd` service for login/reboot recovery
 
-After the wizard finishes, send a Telegram DM to your bot. If the bot replies with a pairing code, approve it locally:
+If you skip guided pairing, send a Telegram DM to your bot and approve the pairing code locally:
 
 ```bash
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/access.py pair a1b2c3
+python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/access.py" pair a1b2c3
 ```
 
 Then send `/newsession` from Telegram so Codex starts fresh with the installed plugins and refreshed `AGENTS.md` memory.
 
-### Manual setup reference
+### Updating safely
+
+The permanent installation includes an updater. It resolves the requested Git ref to an immutable commit SHA, downloads that exact archive, installs it into a new version directory, applies Codex cachebusters, runs health checks, restarts the LaunchAgent, and rolls back to the previous runtime if activation fails:
+
+```bash
+python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/scripts/update.py"
+```
+
+The last three runtime versions are retained so rollback does not depend on the Downloads folder.
+
+### Manual/developer setup reference
 
 If you prefer to do each step by hand, use the manual flow below. Replace `/absolute/path/to/repo` with the real path to the repo. Replace `/Users/your-name` with your Mac home folder.
 
@@ -110,7 +124,7 @@ Clone this repo locally, then run:
 python3 /absolute/path/to/repo/scripts/install_plugins.py
 ```
 
-This helper runs the equivalent of:
+This helper runs the equivalent of the following and is intended for development. Normal users should use `setup.py`, which first creates the permanent runtime:
 
 ```bash
 codex plugin marketplace add /absolute/path/to/repo
@@ -218,16 +232,18 @@ In `dangerFullAccess` mode, `default_cwd` is only Codex's starting folder. It do
 ### 6. Start the Telegram bridge
 
 ```bash
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py start
+python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py" install-service
 ```
 
 Useful bridge commands:
 
 ```bash
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py status
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py doctor
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py logs -f
-python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py stop
+python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py" status
+python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py" doctor
+python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py" logs -f
+python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py" stop
+python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py" start
+python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py" uninstall-service
 ```
 
 ### 7. Pair your Telegram chat
@@ -263,10 +279,13 @@ The doctor check verifies the common trapdoors:
 - Long-term memory config exists.
 - `agents_md` memory transport points at an `AGENTS.md` target.
 - The bridge supervisor and child process are running.
+- All four memory hooks are enabled and trusted.
+- The macOS LaunchAgent is installed and loaded.
+- The bridge child PID actually belongs to `telegram_bridge.py`.
 
 Send `/newsession` from Telegram after changing Codex, hook, plugin, MCP, or `AGENTS.md` memory settings.
 
-Use `bridge.py start`/`stop`/`restart` rather than launching `telegram_bridge.py` directly. The wrapper controls the singleton supervisor, writes pid files under `~/.codex/telegram-bridge/`, and guards against duplicate long-pollers for the same bot token.
+Use `bridge.py start`/`stop`/`restart` rather than launching `telegram_bridge.py` directly. The wrapper controls `launchd`, the singleton supervisor, pid files under `~/.codex/telegram-bridge/`, and duplicate-long-poller protection.
 
 If you want Codex on the other machine to do this itself, giving it the repo URL should be enough only if it is also told to clone the repo locally and run `python3 scripts/install_plugins.py`. The URL alone is not a complete install contract without those steps.
 
