@@ -46,6 +46,16 @@ def set_bot_commands(token: str, commands: list[dict[str, str]]) -> dict[str, An
     )
 
 
+def answer_callback_query(token: str, callback_query_id: str, text: str | None = None) -> None:
+    payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+    try:
+        telegram_request(token, "answerCallbackQuery", payload)
+    except Exception:
+        return
+
+
 def set_message_reaction(token: str, chat_id: str, message_id: int, emoji: str) -> None:
     if not emoji:
         return
@@ -66,6 +76,7 @@ def edit_message_text(
     message_id: int,
     text: str,
     parse_mode: str | None = None,
+    reply_markup: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "chat_id": chat_id,
@@ -74,6 +85,8 @@ def edit_message_text(
     }
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
     return telegram_request(token, "editMessageText", payload)
 
 
@@ -113,6 +126,7 @@ def send_message(
     access: dict[str, Any] | None = None,
     parse_mode: str | None = None,
     files: list[str] | None = None,
+    reply_markup: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     access = access or {}
     files = files or []
@@ -136,6 +150,8 @@ def send_message(
         }
         if parse_mode:
             payload["parse_mode"] = parse_mode
+        if reply_markup and index == 0:
+            payload["reply_markup"] = json.dumps(reply_markup)
         if reply_to_message_id is not None and (
             reply_mode == "all" or (reply_mode == "first" and index == 0)
         ):

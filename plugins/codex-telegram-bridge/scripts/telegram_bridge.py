@@ -20,7 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from lib.telegram_api import (
     PHOTO_EXTS,
+    answer_callback_query,
     download_attachment_to_dir,
+    edit_message_text,
     fetch_telegram_file,
     send_chat_action,
     send_message,
@@ -29,6 +31,7 @@ from lib.telegram_api import (
     telegram_request,
 )
 from lib.telegram_common import (
+    CONFIG_FILE,
     INBOX_DIR,
     load_access,
     load_chat_map,
@@ -37,6 +40,7 @@ from lib.telegram_common import (
     load_reminders,
     load_runtime_state,
     load_version_state,
+    load_json,
     make_pair_code,
     save_access,
     save_chat_map,
@@ -44,6 +48,7 @@ from lib.telegram_common import (
     save_reminders,
     save_runtime_state,
     save_version_state,
+    save_json,
 )
 
 EMAIL_CHECK_INTERVAL = 5 * 60
@@ -62,9 +67,12 @@ BOT_COMMANDS = [
     {"command": "start", "description": "Show the welcome/help message"},
     {"command": "help", "description": "Show available commands"},
     {"command": "status", "description": "Show current Codex status"},
+    {"command": "model", "description": "Choose Codex model and thinking effort"},
     {"command": "stop", "description": "Interrupt the active Codex turn"},
     {"command": "newsession", "description": "Restart Codex and start a fresh thread"},
 ]
+
+MODEL_CALLBACK_PREFIX = "model:"
 
 
 def normalize_command(text: str, bot_username: str) -> str:
@@ -157,6 +165,256 @@ def gate_message(message: dict[str, Any], token: str, bot_username: str) -> bool
         return True
 
     return False
+
+
+def list_codex_models(codex_cmd: str) -> list[dict[str, Any]]:
+    try:
+        proc = subprocess.run(
+            [codex_cmd, "debug", "models"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except Exception:
+        return []
+    if proc.returncode != 0:
+        return []
+    try:
+        data = json.loads(proc.stdout)
+    except Exception:
+        return []
+
+    models: list[dict[str, Any]] = []
+    for raw_model in data.get("models", []):
+        if not isinstance(raw_model, dict):
+            continue
+        slug = str(raw_model.get("slug") or "").strip()
+        if not slug or raw_model.get("visibility") == "hide":
+            continue
+        efforts = [
+            str(item.get("effort") or "").strip()
+            for item in raw_model.get("supported_reasoning_levels", [])
+            if isinstance(item, dict) and str(item.get("effort") or "").strip()
+        ]
+        models.append(
+            {
+                "slug": slug,
+                "display_name": str(raw_model.get("display_name") or slug).strip(),
+                "description": str(raw_model.get("description") or "").strip(),
+                "default_effort": str(raw_model.get("default_reasoning_level") or "").strip(),
+                "efforts": efforts,
+                "priority": raw_model.get("priority", 9999),
+            }
+        )
+    return sorted(models, key=lambda item: (item.get("priority", 9999), item["slug"]))
+
+
+def find_codex_model(models: list[dict[str, Any]], slug: str) -> dict[str, Any] | None:
+    wanted = slug.strip().lower()
+    for model in models:
+        if str(model.get("slug") or "").lower() == wanted:
+            return model
+    return None
+
+
+def current_model_text(config: dict[str, Any]) -> str:
+    model = str(config.get("model") or "default").strip()
+    effort = str(config.get("effort") or "default").strip()
+    return f"{model} / {effort}"
+
+
+def model_keyboard(models: list[dict[str, Any]]) -> dict[str, Any]:
+    rows: list[list[dict[str, str]]] = []
+    for model in models:
+        rows.append(
+            [
+                {
+                    "text": str(model.get("display_name") or model.get("slug")),
+                    "callback_data": f"{MODEL_CALLBACK_PREFIX}choose:{model['slug']}",
+                }
+            ]
+        )
+    return {"inline_keyboard": rows}
+
+
+def effort_keyboard(model: dict[str, Any]) -> dict[str, Any]:
+    efforts = model.get("efforts") or []
+    rows: list[list[dict[str, str]]] = []
+    for index in range(0, len(efforts), 3):
+        rows.append(
+            [
+                {
+                    "text": str(effort),
+                    "callback_data": f"{MODEL_CALLBACK_PREFIX}effort:{model['slug']}:{effort}",
+                }
+                for effort in efforts[index : index + 3]
+            ]
+        )
+    return {"inline_keyboard": rows}
+
+
+def save_model_selection(config: dict[str, Any], model: str, effort: str) -> None:
+    current = load_json(CONFIG_FILE, {})
+    if not isinstance(current, dict):
+        current = {}
+    current["model"] = model
+    current["effort"] = effort
+    save_json(CONFIG_FILE, current)
+    config["model"] = model
+    config["effort"] = effort
+
+
+def model_menu_text(config: dict[str, Any], models: list[dict[str, Any]]) -> str:
+    lines = [f"Current model: {current_model_text(config)}", "", "Choose a model:"]
+    for model in models:
+        efforts = ", ".join(model.get("efforts") or []) or "default"
+        lines.append(f"- {model['display_name']} (`{model['slug']}`): {efforts}")
+    return "\n".join(lines)
+
+
+def effort_menu_text(model: dict[str, Any]) -> str:
+    efforts = ", ".join(model.get("efforts") or []) or "default"
+    return (
+        f"Choose thinking effort for {model['display_name']} (`{model['slug']}`).\n"
+        f"Available: {efforts}"
+    )
+
+
+def handle_model_command(
+    token: str,
+    chat_id: str,
+    text: str,
+    reply_to_message_id: int | None,
+    config: dict[str, Any],
+    access: dict[str, Any],
+) -> None:
+    models = list_codex_models(str(config.get("codex_cmd") or "codex"))
+    if not models:
+        send_message(
+            token,
+            chat_id,
+            f"Current model: {current_model_text(config)}\n\nCould not read Codex model catalog.",
+            reply_to_message_id,
+            access=access,
+        )
+        return
+
+    args = (text or "").strip().split()[1:]
+    if not args or args[0].lower() in {"current", "list", "menu"}:
+        send_message(
+            token,
+            chat_id,
+            model_menu_text(config, models),
+            reply_to_message_id,
+            access=access,
+            reply_markup=model_keyboard(models),
+        )
+        return
+
+    selected_model = find_codex_model(models, args[0])
+    if not selected_model:
+        send_message(
+            token,
+            chat_id,
+            f"Unknown model: {args[0]}\n\nUse /model to choose from the available models.",
+            reply_to_message_id,
+            access=access,
+        )
+        return
+
+    if len(args) == 1:
+        send_message(
+            token,
+            chat_id,
+            effort_menu_text(selected_model),
+            reply_to_message_id,
+            access=access,
+            reply_markup=effort_keyboard(selected_model),
+        )
+        return
+
+    effort = args[1].strip()
+    if selected_model.get("efforts") and effort not in selected_model["efforts"]:
+        send_message(
+            token,
+            chat_id,
+            f"{selected_model['display_name']} does not support effort `{effort}`.\n"
+            f"Available: {', '.join(selected_model['efforts'])}",
+            reply_to_message_id,
+            access=access,
+        )
+        return
+
+    save_model_selection(config, str(selected_model["slug"]), effort)
+    send_message(
+        token,
+        chat_id,
+        f"Updated Codex model for future turns:\n{current_model_text(config)}",
+        reply_to_message_id,
+        access=access,
+    )
+
+
+def handle_model_callback(
+    token: str,
+    callback: dict[str, Any],
+    config: dict[str, Any],
+    access: dict[str, Any],
+) -> None:
+    callback_id = str(callback.get("id") or "")
+    data = str(callback.get("data") or "")
+    message = callback.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = str(chat.get("id") or "")
+    message_id = message.get("message_id")
+    sender_id = str((callback.get("from") or {}).get("id") or "")
+
+    if sender_id not in [str(item) for item in access.get("allowFrom", [])]:
+        answer_callback_query(token, callback_id, "Not authorized.")
+        return
+    if not chat_id or not isinstance(message_id, int) or not data.startswith(MODEL_CALLBACK_PREFIX):
+        answer_callback_query(token, callback_id, "Invalid selection.")
+        return
+
+    models = list_codex_models(str(config.get("codex_cmd") or "codex"))
+    if not models:
+        answer_callback_query(token, callback_id, "Could not read models.")
+        return
+
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    if action == "choose" and len(parts) == 3:
+        selected_model = find_codex_model(models, parts[2])
+        if not selected_model:
+            answer_callback_query(token, callback_id, "Unknown model.")
+            return
+        answer_callback_query(token, callback_id, f"Selected {selected_model['display_name']}")
+        edit_message_text(
+            token,
+            chat_id,
+            message_id,
+            effort_menu_text(selected_model),
+            reply_markup=effort_keyboard(selected_model),
+        )
+        return
+
+    if action == "effort" and len(parts) == 4:
+        selected_model = find_codex_model(models, parts[2])
+        effort = parts[3]
+        if not selected_model or (selected_model.get("efforts") and effort not in selected_model["efforts"]):
+            answer_callback_query(token, callback_id, "Invalid effort.")
+            return
+        save_model_selection(config, str(selected_model["slug"]), effort)
+        answer_callback_query(token, callback_id, "Model updated.")
+        edit_message_text(
+            token,
+            chat_id,
+            message_id,
+            f"Updated Codex model for future turns:\n{current_model_text(config)}",
+        )
+        return
+
+    answer_callback_query(token, callback_id, "Invalid selection.")
 
 
 def encode_multipart(fields: dict[str, str], file_bytes: bytes, filename: str, mime_type: str) -> tuple[bytes, str]:
@@ -564,19 +822,20 @@ class CodexAppServerClient:
             except Exception:
                 last_seen = ""
         turn_id = self._active_turn_by_chat.get(chat_id)
+        model_line = f"\nModel: {current_model_text(self.config)}"
         if turn_id and turn_id in self._turns:
             state = self._turns[turn_id]
             elapsed = int(time.time() - state["started_at"])
             suffix = f"\nCLI: {version}" if version else ""
             return (
                 f"Active turn: {turn_id}\nThread: {state['thread_id']}\nRunning for: {elapsed}s"
-                f"{last_seen}{suffix}"
+                f"{model_line}{last_seen}{suffix}"
             )
         if entry and entry.get("thread_id"):
             suffix = f"\nCLI: {version}" if version else ""
-            return f"Idle.\nCurrent thread: {entry['thread_id']}{last_seen}{suffix}"
+            return f"Idle.\nCurrent thread: {entry['thread_id']}{model_line}{last_seen}{suffix}"
         suffix = f"\nCLI: {version}" if version else ""
-        return f"Idle.\nNo thread has been created for this chat yet.{suffix}"
+        return f"Idle.\nNo thread has been created for this chat yet.{model_line}{suffix}"
 
     def _turn_params(self, thread_id: str, text: str) -> dict[str, Any]:
         return {
@@ -1183,6 +1442,12 @@ def main() -> None:
                 offset = max(offset, int(update["update_id"]) + 1)
                 # Persist offset immediately so restarts never re-process this update.
                 save_runtime_state({**load_runtime_state(), "telegram_update_offset": offset})
+                callback = update.get("callback_query")
+                if callback:
+                    access = load_access()
+                    handle_model_callback(str(token), callback, config, access)
+                    continue
+
                 message = update.get("message") or update.get("edited_message")
                 if not message:
                     continue
@@ -1232,6 +1497,16 @@ def main() -> None:
                         codex.status_text(chat_id, chat_map),
                         message.get("message_id"),
                         access=access,
+                    )
+                    continue
+                if command == "/model":
+                    handle_model_command(
+                        str(token),
+                        chat_id,
+                        text,
+                        message.get("message_id"),
+                        config,
+                        access,
                     )
                     continue
                 if command == "/newsession":

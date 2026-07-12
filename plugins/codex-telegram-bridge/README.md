@@ -9,8 +9,8 @@ This plugin ports the Telegram control loop from `claude-telegram-plugin` to Cod
 - Starts, steers, and interrupts turns through `codex app-server`
 - Auto-approves command, file-change, and permission approval requests
 - Auto-answers structured `item/tool/requestUserInput` prompts with default options when possible
-- Supports `/help`, `/status`, `/stop`, and `/newsession`
-- Registers Telegram's native bot command menu for `/start`, `/help`, `/status`, `/stop`, and `/newsession`
+- Supports `/help`, `/status`, `/model`, `/stop`, and `/newsession`
+- Registers Telegram's native bot command menu for `/start`, `/help`, `/status`, `/model`, `/stop`, and `/newsession`
 - Supports DM pairing, allowlists, groups, mention policies, and mention regexes
 - Transcribes voice messages with OpenAI `gpt-4o-transcribe`
 - Forwards inbound photos and documents as downloaded local paths, with other Telegram attachments as downloadable file IDs
@@ -156,8 +156,20 @@ When the bridge starts, it registers Telegram's native bot command menu. In Tele
 - `/start` - show the welcome/help message
 - `/help` - show available commands
 - `/status` - show current Codex status
+- `/model` - choose the Codex model and thinking effort for future turns
 - `/stop` - interrupt the active Codex turn
 - `/newsession` - restart Codex and start a fresh thread
+
+`/model` shows the current model/effort and opens Telegram inline buttons built
+from `codex debug models`, so the choices track the installed Codex CLI. You can
+also set both fields directly:
+
+```text
+/model gpt-5.6-sol high
+```
+
+The change is saved to `~/.codex/telegram-bridge/config.json` and applies to the
+next new Codex turn. It does not change an already-running turn.
 
 Useful checks:
 
