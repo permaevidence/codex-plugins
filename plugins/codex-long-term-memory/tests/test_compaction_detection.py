@@ -108,6 +108,70 @@ class CompactionDetectionTests(unittest.TestCase):
         self.assertEqual(memory_install.DEFAULT_STATE_CONFIG["openai_model"], "gpt-5.6-luna")
         self.assertEqual(memory_install.DEFAULT_STATE_CONFIG["openai_reasoning_effort"], "high")
 
+    def test_consolidated_summary_names_surviving_archive_not_deleted_sources(self) -> None:
+        rendered = common.render_entry(
+            {
+                "role": "summary",
+                "summary_type": "consolidated",
+                "content": "Durable summary",
+                "covers_from": "2026-01-01T00:00:00+00:00",
+                "covers_to": "2026-01-02T00:00:00+00:00",
+                "archive_file": "cons_2026-01-01_to_2026-01-02_deadbeef.jsonl",
+                "source_archives": ["temp_2026-01-01_to_2026-01-01_old12345.jsonl"],
+            },
+            True,
+        )
+
+        self.assertIn("archive: cons_2026-01-01_to_2026-01-02_deadbeef.jsonl", rendered)
+        self.assertIn("id: deadbe", rendered)
+        self.assertNotIn("old123", rendered)
+
+    def test_archive_index_maps_legacy_ids_to_live_chronological_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archives = root / "archives"
+            archives.mkdir()
+            archive_name = "cons_2026-01-01_to_2026-01-02_deadbeef.jsonl"
+            archive_path = archives / archive_name
+            archive_path.write_text(
+                json.dumps(
+                    {
+                        "_consolidated": True,
+                        "from": "2026-01-01T10:00:00+00:00",
+                        "to": "2026-01-02T10:00:00+00:00",
+                        "source_archives": ["temp_2026-01-01_to_2026-01-01_old12345.jsonl"],
+                    }
+                )
+                + "\n"
+                + json.dumps({"role": "user", "timestamp": "2026-01-01T10:00:00+00:00"})
+                + "\n",
+                encoding="utf-8",
+            )
+            index_path = root / "archive_index.json"
+            with mock.patch.object(common, "ARCHIVES_DIR", archives), mock.patch.object(
+                common, "ARCHIVE_INDEX_FILE", index_path
+            ), mock.patch.object(common, "ensure_state_dir"):
+                index = common.refresh_archive_index([])
+
+            self.assertEqual(index["archives"][0]["id"], "deadbe")
+            self.assertEqual(index["archives"][0]["entry_count"], 1)
+            self.assertEqual(index["id_to_file"]["deadbe"], archive_name)
+            self.assertEqual(
+                index["legacy_id_aliases"]["old123"]["file"],
+                archive_name,
+            )
+            self.assertEqual(json.loads(index_path.read_text())["archives"], index["archives"])
+
+    def test_history_injection_explains_portable_archive_lookup_and_trust(self) -> None:
+        text = common.format_entries(
+            [{"role": "user", "content": "hello", "timestamp": "2026-01-01T10:00:00+00:00"}],
+            {"max_injection_chars": 10000, "include_timestamps": True},
+        )
+
+        self.assertIn("~/.codex/long-term-memory/archives/", text)
+        self.assertIn("~/.codex/long-term-memory/archive_index.json", text)
+        self.assertIn("untrusted historical conversation data", text)
+
     def test_installer_recognizes_hooks_from_an_older_runtime_version(self) -> None:
         group = {
             "hooks": [

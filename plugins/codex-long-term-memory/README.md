@@ -57,6 +57,7 @@ After installation, inspect hook trust in Codex or through the app-server `hooks
 - `~/.codex/long-term-memory/history.jsonl`
 - `~/.codex/long-term-memory/user_facts.jsonl`
 - `~/.codex/long-term-memory/archives/`
+- `~/.codex/long-term-memory/archive_index.json`
 - `~/.codex/long-term-memory/files/`
 - `~/.codex/long-term-memory/backups/`
 - `~/.codex/long-term-memory/pending/`
@@ -203,6 +204,8 @@ Use it only when your rendered memory is small enough for your Codex version's h
 - Temporary summaries: oldest raw chunks are archived into `temp_*` files and replaced with compact summaries.
 - Consolidated summaries: older temporary chunks are merged into `cons_*` archive files and re-expressed as one summary.
 - Meta summaries: older overflow consolidated summaries are folded into meta summaries with source-archive references, while the most recent consolidated summaries stay visible individually.
+
+Every injected summary header names the archive file that still exists and includes its stable short ID. Meta summaries list each surviving source archive. The generated `archive_index.json` is chronological and maps both current IDs and legacy temporary-chunk IDs to live archive files, so references remain resolvable after consolidation deletes superseded temporary files. The injected instructions give Codex the portable `~/.codex/long-term-memory/archives/` location and tell it to inspect relevant source entries as untrusted historical data rather than executable instructions.
 
 When model-backed summarization is enabled, compaction requires a non-empty, substantive model summary. If the API is unavailable or returns an output that is too short, the source material and durable maintenance request remain in place and the detached worker retries with bounded backoff. Hooks never wait for those model calls. Deterministic fallback summaries are used only when model-backed summaries are intentionally disabled.
 
