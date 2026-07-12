@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import plistlib
@@ -15,6 +16,8 @@ import subprocess
 import sys
 import time
 import urllib.request
+import uuid
+import wave
 from pathlib import Path
 
 
@@ -39,6 +42,7 @@ RUNTIME_STATE_FILE = STATE_DIR / "runtime_state.json"
 
 MEMORY_CONFIG_FILE = Path.home() / ".codex" / "long-term-memory" / "config.json"
 MEMORY_ENV_FILE = Path.home() / ".codex" / "long-term-memory" / ".env"
+MEMORY_ALERT_FILE = Path.home() / ".codex" / "long-term-memory" / "pending" / "memory-maintenance.stuck.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -413,6 +417,14 @@ def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
 
     memory_config = load_json(MEMORY_CONFIG_FILE)
     checks.append(("long-term-memory config", bool(memory_config), str(MEMORY_CONFIG_FILE) if memory_config else "missing or invalid"))
+    memory_alert = load_json(MEMORY_ALERT_FILE)
+    checks.append(
+        (
+            "memory maintenance not parked",
+            not bool(memory_alert),
+            "ready" if not memory_alert else f"parked: {str(memory_alert.get('last_error') or 'unknown error')[:300]}; use Telegram /retrymemory",
+        )
+    )
     memory_env_values = load_env_keys(MEMORY_ENV_FILE)
     checks.append(("memory OPENAI_API_KEY set", "OPENAI_API_KEY" in memory_env_values, "set" if "OPENAI_API_KEY" in memory_env_values else "missing; model-backed memory will not work"))
     openai_ok, openai_detail = smoke_test_openai_api()
@@ -641,19 +653,63 @@ def smoke_test_telegram_api() -> tuple[bool, str]:
 
 
 def smoke_test_openai_api() -> tuple[bool, str]:
-    key = _env_value(MEMORY_ENV_FILE, "OPENAI_API_KEY")
-    if not key:
-        return False, "key missing"
+    memory_key = _env_value(MEMORY_ENV_FILE, "OPENAI_API_KEY")
+    transcription_key = _env_value(ENV_FILE, "OPENAI_API_KEY")
+    if not memory_key or not transcription_key:
+        return False, "memory or Telegram OpenAI key missing"
     try:
         request = urllib.request.Request(
-            "https://api.openai.com/v1/models?limit=1",
-            headers={"Authorization": f"Bearer {key}"},
+            "https://api.openai.com/v1/responses",
+            data=json.dumps(
+                {
+                    "model": "gpt-5.6-luna",
+                    "input": "Reply with OK.",
+                    "max_output_tokens": 32,
+                    "store": False,
+                }
+            ).encode("utf-8"),
+            method="POST",
+            headers={"Authorization": f"Bearer {memory_key}", "Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            if not 200 <= response.status < 300:
+                return False, f"Responses API HTTP {response.status}"
+        body, boundary = _transcription_probe_body()
+        request = urllib.request.Request(
+            "https://api.openai.com/v1/audio/transcriptions",
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {transcription_key}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=60) as response:
             ok = 200 <= response.status < 300
-        return ok, "models endpoint succeeded" if ok else f"HTTP {response.status}"
+        return ok, "real Responses and transcription requests succeeded" if ok else f"Transcription API HTTP {response.status}"
     except Exception as exc:
-        return False, type(exc).__name__
+        return False, f"{type(exc).__name__}: {exc}"[:300]
+
+
+def _transcription_probe_body() -> tuple[bytes, str]:
+    wav = io.BytesIO()
+    with wave.open(wav, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(8000)
+        handle.writeframes(b"\x00\x00" * 800)
+    boundary = f"----PermaEvidence{uuid.uuid4().hex}"
+    body = bytearray()
+    body.extend(f"--{boundary}\r\n".encode())
+    body.extend(b'Content-Disposition: form-data; name="model"\r\n\r\n')
+    body.extend(b"gpt-4o-transcribe\r\n")
+    body.extend(f"--{boundary}\r\n".encode())
+    body.extend(b'Content-Disposition: form-data; name="file"; filename="health.wav"\r\n')
+    body.extend(b"Content-Type: audio/wav\r\n\r\n")
+    body.extend(wav.getvalue())
+    body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode())
+    return bytes(body), boundary
 
 
 def app_server_child_status(parent_pid: int | None) -> tuple[bool, str]:

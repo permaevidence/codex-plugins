@@ -36,6 +36,7 @@ MAINTENANCE_TASK_FILE = PENDING_DIR / "memory-maintenance.json"
 MAINTENANCE_PID_FILE = PENDING_DIR / "memory-maintenance.pid"
 MAINTENANCE_LOCK_FILE = PENDING_DIR / "memory-maintenance.lock"
 MAINTENANCE_ALERT_FILE = PENDING_DIR / "memory-maintenance.stuck.json"
+MEMORY_HEALTH_FILE = STATE_DIR / "health.json"
 SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 CODEX_CONFIG_FILE = Path.home() / ".codex" / "config.toml"
 
@@ -1278,6 +1279,11 @@ def call_openai_responses(
 ) -> str | None:
     settings = openai_settings(config)
     if settings is None:
+        record_memory_health(
+            "error",
+            category="configuration",
+            detail="OpenAI API key or model configuration is missing.",
+        )
         return None
 
     payload = {
@@ -1306,16 +1312,76 @@ def call_openai_responses(
                 result = json.loads(response.read().decode("utf-8"))
             output_text = extract_output_text(result)
             if output_text:
+                record_memory_health("ok", detail="The most recent model-backed memory request succeeded.")
                 return output_text.strip()
+            record_memory_health(
+                "error",
+                category="invalid_response",
+                detail="OpenAI returned no usable text for the memory request.",
+            )
             return None
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
             if attempt < max_retries - 1:
                 time.sleep(2**attempt)
                 continue
+            category, detail, http_status = classify_openai_error(exc)
+            record_memory_health("error", category=category, detail=detail, http_status=http_status)
             return None
-        except Exception:
+        except Exception as exc:
+            record_memory_health(
+                "error",
+                category="unexpected_error",
+                detail=f"{type(exc).__name__}: {exc}"[:500],
+            )
             return None
     return None
+
+
+def classify_openai_error(exc: Exception) -> tuple[str, str, int | None]:
+    status = int(exc.code) if isinstance(exc, HTTPError) else None
+    body = ""
+    if isinstance(exc, HTTPError):
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:2000]
+        except Exception:
+            body = ""
+    searchable = f"{exc} {body}".lower()
+    if status in {401, 403}:
+        return "authentication", "The OpenAI API key was rejected. Replace the key, then retry memory.", status
+    if status == 429 and any(word in searchable for word in ("quota", "credit", "billing", "insufficient")):
+        return "insufficient_credit", "The OpenAI API account has insufficient credit or billing quota.", status
+    if status == 429:
+        return "rate_limit", "OpenAI temporarily rate-limited the memory request.", status
+    if status == 404:
+        return "model_unavailable", "The configured OpenAI memory model is unavailable to this API account.", status
+    if status is not None and status >= 500:
+        return "service_unavailable", f"OpenAI returned HTTP {status} for the memory request.", status
+    if isinstance(exc, TimeoutError):
+        return "timeout", "The OpenAI memory request timed out.", status
+    if isinstance(exc, URLError):
+        return "network", f"Could not reach OpenAI: {exc.reason}", status
+    if isinstance(exc, json.JSONDecodeError):
+        return "invalid_response", "OpenAI returned an unreadable response.", status
+    return "api_error", f"OpenAI memory request failed: {exc}"[:500], status
+
+
+def record_memory_health(
+    status: str,
+    *,
+    category: str = "",
+    detail: str = "",
+    http_status: int | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "component": "memory",
+        "status": status,
+        "category": category,
+        "detail": detail[:1000],
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if http_status is not None:
+        payload["http_status"] = http_status
+    save_json(MEMORY_HEALTH_FILE, payload)
 
 
 def extract_output_text(result: dict[str, Any]) -> str:
@@ -1677,8 +1743,8 @@ def memory_maintenance_alert_context() -> str:
     return (
         "[Long-term memory warning: background maintenance is parked after "
         f"{attempts} unsuccessful attempts ({detail}). Inform the user. Fix the OpenAI/API or "
-        "data problem, then remove ~/.codex/long-term-memory/pending/memory-maintenance.stuck.json "
-        "or change the memory model/API configuration to retry.]"
+        "data problem, then use Telegram /retrymemory or run this plugin with "
+        "--retry-memory-maintenance to retry.]"
     )
 
 
@@ -1807,6 +1873,12 @@ def run_memory_maintenance_worker() -> None:
                 except Exception as exc:
                     last_error = f"{type(exc).__name__}: {exc}"[:1000]
                 if memory_maintenance_needed(config):
+                    if not last_error:
+                        health = load_json(MEMORY_HEALTH_FILE, {})
+                        if isinstance(health, dict) and health.get("status") == "error":
+                            category = str(health.get("category") or "memory_error")
+                            detail = str(health.get("detail") or "memory request failed")
+                            last_error = f"{category}: {detail}"[:1000]
                     after_signature = maintenance_progress_signature()
                     if last_error or before_signature == after_signature:
                         consecutive_failures += 1
@@ -2246,6 +2318,10 @@ def print_session_start_context(context: str) -> None:
 def main(argv: list[str]) -> int:
     if len(argv) == 2 and argv[1] == "--memory-maintenance":
         run_memory_maintenance_worker()
+        return 0
+    if len(argv) == 2 and argv[1] == "--retry-memory-maintenance":
+        MAINTENANCE_ALERT_FILE.unlink(missing_ok=True)
+        schedule_memory_maintenance(load_config())
         return 0
     return 0
 

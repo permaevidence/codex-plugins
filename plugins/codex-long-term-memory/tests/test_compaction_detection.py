@@ -864,6 +864,35 @@ class CompactionDetectionTests(unittest.TestCase):
             with mock.patch.object(common, "MAINTENANCE_ALERT_FILE", alert_file):
                 self.assertIn("Inform the user", common.memory_maintenance_alert_context())
 
+    def test_memory_api_failure_records_actionable_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            health_file = Path(tmpdir) / "health.json"
+            with mock.patch.object(common, "MEMORY_HEALTH_FILE", health_file), mock.patch.object(
+                common, "urlopen", side_effect=common.URLError("network offline")
+            ), mock.patch.object(common.time, "sleep"):
+                result = common.call_openai_responses(
+                    "instructions",
+                    [{"type": "input_text", "text": "source"}],
+                    {**common.DEFAULT_CONFIG, "openai_api_key": "sk-test", "openai_timeout_seconds": 1},
+                    max_retries=1,
+                )
+            self.assertIsNone(result)
+            health = json.loads(health_file.read_text(encoding="utf-8"))
+            self.assertEqual(health["status"], "error")
+            self.assertEqual(health["category"], "network")
+            self.assertIn("Could not reach OpenAI", health["detail"])
+
+    def test_retry_memory_cli_clears_alert_and_reschedules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            alert_file = Path(tmpdir) / "stuck.json"
+            alert_file.write_text("{}", encoding="utf-8")
+            with mock.patch.object(common, "MAINTENANCE_ALERT_FILE", alert_file), mock.patch.object(
+                common, "load_config", return_value=common.DEFAULT_CONFIG
+            ), mock.patch.object(common, "schedule_memory_maintenance") as schedule:
+                self.assertEqual(common.main(["common.py", "--retry-memory-maintenance"]), 0)
+            self.assertFalse(alert_file.exists())
+            schedule.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

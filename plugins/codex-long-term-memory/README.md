@@ -105,10 +105,13 @@ When an OpenAI API key is configured, the plugin uses the Responses API with `gp
 
 Background maintenance parks after five consecutive exceptions or no-progress
 cycles. It writes `pending/memory-maintenance.stuck.json` and injects a visible
-warning into the next Codex prompt instead of retrying forever. Changing the
-memory API key/model configuration clears the parked classification
-automatically; an operator can also remove that stuck file after fixing the
-underlying problem.
+warning into the next Codex prompt instead of retrying forever. The Telegram
+bridge also monitors this state and proactively notifies the owner once with a
+plain-language reason. Raw conversation remains saved while model-backed
+summarization is paused. After fixing the key, billing, model, or network
+problem, send Telegram `/retrymemory` (or run `lib/common.py
+--retry-memory-maintenance`). Changing the memory API key/model configuration
+also clears the parked classification automatically.
 
 Put secrets in `~/.codex/long-term-memory/.env` or the process environment rather than `config.json`:
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import io
 import json
 import os
 import re
@@ -16,6 +17,8 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
+import wave
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -329,21 +332,64 @@ def validate_telegram_token(token: str) -> None:
 
 def validate_openai_key(key: str) -> None:
     print("Validating OpenAI API key...")
-    request = urllib.request.Request(
-        "https://api.openai.com/v1/models?limit=1",
-        headers={"Authorization": f"Bearer {key}"},
-    )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            ok = 200 <= response.status < 300
-    except (OSError, urllib.error.HTTPError) as exc:
+        response_request = urllib.request.Request(
+            "https://api.openai.com/v1/responses",
+            data=json.dumps(
+                {
+                    "model": "gpt-5.6-luna",
+                    "input": "Reply with OK.",
+                    "max_output_tokens": 32,
+                    "store": False,
+                }
+            ).encode("utf-8"),
+            method="POST",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(response_request, timeout=60) as response:
+            if not 200 <= response.status < 300:
+                raise RuntimeError(f"Responses API returned HTTP {response.status}")
+
+        audio, boundary = openai_transcription_probe_body()
+        transcription_request = urllib.request.Request(
+            "https://api.openai.com/v1/audio/transcriptions",
+            data=audio,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+        )
+        with urllib.request.urlopen(transcription_request, timeout=60) as response:
+            if not 200 <= response.status < 300:
+                raise RuntimeError(f"Transcription API returned HTTP {response.status}")
+    except Exception as exc:
         raise SystemExit(
-            "OpenAI rejected the API key or could not be reached. An API key with active API billing is required; a ChatGPT subscription alone is not an API key. "
+            "OpenAI rejected a real summary or transcription request. An API key with active API billing is required; a ChatGPT subscription alone is not an API key. "
             f"Details: {exc}"
         ) from exc
-    if not ok:
-        raise SystemExit("OpenAI API key validation failed.")
-    print("OpenAI API key verified.")
+    print("OpenAI API key, billing, memory model, and transcription access verified.")
+
+
+def openai_transcription_probe_body() -> tuple[bytes, str]:
+    wav = io.BytesIO()
+    with wave.open(wav, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(8000)
+        handle.writeframes(b"\x00\x00" * 800)
+    boundary = f"----PermaEvidence{uuid.uuid4().hex}"
+    body = bytearray()
+    body.extend(f"--{boundary}\r\n".encode())
+    body.extend(b'Content-Disposition: form-data; name="model"\r\n\r\n')
+    body.extend(b"gpt-4o-transcribe\r\n")
+    body.extend(f"--{boundary}\r\n".encode())
+    body.extend(b'Content-Disposition: form-data; name="file"; filename="health.wav"\r\n')
+    body.extend(b"Content-Type: audio/wav\r\n\r\n")
+    body.extend(wav.getvalue())
+    body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode())
+    return bytes(body), boundary
 
 
 def resolve_project_dir(value: str | None) -> Path:

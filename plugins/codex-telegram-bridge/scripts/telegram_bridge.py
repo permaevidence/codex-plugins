@@ -17,7 +17,8 @@ import urllib.request
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.error import HTTPError, URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -58,6 +59,7 @@ from lib.telegram_common import (
 EMAIL_CHECK_INTERVAL = 5 * 60
 REMINDER_CHECK_INTERVAL = 60
 VERSION_CHECK_INTERVAL = 5 * 60
+HEALTH_CHECK_INTERVAL = 30
 TRANSCRIPTION_MAX_BYTES = 25 * 1024 * 1024
 GENERATED_IMAGES_DIR = Path.home() / ".codex" / "generated_images"
 LONG_TERM_MEMORY_AGENTS_SCRIPT = (
@@ -71,8 +73,10 @@ BOT_COMMANDS = [
     {"command": "start", "description": "Show the welcome/help message"},
     {"command": "help", "description": "Show available commands"},
     {"command": "status", "description": "Show current Codex status"},
+    {"command": "health", "description": "Check Codex, memory, and transcription health"},
     {"command": "model", "description": "Choose Codex model and thinking effort"},
     {"command": "resume", "description": "Retry a parked interrupted task"},
+    {"command": "retrymemory", "description": "Retry parked memory maintenance"},
     {"command": "stop", "description": "Interrupt the active Codex turn"},
     {"command": "newsession", "description": "Restart Codex and start a fresh thread"},
     {"command": "update", "description": "Update the plugins runtime and restart the bridge"},
@@ -83,6 +87,17 @@ PENDING_UPDATE_FILE = STATE_DIR / "pending_update.json"
 FAILED_UPDATES_DIR = STATE_DIR / "failed_updates"
 TURN_RECOVERY_FILE = STATE_DIR / "turn_recovery_queue.json"
 UPDATE_STATE_FILE = STATE_DIR / "update_state.json"
+HEALTH_STATE_FILE = STATE_DIR / "health.json"
+HEALTH_NOTIFICATION_FILE = STATE_DIR / "health_notifications.json"
+HEALTH_STATE_LOCK = threading.Lock()
+MEMORY_STATE_DIR = Path.home() / ".codex" / "long-term-memory"
+MEMORY_HEALTH_FILE = MEMORY_STATE_DIR / "health.json"
+MEMORY_TASK_FILE = MEMORY_STATE_DIR / "pending" / "memory-maintenance.json"
+MEMORY_PID_FILE = MEMORY_STATE_DIR / "pending" / "memory-maintenance.pid"
+MEMORY_ALERT_FILE = MEMORY_STATE_DIR / "pending" / "memory-maintenance.stuck.json"
+MEMORY_COMMON_SCRIPT = (
+    Path(__file__).resolve().parents[2] / "codex-long-term-memory" / "lib" / "common.py"
+)
 UPDATE_SCRIPT = (
     Path.home()
     / "Library"
@@ -509,8 +524,124 @@ def encode_multipart(fields: dict[str, str], file_bytes: bytes, filename: str, m
     return bytes(body), boundary
 
 
-def transcribe_audio(file_bytes: bytes, filename: str, mime_type: str, api_key: str) -> str | None:
-    if not api_key or len(file_bytes) > TRANSCRIPTION_MAX_BYTES:
+def classify_api_failure(exc: Exception, *, component: str) -> tuple[str, str, int | None]:
+    status = int(exc.code) if isinstance(exc, HTTPError) else None
+    body = ""
+    if isinstance(exc, HTTPError):
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:2000]
+        except Exception:
+            body = ""
+    searchable = f"{exc} {body}".lower()
+    label = "voice transcription" if component == "transcription" else component
+    if status in {401, 403}:
+        return "authentication", f"The OpenAI API key for {label} was rejected.", status
+    if status == 429 and any(word in searchable for word in ("quota", "credit", "billing", "insufficient")):
+        return "insufficient_credit", f"The OpenAI API account has insufficient credit for {label}.", status
+    if status == 429:
+        return "rate_limit", f"OpenAI temporarily rate-limited {label}.", status
+    if status == 404:
+        return "model_unavailable", f"The OpenAI model used for {label} is unavailable to this account.", status
+    if status is not None and status >= 500:
+        return "service_unavailable", f"OpenAI returned HTTP {status} for {label}.", status
+    if isinstance(exc, TimeoutError):
+        return "timeout", f"The OpenAI request for {label} timed out.", status
+    if isinstance(exc, URLError):
+        return "network", f"Could not reach OpenAI for {label}: {exc.reason}", status
+    return "api_error", f"{label.capitalize()} failed: {type(exc).__name__}: {exc}"[:500], status
+
+
+def classify_codex_failure(error: str) -> tuple[str, str]:
+    lowered = error.lower()
+    if re.search(r"usage|rate.?limit|quota|credit|capacity", lowered):
+        return "usage_limit", "Codex usage capacity is temporarily exhausted."
+    if re.search(r"unauthori[sz]ed|authentication|not logged in|login required|sign.?in|token expired", lowered):
+        return "authentication", "Codex is no longer authenticated. Run `codex login` on the Mac, then use /resume."
+    if re.search(r"subscription|plan|payment|billing", lowered):
+        return "subscription", "The Codex subscription or billing needs attention. Fix it in the OpenAI account, then use /resume."
+    if re.search(r"network|connection|timed? out|temporarily unavailable|service unavailable", lowered):
+        return "network", "Codex could not reach its service. Check the Mac's network, then use /resume."
+    return "turn_failure", f"Codex reported: {error[:500]}"
+
+
+def set_component_health(
+    component: str,
+    status: str,
+    *,
+    category: str = "",
+    detail: str = "",
+    http_status: int | None = None,
+) -> bool:
+    with HEALTH_STATE_LOCK:
+        state = load_json(HEALTH_STATE_FILE, {})
+        if not isinstance(state, dict):
+            state = {}
+        components = state.setdefault("components", {})
+        if not isinstance(components, dict):
+            components = {}
+            state["components"] = components
+        previous = components.get(component, {})
+        fingerprint = f"{status}|{category}|{detail}"
+        changed = not isinstance(previous, dict) or previous.get("fingerprint") != fingerprint
+        payload: dict[str, Any] = {
+            "status": status,
+            "category": category,
+            "detail": detail[:1000],
+            "fingerprint": fingerprint,
+            "updated_at": datetime.now().astimezone().isoformat(),
+        }
+        if http_status is not None:
+            payload["http_status"] = http_status
+        components[component] = payload
+        save_json(HEALTH_STATE_FILE, state)
+    return changed
+
+
+def component_health(component: str) -> dict[str, Any]:
+    state = load_json(HEALTH_STATE_FILE, {})
+    components = state.get("components", {}) if isinstance(state, dict) else {}
+    value = components.get(component, {}) if isinstance(components, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
+def transcription_failure_message(detail: str) -> str:
+    return (
+        f"Voice transcription failed: {detail}\n"
+        "Your audio was not sent to Codex as text. Text messages still work. "
+        "Check the OpenAI API key and API billing, then send the voice message again."
+    )
+
+
+def notify_transcription_failure(
+    on_notice: Callable[[str], None] | None,
+    detail: str,
+    *,
+    changed: bool,
+) -> None:
+    if not on_notice:
+        return
+    if changed:
+        on_notice(transcription_failure_message(detail))
+    else:
+        on_notice("Voice transcription is still unavailable, so this voice message was not sent to Codex. Use /health for details.")
+
+
+def transcribe_audio(
+    file_bytes: bytes,
+    filename: str,
+    mime_type: str,
+    api_key: str,
+    on_notice: Callable[[str], None] | None = None,
+) -> str | None:
+    if not api_key:
+        detail = "The OpenAI API key is missing."
+        changed = set_component_health("transcription", "error", category="configuration", detail=detail)
+        notify_transcription_failure(on_notice, detail, changed=changed)
+        return None
+    if len(file_bytes) > TRANSCRIPTION_MAX_BYTES:
+        detail = "The voice file is larger than the 25 MB transcription limit."
+        changed = set_component_health("transcription", "error", category="file_too_large", detail=detail)
+        notify_transcription_failure(on_notice, detail, changed=changed)
         return None
 
     suffix = Path(filename or "audio").suffix.lower()
@@ -533,8 +664,31 @@ def transcribe_audio(file_bytes: bytes, filename: str, mime_type: str, api_key: 
     try:
         with urllib.request.urlopen(req, timeout=120) as response:
             result = json.loads(response.read().decode("utf-8"))
-        return (result.get("text") or "").strip() or None
-    except Exception:
+        text = (result.get("text") or "").strip()
+        if not text:
+            detail = "OpenAI returned no transcription text."
+            changed = set_component_health("transcription", "error", category="invalid_response", detail=detail)
+            notify_transcription_failure(on_notice, detail, changed=changed)
+            return None
+        was_error = component_health("transcription").get("status") == "error"
+        set_component_health(
+            "transcription",
+            "ok",
+            detail="The most recent voice transcription succeeded.",
+        )
+        if was_error and on_notice:
+            on_notice("Voice transcription is working again.")
+        return text
+    except Exception as exc:
+        category, detail, http_status = classify_api_failure(exc, component="transcription")
+        changed = set_component_health(
+            "transcription",
+            "error",
+            category=category,
+            detail=detail,
+            http_status=http_status,
+        )
+        notify_transcription_failure(on_notice, detail, changed=changed)
         return None
 
 
@@ -702,6 +856,12 @@ class CodexAppServerClient:
             # Exit the child so the supervisor/LaunchAgent restarts the complete
             # process tree. Intentional /newsession shutdown disables this path.
             if getattr(self, "_restart_on_exit", False):
+                set_component_health(
+                    "codex",
+                    "error",
+                    category="app_server_exit",
+                    detail="Codex app-server exited unexpectedly; the bridge supervisor is restarting it.",
+                )
                 os._exit(75)
 
     def _handle_message(self, message: dict[str, Any]) -> None:
@@ -971,7 +1131,7 @@ class CodexAppServerClient:
             )
             save_json(TURN_RECOVERY_FILE, records)
 
-    def _queue_recovery(self, state: dict[str, Any], reason: str) -> str:
+    def _queue_recovery(self, state: dict[str, Any], reason: str, *, force_park: bool = False) -> str:
         if not self.config.get("enable_turn_recovery", True):
             return "disabled"
         with self._recovery_lock:
@@ -994,7 +1154,7 @@ class CodexAppServerClient:
             }
             attempts = int(record.get("attempts") or 0)
             maximum = max(1, int(self.config.get("turn_recovery_max_attempts") or 5))
-            parked = attempts >= maximum
+            parked = force_park or attempts >= maximum
             record.update(
                 {
                     "reason": reason,
@@ -1169,13 +1329,14 @@ class CodexAppServerClient:
                 last_seen = ""
         turn_id = self._active_turn_by_chat.get(chat_id)
         model_line = f"\nModel: {current_model_text(self.config)}"
+        health_line = f"\n{compact_health_summary()}"
         if turn_id and turn_id in self._turns:
             state = self._turns[turn_id]
             elapsed = int(time.time() - state["started_at"])
             suffix = f"\nCLI: {version}" if version else ""
             return (
                 f"Active turn: {turn_id}\nThread: {state['thread_id']}\nRunning for: {elapsed}s"
-                f"{model_line}{last_seen}{suffix}"
+                f"{model_line}{last_seen}{health_line}{suffix}"
             )
         if entry and entry.get("thread_id"):
             suffix = f"\nCLI: {version}" if version else ""
@@ -1184,9 +1345,9 @@ class CodexAppServerClient:
             recovery_line = f"\nSaved interrupted tasks: {recovery}" if recovery else ""
             if parked:
                 recovery_line += f" ({parked} parked; use /resume after fixing the issue)"
-            return f"Idle.\nCurrent thread: {entry['thread_id']}{model_line}{last_seen}{recovery_line}{suffix}"
+            return f"Idle.\nCurrent thread: {entry['thread_id']}{model_line}{last_seen}{recovery_line}{health_line}{suffix}"
         suffix = f"\nCLI: {version}" if version else ""
-        return f"Idle.\nNo thread has been created for this chat yet.{model_line}{suffix}"
+        return f"Idle.\nNo thread has been created for this chat yet.{model_line}{health_line}{suffix}"
 
     def _turn_params(self, thread_id: str, text: str) -> dict[str, Any]:
         params = {
@@ -1239,10 +1400,17 @@ class CodexAppServerClient:
         save_runtime_state(runtime_state)
         if status == "completed":
             if text or files:
+                set_component_health("codex", "ok", detail="The most recent Codex turn completed successfully.")
                 if state.get("recovery_id"):
                     self._remove_recovery(str(state["recovery_id"]))
                 self.send_callback(chat_id, text, files)
             else:
+                set_component_health(
+                    "codex",
+                    "warning",
+                    category="empty_response",
+                    detail="The last Codex turn ended without a final response; automatic recovery is active.",
+                )
                 recovery_state = self._queue_recovery(state, "completed without final assistant text")
                 if recovery_state == "parked":
                     maximum = max(1, int(self.config.get("turn_recovery_max_attempts") or 5))
@@ -1266,7 +1434,9 @@ class CodexAppServerClient:
             turn_error = turn.get("error")
             turn_error_message = turn_error.get("message") if isinstance(turn_error, dict) else turn_error
             error = str(state.get("error") or turn_error_message or "Unknown error")
-            if re.search(r"usage|rate.?limit|quota|credit", error, flags=re.IGNORECASE):
+            category, guidance = classify_codex_failure(error)
+            if category == "usage_limit":
+                set_component_health("codex", "warning", category=category, detail=guidance)
                 recovery_state = self._queue_recovery(state, error)
                 if recovery_state == "parked":
                     maximum = max(1, int(self.config.get("turn_recovery_max_attempts") or 5))
@@ -1278,9 +1448,13 @@ class CodexAppServerClient:
                 else:
                     self.send_callback(chat_id, "Codex hit a usage limit. The task was saved and will resume automatically after the limit resets.")
             else:
-                if state.get("recovery_id"):
-                    self._remove_recovery(str(state["recovery_id"]))
-                self.send_callback(chat_id, f"Turn failed: {error}")
+                set_component_health("codex", "error", category=category, detail=guidance)
+                self._queue_recovery(state, error, force_park=True)
+                self.send_callback(
+                    chat_id,
+                    f"The Codex turn failed, but your task was saved. {guidance} "
+                    "Send /health for details or /stop to discard the saved task.",
+                )
         else:
             self.send_callback(chat_id, f"Turn ended with status: {status}")
 
@@ -1575,19 +1749,40 @@ def get_bot_username(token: str) -> str:
     return ((result.get("result") or {}).get("username") or "").strip()
 
 
-def extract_message_text(message: dict[str, Any], token: str, config: dict[str, Any]) -> str:
+def extract_message_text(
+    message: dict[str, Any],
+    token: str,
+    config: dict[str, Any],
+    on_transcription_notice: Callable[[str], None] | None = None,
+) -> str:
     text = (message.get("text") or message.get("caption") or "").strip()
 
     voice = message.get("voice")
     if voice:
-        if config.get("enable_voice_transcription", True) and config.get("openai_api_key"):
+        if config.get("enable_voice_transcription", True):
+            api_key = str(config.get("openai_api_key") or "")
+            if not api_key:
+                detail = "The OpenAI API key is missing."
+                changed = set_component_health("transcription", "error", category="configuration", detail=detail)
+                notify_transcription_failure(on_transcription_notice, detail, changed=changed)
+                return text or "(voice message; transcription unavailable)"
             fetched = fetch_telegram_file(token, voice.get("file_id"))
             if fetched is not None:
                 file_bytes, filename, mime_type = fetched
-                transcript = transcribe_audio(file_bytes, filename, mime_type, str(config.get("openai_api_key")))
+                transcript = transcribe_audio(
+                    file_bytes,
+                    filename,
+                    mime_type,
+                    api_key,
+                    on_notice=on_transcription_notice,
+                )
                 if transcript:
                     return f"🎤 {transcript}"
-        return text or "(voice message)"
+            else:
+                detail = "Telegram could not download the voice file for transcription."
+                changed = set_component_health("transcription", "error", category="telegram_download", detail=detail)
+                notify_transcription_failure(on_transcription_notice, detail, changed=changed)
+        return text or "(voice message; transcription unavailable)"
 
     audio = message.get("audio")
     if audio:
@@ -1832,6 +2027,160 @@ def start_update_announcement_loop(token: str, config: dict[str, Any]) -> None:
     threading.Thread(target=worker, daemon=True, name="update-announce").start()
 
 
+def memory_health_snapshot() -> dict[str, Any]:
+    health = load_json(MEMORY_HEALTH_FILE, {})
+    alert = load_json(MEMORY_ALERT_FILE, {})
+    return {
+        "health": health if isinstance(health, dict) else {},
+        "alert": alert if isinstance(alert, dict) else {},
+        "pending": MEMORY_TASK_FILE.exists(),
+        "worker_running": _pid_file_alive(MEMORY_PID_FILE),
+    }
+
+
+def _pid_file_alive(path: Path) -> bool:
+    try:
+        pid = int(path.read_text(encoding="utf-8").strip())
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def compact_health_summary() -> str:
+    problems: list[str] = []
+    memory = memory_health_snapshot()
+    if memory["alert"]:
+        problems.append("memory summaries parked; use /retrymemory")
+    elif memory["health"].get("status") == "error":
+        problems.append("memory API retrying")
+    transcription = component_health("transcription")
+    if transcription.get("status") == "error":
+        problems.append("voice transcription unavailable")
+    codex_health = component_health("codex")
+    if codex_health.get("status") == "error":
+        problems.append("Codex needs attention")
+    return "Health: OK" if not problems else f"Health: ATTENTION — {'; '.join(problems)}. Use /health."
+
+
+def health_text() -> str:
+    lines = ["System health", "", "✅ Bridge: running", "✅ Codex app-server: connected"]
+    codex_health = component_health("codex")
+    if codex_health.get("status") == "error":
+        lines[-1] = f"❌ Codex: {codex_health.get('detail') or 'the last turn failed'}"
+    elif codex_health.get("status") == "warning":
+        lines[-1] = f"⚠️ Codex: {codex_health.get('detail') or 'temporarily unavailable'}"
+
+    memory = memory_health_snapshot()
+    memory_health = memory["health"]
+    if memory["alert"]:
+        detail = str(memory["alert"].get("last_error") or "maintenance made no progress")
+        lines.append(f"❌ Memory summaries: parked — {detail[:300]}")
+        lines.append("   Raw conversation is still being saved. Fix the API/key problem, then use /retrymemory.")
+    elif memory["pending"]:
+        detail = str(memory_health.get("detail") or "background work is queued")
+        worker = "worker running" if memory["worker_running"] else "waiting for retry worker"
+        lines.append(f"⚠️ Memory summaries: pending ({worker}) — {detail[:240]}")
+    elif memory_health.get("status") == "error":
+        lines.append(f"⚠️ Memory summaries: last API request failed — {memory_health.get('detail') or 'unknown error'}")
+    else:
+        lines.append("✅ Memory summaries: ready")
+
+    transcription = component_health("transcription")
+    if transcription.get("status") == "error":
+        lines.append(f"❌ Voice transcription: {transcription.get('detail') or 'unavailable'}")
+        lines.append("   Text messages still work. Check the OpenAI API key/billing and resend the voice message.")
+    elif transcription.get("status") == "ok":
+        lines.append("✅ Voice transcription: working")
+    else:
+        lines.append("✅ Voice transcription: configured (not tested since this runtime started)")
+
+    update_state = load_json(UPDATE_STATE_FILE, {})
+    if isinstance(update_state, dict) and update_state.get("status") == "failed":
+        lines.append(f"⚠️ Last update: failed — {str(update_state.get('error') or 'unknown error')[:240]}")
+    else:
+        lines.append("✅ Runtime updates: no unresolved failure")
+    return "\n".join(lines)
+
+
+def retry_memory_maintenance() -> tuple[bool, str]:
+    if not MEMORY_COMMON_SCRIPT.is_file():
+        return False, f"Memory worker not found at {MEMORY_COMMON_SCRIPT}."
+    if not MEMORY_ALERT_FILE.exists() and not MEMORY_TASK_FILE.exists():
+        return False, "Memory maintenance is not parked or pending."
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(MEMORY_COMMON_SCRIPT), "--retry-memory-maintenance"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except Exception as exc:
+        return False, f"Could not start memory retry: {exc}"
+    if proc.returncode != 0:
+        return False, (proc.stderr or proc.stdout or "memory retry failed").strip()
+    return True, "Memory maintenance retry started. Use /health to check its progress."
+
+
+def start_health_alert_loop(token: str, config: dict[str, Any]) -> None:
+    owner_chat_id = str(config.get("owner_chat_id") or "").strip()
+    if not owner_chat_id:
+        return
+
+    def worker() -> None:
+        while True:
+            try:
+                notifications = load_json(HEALTH_NOTIFICATION_FILE, {})
+                if not isinstance(notifications, dict):
+                    notifications = {}
+                alert = load_json(MEMORY_ALERT_FILE, {})
+                alert = alert if isinstance(alert, dict) else {}
+                memory_health = load_json(MEMORY_HEALTH_FILE, {})
+                memory_health = memory_health if isinstance(memory_health, dict) else {}
+                if alert:
+                    fingerprint = str(alert.get("stuck_at") or json.dumps(alert, sort_keys=True))
+                    if notifications.get("memory_alert") != fingerprint:
+                        detail = str(alert.get("last_error") or "maintenance made no progress")[:500]
+                        send_message(
+                            token,
+                            owner_chat_id,
+                            "Long-term memory summaries have paused after repeated failures.\n"
+                            f"Reason: {detail}\n"
+                            "Raw conversation is still being saved, so nothing is being discarded. "
+                            "Fix the OpenAI API key, billing, model, or network problem, then send /retrymemory.",
+                        )
+                        notifications["memory_alert"] = fingerprint
+                        notifications["memory_alert_active"] = True
+                        save_json(HEALTH_NOTIFICATION_FILE, notifications)
+                elif memory_health.get("status") == "error":
+                    error_fingerprint = f"{memory_health.get('category')}|{memory_health.get('detail')}"
+                    if notifications.get("memory_error") != error_fingerprint:
+                        detail = str(memory_health.get("detail") or "the OpenAI memory request failed")[:500]
+                        send_message(
+                            token,
+                            owner_chat_id,
+                            "Long-term memory had an API failure and is retrying in the background.\n"
+                            f"Reason: {detail}\n"
+                            "Raw conversation is still being saved. Use /health to follow its status.",
+                        )
+                        notifications["memory_error"] = error_fingerprint
+                        notifications["memory_error_active"] = True
+                        save_json(HEALTH_NOTIFICATION_FILE, notifications)
+                elif memory_health.get("status") == "ok" and (
+                    notifications.get("memory_alert_active") or notifications.get("memory_error_active")
+                ):
+                    send_message(token, owner_chat_id, "Long-term memory summaries are working again.")
+                    notifications["memory_alert_active"] = False
+                    notifications["memory_error_active"] = False
+                    save_json(HEALTH_NOTIFICATION_FILE, notifications)
+            except Exception as exc:
+                print(f"health alert loop failed: {exc}", file=sys.stderr)
+            time.sleep(HEALTH_CHECK_INTERVAL)
+
+    threading.Thread(target=worker, daemon=True, name="health-alerts").start()
+
+
 def help_text() -> str:
     command_lines = "\n".join(f"/{item['command']} - {item['description']}" for item in BOT_COMMANDS)
     return (
@@ -1860,6 +2209,7 @@ def main() -> None:
     bot_username = get_bot_username(str(token))
     configure_bot_command_menu(str(token))
     start_update_announcement_loop(str(token), config)
+    start_health_alert_loop(str(token), config)
     chat_map = load_chat_map()
     chat_map_lock = threading.Lock()
     # Resume from the last seen Telegram update to avoid re-processing
@@ -1957,9 +2307,26 @@ def main() -> None:
                 chat = message.get("chat", {})
                 chat_id = str(chat.get("id"))
                 sender_id = str((message.get("from") or {}).get("id"))
-                text = extract_message_text(message, str(token), config).strip()
-                attachment = extract_attachment_meta(message, str(token))
                 access = load_access()
+                text = extract_message_text(
+                    message,
+                    str(token),
+                    config,
+                    on_transcription_notice=lambda notice: send_message(
+                        str(token),
+                        chat_id,
+                        notice,
+                        message.get("message_id"),
+                        access=access,
+                    ),
+                ).strip()
+                attachment = extract_attachment_meta(message, str(token))
+
+                if message.get("voice") and text == "(voice message; transcription unavailable)":
+                    # The user has already received a precise transcription
+                    # failure notice. Do not spend a Codex turn on a placeholder.
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
+                    continue
 
                 with chat_map_lock:
                     entry = chat_map.setdefault(chat_id, {})
@@ -2002,6 +2369,16 @@ def main() -> None:
                     )
                     PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
+                if command == "/health":
+                    send_message(
+                        str(token),
+                        chat_id,
+                        health_text(),
+                        message.get("message_id"),
+                        access=access,
+                    )
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
+                    continue
                 if command == "/model":
                     handle_model_command(
                         str(token),
@@ -2030,6 +2407,17 @@ def main() -> None:
                             message.get("message_id"),
                             access=access,
                         )
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
+                    continue
+                if command == "/retrymemory":
+                    ok, detail = retry_memory_maintenance()
+                    send_message(
+                        str(token),
+                        chat_id,
+                        detail,
+                        message.get("message_id"),
+                        access=access,
+                    )
                     PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
                 if command == "/update":

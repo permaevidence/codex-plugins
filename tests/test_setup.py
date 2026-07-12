@@ -169,6 +169,12 @@ class SetupWizardTests(unittest.TestCase):
             self.assertEqual((backup / "config.toml").read_text(encoding="utf-8"), "model = 'test'\n")
             self.assertEqual((backup / "AGENTS.md").read_text(encoding="utf-8"), "instructions\n")
 
+    def test_openai_validation_probe_includes_real_transcription_request(self) -> None:
+        body, boundary = setup_wizard.openai_transcription_probe_body()
+        self.assertIn(f"--{boundary}".encode(), body)
+        self.assertIn(b"gpt-4o-transcribe", body)
+        self.assertIn(b'filename="health.wav"', body)
+
 
 class RuntimeInstallTests(unittest.TestCase):
     def make_source(self, root: Path, version: str = "1.2.3") -> Path:

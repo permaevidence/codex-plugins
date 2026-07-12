@@ -157,8 +157,10 @@ When the bridge starts, it registers Telegram's native bot command menu. In Tele
 - `/start` - show the welcome/help message
 - `/help` - show available commands
 - `/status` - show current Codex status
+- `/health` - show Codex, memory-summary, transcription, and update health
 - `/model` - choose the Codex model and thinking effort for future turns
 - `/resume` - retry a parked task after fixing the underlying failure
+- `/retrymemory` - restart parked memory maintenance after fixing its API/key problem
 - `/stop` - interrupt the active Codex turn
 - `/newsession` - restart Codex and start a fresh thread
 - `/update [ref]` - update the plugins runtime to the latest commit (or a specific
@@ -469,6 +471,11 @@ These tools default to the currently active Telegram chat tracked by the bridge,
 ## Voice Transcription
 
 Voice transcription uses OpenAI `gpt-4o-transcribe`. Telegram voice notes often arrive as `.oga` / Ogg Opus files, so the bridge converts them to `.mp3` with `ffmpeg` before sending them to the transcription API.
+
+If transcription fails, the bridge does not silently pass a placeholder to
+Codex. It tells the user that the voice note was not processed, records the
+specific failure category for `/health`, and reports when transcription works
+again. Repeated failures remain visible without repeating the full diagnostic.
 
 Install `ffmpeg` on the machine running the bridge if you want Telegram voice-note transcription to work reliably.
 

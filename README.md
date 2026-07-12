@@ -25,11 +25,8 @@ This is the intended beginner path from a clean machine. In the recommended setu
 
 ### Non-technical Mac install: exact steps
 
-1. Install Codex CLI and log in.
-2. Create an OpenAI API key and keep it ready to paste.
-3. In Telegram, open `@BotFather`, send `/newbot`, follow the prompts, and keep the bot token ready to paste.
-4. Open the Mac app called Terminal.
-5. Paste this whole block into Terminal and press Enter:
+1. Install Codex CLI, log in, create an OpenAI API key, and create a Telegram bot with `@BotFather` (`/newbot`).
+2. Open Terminal, paste this whole block, and press Enter:
 
 ```bash
 cd ~/Downloads
@@ -40,21 +37,23 @@ cd codex-plugins-main
 python3 scripts/setup.py
 ```
 
-6. When the setup asks for the Codex starting folder, press Enter to use your home folder. This does **not** limit Codex to that folder in the recommended autonomous mode.
-7. Paste the Telegram bot token when asked.
-8. Paste the OpenAI API key when asked.
-9. When asked about permissions, choose the recommended `dangerFullAccess` option or just press Enter.
-10. When asked about network access, press Enter.
-11. When asked whether to start the bridge and complete pairing, press Enter.
-12. The wizard validates both keys, installs a persistent background service, and asks you to message the bot.
-13. Message your new Telegram bot, return to Terminal, and press Enter. Confirm the Telegram user shown by the wizard to approve pairing.
-14. In Telegram, send:
+3. Follow the wizard. Paste both keys when asked; if unsure about any choice, press Enter for the recommended option.
+4. When prompted, message your new Telegram bot, return to Terminal, press Enter, and approve the Telegram user shown.
+5. In Telegram, send:
 
 ```text
 /newsession
 ```
 
 After that, you can talk to Codex from Telegram. You may delete `~/Downloads/codex-plugins-main` and `codex-plugins.zip`; the live runtime is in Application Support. This setup is intended for a dedicated Mac you trust Codex to control remotely.
+
+The wizard makes real OpenAI summary and transcription requests, so a key
+without active API billing is rejected during setup. After installation, use
+`/health` for a plain-language health report. Persistent memory failures and
+voice-transcription failures are reported automatically in Telegram; raw
+conversation continues to be saved if summarization pauses. After fixing a
+memory API problem, send `/retrymemory`. Interrupted Codex tasks remain saved
+and can be retried with `/resume`.
 
 The LaunchAgent starts the bridge automatically whenever this macOS user logs in and restarts it after crashes. If FileVault is enabled, someone may still need to unlock the Mac locally after a full reboot before user services can start.
 

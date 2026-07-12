@@ -334,7 +334,7 @@ class BotCommandMenuTests(unittest.TestCase):
 
         self.assertEqual(
             [item["command"] for item in bridge.BOT_COMMANDS],
-            ["start", "help", "status", "model", "resume", "stop", "newsession", "update"],
+            ["start", "help", "status", "health", "model", "resume", "retrymemory", "stop", "newsession", "update"],
         )
         for item in bridge.BOT_COMMANDS:
             self.assertIn(f"/{item['command']} - {item['description']}", help_text)
@@ -565,3 +565,79 @@ class UpdateAnnouncementTests(unittest.TestCase):
     def test_update_is_a_registered_bot_command(self):
         bridge = load_bridge_module()
         self.assertIn("update", {item["command"] for item in bridge.BOT_COMMANDS})
+
+
+class HealthVisibilityTests(unittest.TestCase):
+    def test_transcription_failure_is_classified_and_visible(self):
+        bridge = load_bridge_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            health_file = Path(tmpdir) / "health.json"
+            notices = []
+            error = bridge.HTTPError(
+                "https://api.openai.com/v1/audio/transcriptions",
+                429,
+                "Too Many Requests",
+                {},
+                io.BytesIO(b'{"error":{"message":"insufficient_quota: add billing credit"}}'),
+            )
+            with mock.patch.object(bridge, "HEALTH_STATE_FILE", health_file), mock.patch.object(
+                bridge.urllib.request, "urlopen", side_effect=error
+            ):
+                result = bridge.transcribe_audio(
+                    b"audio",
+                    "voice.mp3",
+                    "audio/mpeg",
+                    "sk-test",
+                    on_notice=notices.append,
+                )
+            self.assertIsNone(result)
+            health = json.loads(health_file.read_text(encoding="utf-8"))
+            self.assertEqual(health["components"]["transcription"]["category"], "insufficient_credit")
+            self.assertIn("insufficient credit", notices[0])
+
+    def test_health_text_reports_parked_memory_and_transcription(self):
+        bridge = load_bridge_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            health_file = root / "telegram-health.json"
+            memory_health = root / "memory-health.json"
+            memory_alert = root / "memory-alert.json"
+            memory_task = root / "memory-task.json"
+            memory_pid = root / "memory.pid"
+            bridge.save_json(
+                health_file,
+                {"components": {"transcription": {"status": "error", "detail": "API key rejected"}}},
+            )
+            bridge.save_json(memory_alert, {"last_error": "insufficient_credit: add billing"})
+            with mock.patch.object(bridge, "HEALTH_STATE_FILE", health_file), mock.patch.object(
+                bridge, "MEMORY_HEALTH_FILE", memory_health
+            ), mock.patch.object(bridge, "MEMORY_ALERT_FILE", memory_alert), mock.patch.object(
+                bridge, "MEMORY_TASK_FILE", memory_task
+            ), mock.patch.object(bridge, "MEMORY_PID_FILE", memory_pid), mock.patch.object(
+                bridge, "UPDATE_STATE_FILE", root / "update.json"
+            ):
+                text = bridge.health_text()
+            self.assertIn("Memory summaries: parked", text)
+            self.assertIn("Raw conversation is still being saved", text)
+            self.assertIn("Voice transcription: API key rejected", text)
+
+    def test_non_usage_codex_failure_is_saved_and_parked(self):
+        bridge = load_bridge_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recovery_file = Path(tmpdir) / "recovery.json"
+            recovery_file.write_text("[]", encoding="utf-8")
+            client = object.__new__(bridge.CodexAppServerClient)
+            client.config = {"enable_turn_recovery": True, "turn_recovery_max_attempts": 5}
+            client._recovery_lock = bridge.threading.Lock()
+            state = {
+                "chat_id": "123",
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "input_text": "Do not lose this task",
+            }
+            with mock.patch.object(bridge, "TURN_RECOVERY_FILE", recovery_file):
+                result = client._queue_recovery(state, "authentication failed", force_park=True)
+            record = json.loads(recovery_file.read_text(encoding="utf-8"))[0]
+            self.assertEqual(result, "parked")
+            self.assertEqual(record["state"], "parked")
+            self.assertEqual(record["original_input"], "Do not lose this task")
