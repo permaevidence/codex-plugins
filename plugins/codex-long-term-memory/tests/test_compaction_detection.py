@@ -817,6 +817,53 @@ class CompactionDetectionTests(unittest.TestCase):
         self.assertIn("FACT LIST TO CLEANUP", content_text)
         self.assertIn("AGENTS.md memory transport", updated)
 
+    def test_lock_loser_does_not_delete_active_worker_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = Path(tmpdir) / "memory-maintenance.pid"
+            pid_file.write_text("424242", encoding="utf-8")
+            with mock.patch.object(common, "MAINTENANCE_PID_FILE", pid_file), mock.patch.object(
+                common, "ensure_state_dir"
+            ), mock.patch.object(common, "state_lock", side_effect=BlockingIOError):
+                common.run_memory_maintenance_worker()
+            self.assertEqual(pid_file.read_text(encoding="utf-8"), "424242")
+
+    def test_maintenance_parks_and_alerts_after_bounded_no_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            pending = root / "pending"
+            pending.mkdir()
+            task_file = pending / "memory-maintenance.json"
+            task_file.write_text(json.dumps({"generation": 1}), encoding="utf-8")
+            alert_file = pending / "memory-maintenance.stuck.json"
+            pid_file = pending / "memory-maintenance.pid"
+            lock_file = pending / "memory-maintenance.lock"
+            config = {
+                **common.DEFAULT_CONFIG,
+                "maintenance_max_consecutive_failures": 2,
+                "pending_retry_base_seconds": 1,
+                "pending_retry_max_seconds": 1,
+            }
+            with mock.patch.object(common, "MAINTENANCE_TASK_FILE", task_file), mock.patch.object(
+                common, "MAINTENANCE_ALERT_FILE", alert_file
+            ), mock.patch.object(common, "MAINTENANCE_PID_FILE", pid_file), mock.patch.object(
+                common, "MAINTENANCE_LOCK_FILE", lock_file
+            ), mock.patch.object(common, "ensure_state_dir"), mock.patch.object(
+                common, "load_config", return_value=config
+            ), mock.patch.object(common, "run_memory_maintenance_once"), mock.patch.object(
+                common, "memory_maintenance_needed", return_value=True
+            ), mock.patch.object(common, "maintenance_progress_signature", return_value="unchanged"), mock.patch.object(
+                common.time, "sleep"
+            ):
+                common.run_memory_maintenance_worker()
+
+            alert = json.loads(alert_file.read_text(encoding="utf-8"))
+            self.assertEqual(alert["status"], "stuck")
+            self.assertEqual(alert["consecutive_failures"], 2)
+            self.assertIn("no progress", alert["last_error"])
+            self.assertFalse(pid_file.exists())
+            with mock.patch.object(common, "MAINTENANCE_ALERT_FILE", alert_file):
+                self.assertIn("Inform the user", common.memory_maintenance_alert_context())
+
 
 if __name__ == "__main__":
     unittest.main()

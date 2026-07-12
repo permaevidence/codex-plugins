@@ -35,6 +35,7 @@ FACTS_LOCK_FILE = STATE_DIR / "user_facts.lock"
 MAINTENANCE_TASK_FILE = PENDING_DIR / "memory-maintenance.json"
 MAINTENANCE_PID_FILE = PENDING_DIR / "memory-maintenance.pid"
 MAINTENANCE_LOCK_FILE = PENDING_DIR / "memory-maintenance.lock"
+MAINTENANCE_ALERT_FILE = PENDING_DIR / "memory-maintenance.stuck.json"
 SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 CODEX_CONFIG_FILE = Path.home() / ".codex" / "config.toml"
 
@@ -122,6 +123,7 @@ DEFAULT_CONFIG = {
     "pending_retry_enabled": True,
     "pending_retry_base_seconds": 30,
     "pending_retry_max_seconds": 480,
+    "maintenance_max_consecutive_failures": 5,
     "injection_transport": "hook",
     "agents_md_path": "",
     "agents_project_doc_max_bytes": 524288,
@@ -210,6 +212,15 @@ def save_json(path: Path, data: Any) -> None:
         temp_path.replace(path)
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def load_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
 
 
 @contextmanager
@@ -1636,7 +1647,39 @@ def schedule_memory_maintenance(config: dict[str, Any] | None = None) -> None:
             "requested_at": datetime.now(timezone.utc).isoformat(),
         },
     )
+    alert = load_json(MAINTENANCE_ALERT_FILE, {})
+    if isinstance(alert, dict) and alert:
+        if alert.get("config_fingerprint") == maintenance_config_fingerprint(config):
+            return
+        MAINTENANCE_ALERT_FILE.unlink(missing_ok=True)
     spawn_memory_maintenance_worker(config)
+
+
+def maintenance_config_fingerprint(config: dict[str, Any]) -> str:
+    settings = openai_settings(config)
+    key = str(settings.get("api_key") or "") if settings else ""
+    payload = {
+        "key_hash": hashlib.sha256(key.encode("utf-8")).hexdigest() if key else "",
+        "base_url": config.get("openai_base_url"),
+        "model": config.get("openai_model"),
+        "reasoning_effort": config.get("openai_reasoning_effort"),
+        "enable_model_summaries": config.get("enable_model_summaries"),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def memory_maintenance_alert_context() -> str:
+    alert = load_json(MAINTENANCE_ALERT_FILE, {})
+    if not isinstance(alert, dict) or not alert:
+        return ""
+    attempts = int(alert.get("consecutive_failures") or 0)
+    detail = str(alert.get("last_error") or "maintenance made no progress")[:300]
+    return (
+        "[Long-term memory warning: background maintenance is parked after "
+        f"{attempts} unsuccessful attempts ({detail}). Inform the user. Fix the OpenAI/API or "
+        "data problem, then remove ~/.codex/long-term-memory/pending/memory-maintenance.stuck.json "
+        "or change the memory model/API configuration to retry.]"
+    )
 
 
 def memory_maintenance_worker_alive() -> bool:
@@ -1734,23 +1777,54 @@ def run_memory_maintenance_once(config: dict[str, Any]) -> None:
         refresh_agents_memory_injection(config)
 
 
+def maintenance_progress_signature() -> str:
+    payload = {
+        "history": read_history(),
+        "facts": read_facts(),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
 def run_memory_maintenance_worker() -> None:
     ensure_state_dir()
+    owns_pid_file = False
     try:
         with state_lock(MAINTENANCE_LOCK_FILE, nonblocking=True):
             MAINTENANCE_PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+            owns_pid_file = True
             delay = int(load_config().get("pending_retry_base_seconds", 30))
+            consecutive_failures = 0
             while MAINTENANCE_TASK_FILE.exists():
                 config = load_config()
                 try:
                     before = json.loads(MAINTENANCE_TASK_FILE.read_text(encoding="utf-8"))
                 except Exception:
                     before = {}
+                before_signature = maintenance_progress_signature()
+                last_error = ""
                 try:
                     run_memory_maintenance_once(config)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"[:1000]
                 if memory_maintenance_needed(config):
+                    after_signature = maintenance_progress_signature()
+                    if last_error or before_signature == after_signature:
+                        consecutive_failures += 1
+                    else:
+                        consecutive_failures = 0
+                    maximum = max(1, int(config.get("maintenance_max_consecutive_failures") or 5))
+                    if consecutive_failures >= maximum:
+                        save_json(
+                            MAINTENANCE_ALERT_FILE,
+                            {
+                                "status": "stuck",
+                                "consecutive_failures": consecutive_failures,
+                                "last_error": last_error or "maintenance made no progress",
+                                "stuck_at": datetime.now(timezone.utc).isoformat(),
+                                "config_fingerprint": maintenance_config_fingerprint(config),
+                            },
+                        )
+                        break
                     time.sleep(delay)
                     delay = min(delay * 2, int(config.get("pending_retry_max_seconds", 480)))
                     continue
@@ -1764,7 +1838,12 @@ def run_memory_maintenance_worker() -> None:
     except BlockingIOError:
         return
     finally:
-        MAINTENANCE_PID_FILE.unlink(missing_ok=True)
+        if owns_pid_file:
+            try:
+                if MAINTENANCE_PID_FILE.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                    MAINTENANCE_PID_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def fetch_calendar_section(days: int = 30, timeout: int = 10) -> str:

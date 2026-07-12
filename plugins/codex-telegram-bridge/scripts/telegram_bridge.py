@@ -72,6 +72,7 @@ BOT_COMMANDS = [
     {"command": "help", "description": "Show available commands"},
     {"command": "status", "description": "Show current Codex status"},
     {"command": "model", "description": "Choose Codex model and thinking effort"},
+    {"command": "resume", "description": "Retry a parked interrupted task"},
     {"command": "stop", "description": "Interrupt the active Codex turn"},
     {"command": "newsession", "description": "Restart Codex and start a fresh thread"},
 ]
@@ -860,6 +861,19 @@ class CodexAppServerClient:
             return len(records)
         return sum(1 for item in records if isinstance(item, dict) and str(item.get("chat_id")) == chat_id)
 
+    def parked_recovery_count(self, chat_id: str) -> int:
+        with self._recovery_lock:
+            records = load_json(TURN_RECOVERY_FILE, [])
+        if not isinstance(records, list):
+            return 0
+        return sum(
+            1
+            for item in records
+            if isinstance(item, dict)
+            and str(item.get("chat_id")) == chat_id
+            and item.get("state") == "parked"
+        )
+
     def cancel_recovery(self, chat_id: str) -> bool:
         with self._recovery_lock:
             records = load_json(TURN_RECOVERY_FILE, [])
@@ -870,6 +884,32 @@ class CodexAppServerClient:
             if changed:
                 save_json(TURN_RECOVERY_FILE, kept)
         return changed
+
+    def retry_parked_recovery(self, chat_id: str) -> bool:
+        with self._recovery_lock:
+            records = load_json(TURN_RECOVERY_FILE, [])
+            if not isinstance(records, list):
+                return False
+            changed = False
+            for record in records:
+                if (
+                    isinstance(record, dict)
+                    and str(record.get("chat_id")) == chat_id
+                    and record.get("state") == "parked"
+                ):
+                    record.update(
+                        {
+                            "state": "pending",
+                            "attempts": 0,
+                            "due_at": time.time(),
+                            "parked_at": None,
+                            "waiting_for_rate_limit_reset": False,
+                        }
+                    )
+                    changed = True
+            if changed:
+                save_json(TURN_RECOVERY_FILE, records)
+            return changed
 
     def _remove_recovery(self, recovery_id: str) -> None:
         with self._recovery_lock:
@@ -917,9 +957,9 @@ class CodexAppServerClient:
             )
             save_json(TURN_RECOVERY_FILE, records)
 
-    def _queue_recovery(self, state: dict[str, Any], reason: str) -> None:
+    def _queue_recovery(self, state: dict[str, Any], reason: str) -> str:
         if not self.config.get("enable_turn_recovery", True):
-            return
+            return "disabled"
         with self._recovery_lock:
             records = load_json(TURN_RECOVERY_FILE, [])
             if not isinstance(records, list):
@@ -938,18 +978,23 @@ class CodexAppServerClient:
                 "created_at": time.time(),
                 "attempts": 0,
             }
+            attempts = int(record.get("attempts") or 0)
+            maximum = max(1, int(self.config.get("turn_recovery_max_attempts") or 5))
+            parked = attempts >= maximum
             record.update(
                 {
                     "reason": reason,
-                    "due_at": time.time() + 5,
+                    "due_at": None if parked else time.time() + 5,
                     "last_failed_at": time.time(),
                     "active_retry_turn_id": None,
-                    "state": "pending",
+                    "state": "parked" if parked else "pending",
+                    "parked_at": time.time() if parked else None,
                 }
             )
             if existing is None:
                 records.append(record)
             save_json(TURN_RECOVERY_FILE, records)
+            return "parked" if parked else "pending"
 
     def start_recovery_loop(self) -> None:
         if not self.config.get("enable_turn_recovery", True):
@@ -969,6 +1014,7 @@ class CodexAppServerClient:
                             (
                                 item for item in records
                                 if isinstance(item, dict)
+                                and item.get("state") != "parked"
                                 and float(item.get("due_at") or 0) <= now
                                 and not self._active_turn_by_chat.get(str(item.get("chat_id")))
                             ),
@@ -976,6 +1022,22 @@ class CodexAppServerClient:
                         )
                         record = dict(record) if record is not None else None
                     if record is not None:
+                        maximum = max(1, int(self.config.get("turn_recovery_max_attempts") or 5))
+                        if int(record.get("attempts") or 0) >= maximum:
+                            self._update_recovery_record(
+                                str(record["id"]),
+                                state="parked",
+                                due_at=None,
+                                parked_at=now,
+                                reason=str(record.get("reason") or "recovery could not start successfully"),
+                            )
+                            self.send_callback(
+                                str(record.get("chat_id")),
+                                f"Automatic recovery stopped after {maximum} unsuccessful attempts. The task remains "
+                                "saved without consuming more quota. Fix the underlying issue, then use /resume.",
+                            )
+                            time.sleep(poll_seconds)
+                            continue
                         try:
                             limits = self.request("account/rateLimits/read", None, timeout=30)
                         except Exception:
@@ -1104,7 +1166,10 @@ class CodexAppServerClient:
         if entry and entry.get("thread_id"):
             suffix = f"\nCLI: {version}" if version else ""
             recovery = self.pending_recovery_count(chat_id)
-            recovery_line = f"\nInterrupted tasks awaiting automatic recovery: {recovery}" if recovery else ""
+            parked = self.parked_recovery_count(chat_id)
+            recovery_line = f"\nSaved interrupted tasks: {recovery}" if recovery else ""
+            if parked:
+                recovery_line += f" ({parked} parked; use /resume after fixing the issue)"
             return f"Idle.\nCurrent thread: {entry['thread_id']}{model_line}{last_seen}{recovery_line}{suffix}"
         suffix = f"\nCLI: {version}" if version else ""
         return f"Idle.\nNo thread has been created for this chat yet.{model_line}{suffix}"
@@ -1164,12 +1229,21 @@ class CodexAppServerClient:
                     self._remove_recovery(str(state["recovery_id"]))
                 self.send_callback(chat_id, text, files)
             else:
-                self._queue_recovery(state, "completed without final assistant text")
-                self.send_callback(
-                    chat_id,
-                    "Codex stopped before delivering a final response. The task was saved and will resume "
-                    "automatically in the same thread when usage capacity is available. Use /stop to cancel it.",
-                )
+                recovery_state = self._queue_recovery(state, "completed without final assistant text")
+                if recovery_state == "parked":
+                    maximum = max(1, int(self.config.get("turn_recovery_max_attempts") or 5))
+                    self.send_callback(
+                        chat_id,
+                        f"Automatic recovery stopped after {maximum} unsuccessful attempts. The task remains saved "
+                        "without consuming more quota. Fix the underlying issue, then use /resume to retry or "
+                        "/newsession to discard it.",
+                    )
+                else:
+                    self.send_callback(
+                        chat_id,
+                        "Codex stopped before delivering a final response. The task was saved and will resume "
+                        "automatically in the same thread when usage capacity is available. Use /stop to cancel it.",
+                    )
         elif status == "interrupted":
             if state.get("recovery_id"):
                 self._remove_recovery(str(state["recovery_id"]))
@@ -1179,8 +1253,16 @@ class CodexAppServerClient:
             turn_error_message = turn_error.get("message") if isinstance(turn_error, dict) else turn_error
             error = str(state.get("error") or turn_error_message or "Unknown error")
             if re.search(r"usage|rate.?limit|quota|credit", error, flags=re.IGNORECASE):
-                self._queue_recovery(state, error)
-                self.send_callback(chat_id, "Codex hit a usage limit. The task was saved and will resume automatically after the limit resets.")
+                recovery_state = self._queue_recovery(state, error)
+                if recovery_state == "parked":
+                    maximum = max(1, int(self.config.get("turn_recovery_max_attempts") or 5))
+                    self.send_callback(
+                        chat_id,
+                        f"Automatic recovery stopped after {maximum} unsuccessful attempts. The task remains saved. "
+                        "Use /resume after fixing the underlying issue.",
+                    )
+                else:
+                    self.send_callback(chat_id, "Codex hit a usage limit. The task was saved and will resume automatically after the limit resets.")
             else:
                 if state.get("recovery_id"):
                     self._remove_recovery(str(state["recovery_id"]))
@@ -1853,6 +1935,25 @@ def main() -> None:
                         config,
                         access,
                     )
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
+                    continue
+                if command == "/resume":
+                    if codex.retry_parked_recovery(chat_id):
+                        send_message(
+                            str(token),
+                            chat_id,
+                            "The parked task is queued for another recovery cycle.",
+                            message.get("message_id"),
+                            access=access,
+                        )
+                    else:
+                        send_message(
+                            str(token),
+                            chat_id,
+                            "There is no parked task to resume.",
+                            message.get("message_id"),
+                            access=access,
+                        )
                     PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
                 if command == "/newsession":

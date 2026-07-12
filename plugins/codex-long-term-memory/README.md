@@ -94,6 +94,7 @@ Default config:
   "pending_retry_enabled": true,
   "pending_retry_base_seconds": 30,
   "pending_retry_max_seconds": 480,
+  "maintenance_max_consecutive_failures": 5,
   "injection_transport": "hook",
   "agents_md_path": "",
   "agents_project_doc_max_bytes": 524288
@@ -101,6 +102,13 @@ Default config:
 ```
 
 When an OpenAI API key is configured, the plugin uses the Responses API with `gpt-5.6-luna` and `reasoning.effort = "high"` for model-backed summaries, file descriptions, and richer user-fact extraction by default. The repo-level setup wizard treats this key as required because memory quality is poor without model-backed summaries.
+
+Background maintenance parks after five consecutive exceptions or no-progress
+cycles. It writes `pending/memory-maintenance.stuck.json` and injects a visible
+warning into the next Codex prompt instead of retrying forever. Changing the
+memory API key/model configuration clears the parked classification
+automatically; an operator can also remove that stuck file after fixing the
+underlying problem.
 
 Put secrets in `~/.codex/long-term-memory/.env` or the process environment rather than `config.json`:
 

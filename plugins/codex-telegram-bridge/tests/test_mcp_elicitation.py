@@ -203,6 +203,56 @@ class TurnRecoveryTests(unittest.TestCase):
             self.assertEqual(json.loads(recovery_file.read_text(encoding="utf-8")), [])
             self.assertEqual(sent[0][1], "Finished safely.")
 
+    def test_recovery_parks_after_maximum_attempts(self):
+        bridge = load_bridge_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recovery_file = Path(tmpdir) / "turn_recovery_queue.json"
+            recovery_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "recovery-1",
+                            "chat_id": "123",
+                            "thread_id": "thread-1",
+                            "attempts": 5,
+                            "original_input": "Do the task",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            client = object.__new__(bridge.CodexAppServerClient)
+            client.config = {"enable_turn_recovery": True, "turn_recovery_max_attempts": 5}
+            client._recovery_lock = bridge.threading.Lock()
+            state = {
+                "chat_id": "123",
+                "thread_id": "thread-1",
+                "turn_id": "turn-5",
+                "input_text": "Do the task",
+                "recovery_id": "recovery-1",
+            }
+            with mock.patch.object(bridge, "TURN_RECOVERY_FILE", recovery_file):
+                self.assertEqual(client._queue_recovery(state, "still empty"), "parked")
+            record = json.loads(recovery_file.read_text(encoding="utf-8"))[0]
+            self.assertEqual(record["state"], "parked")
+            self.assertIsNone(record["due_at"])
+
+    def test_explicit_resume_requeues_parked_recovery(self):
+        bridge = load_bridge_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recovery_file = Path(tmpdir) / "turn_recovery_queue.json"
+            recovery_file.write_text(
+                json.dumps([{"id": "recovery-1", "chat_id": "123", "state": "parked", "attempts": 5}]),
+                encoding="utf-8",
+            )
+            client = object.__new__(bridge.CodexAppServerClient)
+            client._recovery_lock = bridge.threading.Lock()
+            with mock.patch.object(bridge, "TURN_RECOVERY_FILE", recovery_file):
+                self.assertTrue(client.retry_parked_recovery("123"))
+            record = json.loads(recovery_file.read_text(encoding="utf-8"))[0]
+            self.assertEqual(record["state"], "pending")
+            self.assertEqual(record["attempts"], 0)
+
 
 class ModelDefaultTests(unittest.TestCase):
     def test_first_start_inherits_and_persists_codex_defaults(self):
@@ -284,7 +334,7 @@ class BotCommandMenuTests(unittest.TestCase):
 
         self.assertEqual(
             [item["command"] for item in bridge.BOT_COMMANDS],
-            ["start", "help", "status", "model", "stop", "newsession"],
+            ["start", "help", "status", "model", "resume", "stop", "newsession"],
         )
         for item in bridge.BOT_COMMANDS:
             self.assertIn(f"/{item['command']} - {item['description']}", help_text)

@@ -44,6 +44,7 @@ DEFAULT_STATE_CONFIG = {
     "pending_retry_enabled": True,
     "pending_retry_base_seconds": 30,
     "pending_retry_max_seconds": 480,
+    "maintenance_max_consecutive_failures": 5,
     "injection_transport": "hook",
     "agents_md_path": "",
     "agents_project_doc_max_bytes": 524288,

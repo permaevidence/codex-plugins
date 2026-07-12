@@ -9,8 +9,8 @@ This plugin ports the Telegram control loop from `claude-telegram-plugin` to Cod
 - Starts, steers, and interrupts turns through `codex app-server`
 - Auto-approves command, file-change, and permission approval requests
 - Auto-answers structured `item/tool/requestUserInput` prompts with default options when possible
-- Supports `/help`, `/status`, `/model`, `/stop`, and `/newsession`
-- Registers Telegram's native bot command menu for `/start`, `/help`, `/status`, `/model`, `/stop`, and `/newsession`
+- Supports `/help`, `/status`, `/model`, `/resume`, `/stop`, and `/newsession`
+- Registers Telegram's native bot command menu for `/start`, `/help`, `/status`, `/model`, `/resume`, `/stop`, and `/newsession`
 - Supports DM pairing, allowlists, groups, mention policies, and mention regexes
 - Transcribes voice messages with OpenAI `gpt-4o-transcribe`
 - Forwards inbound photos and documents as downloaded local paths, with other Telegram attachments as downloadable file IDs
@@ -158,6 +158,7 @@ When the bridge starts, it registers Telegram's native bot command menu. In Tele
 - `/help` - show available commands
 - `/status` - show current Codex status
 - `/model` - choose the Codex model and thinking effort for future turns
+- `/resume` - retry a parked task after fixing the underlying failure
 - `/stop` - interrupt the active Codex turn
 - `/newsession` - restart Codex and start a fresh thread
 
@@ -200,13 +201,19 @@ already completed. `/status` shows queued recoveries. `/stop` cancels both an
 active turn and any queued recovery for that chat; `/newsession` also clears the
 old thread's recovery intentionally.
 
+Recovery is capped at five automatic attempts by default. A repeatedly failing
+task is then parked on disk and the user is notified, preventing hourly quota
+consumption forever. After fixing the underlying problem, `/resume` resets the
+attempt counter and retries the parked task explicitly.
+
 These settings are optional in `config.json`:
 
 ```json
 {
   "enable_turn_recovery": true,
   "turn_recovery_poll_seconds": 30,
-  "turn_recovery_reset_buffer_seconds": 60
+  "turn_recovery_reset_buffer_seconds": 60,
+  "turn_recovery_max_attempts": 5
 }
 ```
 

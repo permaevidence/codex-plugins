@@ -404,7 +404,7 @@ After editing `AGENTS.md`, start a new Codex session so the updated instructions
 ### `codex-telegram-bridge`
 
 - maps Telegram chats to persistent Codex threads
-- supports `/help`, `/status`, `/model`, `/stop`, and `/newsession`
+- supports `/help`, `/status`, `/model`, `/resume`, `/stop`, and `/newsession`
 - registers Telegram's native bot command menu for those commands
 - supports DM pairing, allowlists, groups, and mention rules
 - auto-approves unattended Codex approval requests

@@ -14,6 +14,7 @@ from lib.common import (
     first_present,
     load_config,
     load_hook_input,
+    memory_maintenance_alert_context,
     read_history,
     should_reinject_after_compaction,
     uses_agents_md_injection,
@@ -36,6 +37,9 @@ def main() -> None:
 
     now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
     context_parts = [f"[now: {now}]"]
+    maintenance_alert = memory_maintenance_alert_context()
+    if maintenance_alert:
+        context_parts.extend(["", maintenance_alert])
 
     if needs_reinjection and consume_compaction_reinjection(payload):
         context_parts.extend(["", build_compaction_policy()])

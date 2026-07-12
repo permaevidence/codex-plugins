@@ -53,6 +53,7 @@ DEFAULT_CONFIG = {
     "enable_turn_recovery": True,
     "turn_recovery_poll_seconds": 30,
     "turn_recovery_reset_buffer_seconds": 60,
+    "turn_recovery_max_attempts": 5,
 }
 
 
