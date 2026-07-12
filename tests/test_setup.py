@@ -25,6 +25,12 @@ assert runtime_spec and runtime_spec.loader
 runtime_install = importlib.util.module_from_spec(runtime_spec)
 runtime_spec.loader.exec_module(runtime_install)
 
+UPDATE_PATH = REPO_ROOT / "scripts" / "update.py"
+update_spec = importlib.util.spec_from_file_location("runtime_update_test", UPDATE_PATH)
+assert update_spec and update_spec.loader
+runtime_update = importlib.util.module_from_spec(update_spec)
+update_spec.loader.exec_module(runtime_update)
+
 
 class SetupWizardTests(unittest.TestCase):
     def model_catalog_result(self):
@@ -194,6 +200,19 @@ class RuntimeInstallTests(unittest.TestCase):
             )
             self.assertEqual(manifest["version"], "1.2.3+codex.commit-abc123")
 
+    def test_runtime_install_reuses_same_cachebuster_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self.make_source(root)
+            app = root / "Application Support/PermaEvidenceCodex"
+            with mock.patch.object(runtime_install, "APP_SUPPORT_ROOT", app), mock.patch.object(
+                runtime_install, "VERSIONS_DIR", app / "versions"
+            ), mock.patch.object(runtime_install, "CURRENT_LINK", app / "current"):
+                first = runtime_install.install_runtime(source, cachebuster="commit-abc123").resolve()
+                second = runtime_install.install_runtime(source, cachebuster="commit-abc123").resolve()
+            self.assertEqual(first, second)
+            self.assertEqual([path.name for path in (app / "versions").iterdir()], ["commit-abc123"])
+
     def test_runtime_install_rewrites_relative_mcp_paths_to_absolute(self) -> None:
         # Codex launches plugin MCP servers with the session cwd, so relative
         # script paths in .mcp.json must become absolute at install time.
@@ -252,6 +271,55 @@ class RuntimeInstallTests(unittest.TestCase):
                     len([path for path in (app / "versions").iterdir() if path.is_dir()]),
                     runtime_install.KEEP_VERSIONS,
                 )
+
+    def test_runtime_prune_never_deletes_referenced_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self.make_source(root)
+            home = root / "home"
+            app = home / "Library/Application Support/PermaEvidenceCodex"
+            hooks = home / ".codex/hooks.json"
+            hooks.parent.mkdir(parents=True)
+            launch_agent = home / "Library/LaunchAgents/com.permaevidence.test.plist"
+            launch_agent.parent.mkdir(parents=True)
+            with mock.patch.object(runtime_install, "APP_SUPPORT_ROOT", app), mock.patch.object(
+                runtime_install, "VERSIONS_DIR", app / "versions"
+            ), mock.patch.object(runtime_install, "CURRENT_LINK", app / "current"), mock.patch.object(
+                runtime_install.Path, "home", return_value=home
+            ) as _home:
+                installed = [
+                    runtime_install.install_runtime(source, cachebuster=name).resolve()
+                    for name in ("hook-ref", "launch-ref", "process-ref", "victim", "active")
+                ]
+                for index, path in enumerate(installed, start=1):
+                    os.utime(path, (index, index))
+                hooks.write_text(json.dumps({"command": str(installed[0] / "hook.py")}), encoding="utf-8")
+                launch_agent.write_text(f"<string>{installed[1]}/bridge.py</string>", encoding="utf-8")
+                with mock.patch.object(
+                    runtime_install.subprocess,
+                    "run",
+                    return_value=mock.Mock(returncode=0, stdout=f"python3 {installed[2]}/worker.py\n"),
+                ):
+                    runtime_install.prune_old_versions(active=installed[-1])
+
+            self.assertTrue(installed[0].exists(), "hook-referenced runtime must be preserved")
+            self.assertTrue(installed[1].exists(), "LaunchAgent-referenced runtime must be preserved")
+            self.assertTrue(installed[2].exists())
+            self.assertFalse(installed[3].exists(), "unreferenced runtime should be pruned")
+            self.assertTrue(installed[4].exists())
+
+    def test_deferred_update_is_one_shot_detached_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            with mock.patch.object(runtime_update.Path, "home", return_value=home), mock.patch.object(
+                runtime_update.subprocess, "Popen"
+            ) as popen:
+                log = runtime_update.schedule_deferred_update("main", 45)
+            command = popen.call_args.args[0]
+            self.assertIn("--run-after-delay", command)
+            self.assertNotIn("launchctl", command)
+            self.assertTrue(popen.call_args.kwargs["start_new_session"])
+            self.assertEqual(log, home / ".codex/telegram-bridge/update-handoff.log")
 
 
 if __name__ == "__main__":

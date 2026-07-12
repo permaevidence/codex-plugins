@@ -111,6 +111,17 @@ The permanent installation includes an updater. It resolves the requested Git re
 python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/scripts/update.py"
 ```
 
+If an update must begin after the current Codex reply/process has exited, use
+the updater's one-shot detached handoff:
+
+```bash
+python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/scripts/update.py" --defer-seconds 45
+```
+
+Do not use `launchctl submit` for one-shot updates. Launchd keeps submitted
+jobs alive and can rerun the updater indefinitely. The deferred updater above
+runs exactly once and is not registered as a persistent service.
+
 The last three runtime versions are retained so rollback does not depend on the Downloads folder.
 
 ### Manual/developer setup reference

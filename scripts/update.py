@@ -13,6 +13,7 @@ import sys
 import tempfile
 import urllib.request
 import zipfile
+import time
 from pathlib import Path
 
 
@@ -24,7 +25,41 @@ CURRENT_LINK = APP_SUPPORT_ROOT / "current"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download, validate, and atomically activate the latest plugin runtime.")
     parser.add_argument("--ref", default="main", help="Git ref to resolve. Defaults to main.")
+    parser.add_argument(
+        "--defer-seconds",
+        type=int,
+        default=0,
+        help="Run once in a detached process after this delay; safe for post-reply handoffs.",
+    )
+    parser.add_argument("--run-after-delay", type=int, default=0, help=argparse.SUPPRESS)
     return parser.parse_args()
+
+
+def schedule_deferred_update(ref: str, delay: int) -> Path:
+    """Start one detached updater process without registering a launchd job."""
+    if delay < 1:
+        raise ValueError("Deferred update delay must be at least one second")
+    log_dir = Path.home() / ".codex" / "telegram-bridge"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "update-handoff.log"
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--ref",
+        ref,
+        "--run-after-delay",
+        str(delay),
+    ]
+    with log_path.open("ab") as log:
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    return log_path
 
 
 def run(command: list[str]) -> None:
@@ -95,6 +130,12 @@ def restore(previous: Path | None) -> None:
 
 def main() -> int:
     args = parse_args()
+    if args.defer_seconds:
+        log_path = schedule_deferred_update(args.ref, args.defer_seconds)
+        print(f"One-shot update scheduled in {args.defer_seconds}s. Log: {log_path}")
+        return 0
+    if args.run_after_delay:
+        time.sleep(args.run_after_delay)
     previous = CURRENT_LINK.resolve() if CURRENT_LINK.exists() else None
     commit = resolve_commit(args.ref)
     print(f"Resolved {args.ref} to {commit}")

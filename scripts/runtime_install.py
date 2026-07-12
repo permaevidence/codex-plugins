@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,10 +33,19 @@ def install_runtime(source_root: Path, *, cachebuster: str | None = None) -> Pat
     token = cachebuster or datetime.now(timezone.utc).strftime("local-%Y%m%d-%H%M%S")
     version_name = token
     destination = VERSIONS_DIR / version_name
-    suffix = 1
-    while destination.exists():
-        destination = VERSIONS_DIR / f"{version_name}-{suffix}"
-        suffix += 1
+
+    # Commit-based installs are immutable. Reusing an already validated
+    # destination makes updates idempotent and prevents repeated invocations
+    # from creating commit-...-1, commit-...-2, ... runtime churn.
+    if destination.exists():
+        if token.startswith("commit-"):
+            _validate_runtime(destination)
+            _activate(destination)
+            return CURRENT_LINK
+        suffix = 1
+        while destination.exists():
+            destination = VERSIONS_DIR / f"{version_name}-{suffix}"
+            suffix += 1
 
     staging_parent = Path(tempfile.mkdtemp(prefix=".install-", dir=str(VERSIONS_DIR)))
     staging = staging_parent / "runtime"
@@ -60,12 +70,16 @@ def install_runtime(source_root: Path, *, cachebuster: str | None = None) -> Pat
     finally:
         shutil.rmtree(staging_parent, ignore_errors=True)
 
+    _activate(destination)
+    return CURRENT_LINK
+
+
+def _activate(destination: Path) -> None:
     APP_SUPPORT_ROOT.mkdir(parents=True, exist_ok=True)
     next_link = APP_SUPPORT_ROOT / ".current.next"
     next_link.unlink(missing_ok=True)
     next_link.symlink_to(destination)
     os.replace(next_link, CURRENT_LINK)
-    return CURRENT_LINK
 
 
 def _apply_cachebusters(root: Path, token: str) -> None:
@@ -126,13 +140,70 @@ def prune_old_versions(*, active: Path) -> None:
     those in-flight absolute script paths disappear before handoff completes.
     """
     active = active.resolve()
+    protected = referenced_versions() | {active}
     versions = sorted(
-        (path for path in VERSIONS_DIR.iterdir() if path.is_dir() and path.resolve() != active),
+        (path for path in VERSIONS_DIR.iterdir() if path.is_dir()),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
-    for path in versions[KEEP_VERSIONS - 1 :]:
+    retained = set(protected)
+    for path in versions:
+        if len(retained) >= KEEP_VERSIONS:
+            break
+        retained.add(path.resolve())
+    for path in versions:
+        if path.resolve() in retained:
+            continue
         shutil.rmtree(path, ignore_errors=True)
+
+
+def referenced_versions() -> set[Path]:
+    """Return installed versions still referenced by config or live processes.
+
+    Absolute runtime paths are embedded in Codex hooks, cached MCP manifests,
+    the bridge LaunchAgent, and process command lines. A version remains
+    protected for as long as any of those consumers still points at it.
+    """
+    if not VERSIONS_DIR.exists():
+        return set()
+    versions = [path.resolve() for path in VERSIONS_DIR.iterdir() if path.is_dir()]
+    haystacks: list[str] = []
+
+    codex_dir = Path.home() / ".codex"
+    candidates = [codex_dir / "hooks.json", codex_dir / "config.toml"]
+    plugin_dir = codex_dir / "plugins"
+    if plugin_dir.exists():
+        candidates.extend(
+            path
+            for path in plugin_dir.rglob("*")
+            if path.is_file() and path.suffix in {".json", ".toml"}
+        )
+    launch_agents = Path.home() / "Library" / "LaunchAgents"
+    if launch_agents.exists():
+        candidates.extend(path for path in launch_agents.glob("*.plist") if path.is_file())
+    for path in candidates:
+        try:
+            if path.stat().st_size <= 2_000_000:
+                haystacks.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+
+    try:
+        processes = subprocess.run(
+            ["ps", "-axo", "command="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if processes.returncode == 0:
+            haystacks.append(processes.stdout)
+    except (OSError, subprocess.TimeoutExpired):
+        # Failure to inspect processes must make pruning conservative.
+        return set(versions)
+
+    references = "\n".join(haystacks)
+    return {path for path in versions if str(path) in references}
 
 
 if __name__ == "__main__":
