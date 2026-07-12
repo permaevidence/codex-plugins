@@ -107,7 +107,7 @@ DEFAULT_CONFIG = {
     "openai_api_key": "",
     "openai_api_key_env": "OPENAI_API_KEY",
     "openai_base_url": OPENAI_RESPONSES_URL,
-    "openai_model": "gpt-5.4-mini",
+    "openai_model": "gpt-5.6-luna",
     "openai_reasoning_effort": "high",
     "openai_timeout_seconds": 240,
     "minimum_model_summary_words": 100,
@@ -1216,7 +1216,7 @@ def openai_settings(config: dict[str, Any]) -> dict[str, Any] | None:
         str(config.get("openai_base_url") or "").strip()
         or (os.getenv("OPENAI_BASE_URL") or env.get("OPENAI_BASE_URL", "")).strip()
     )
-    model = str(config.get("openai_model") or "").strip() or "gpt-5.4-mini"
+    model = str(config.get("openai_model") or "").strip() or "gpt-5.6-luna"
     reasoning_effort = str(config.get("openai_reasoning_effort") or "").strip() or "high"
     timeout = int(config.get("openai_timeout_seconds", 240))
 

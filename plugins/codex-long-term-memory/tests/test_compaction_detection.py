@@ -32,6 +32,12 @@ INSTALL_SPEC.loader.exec_module(memory_install)
 
 
 class CompactionDetectionTests(unittest.TestCase):
+    def test_default_memory_model_is_luna_high(self) -> None:
+        self.assertEqual(common.DEFAULT_CONFIG["openai_model"], "gpt-5.6-luna")
+        self.assertEqual(common.DEFAULT_CONFIG["openai_reasoning_effort"], "high")
+        self.assertEqual(memory_install.DEFAULT_STATE_CONFIG["openai_model"], "gpt-5.6-luna")
+        self.assertEqual(memory_install.DEFAULT_STATE_CONFIG["openai_reasoning_effort"], "high")
+
     def test_installer_recognizes_hooks_from_an_older_runtime_version(self) -> None:
         group = {
             "hooks": [

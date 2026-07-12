@@ -35,7 +35,7 @@ DEFAULT_STATE_CONFIG = {
     "openai_api_key": "",
     "openai_api_key_env": "OPENAI_API_KEY",
     "openai_base_url": "https://api.openai.com/v1/responses",
-    "openai_model": "gpt-5.4-mini",
+    "openai_model": "gpt-5.6-luna",
     "openai_reasoning_effort": "high",
     "openai_timeout_seconds": 240,
     "minimum_model_summary_words": 100,
