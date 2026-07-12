@@ -1793,21 +1793,43 @@ def update_outcome_message(state: dict[str, Any]) -> str | None:
     return None
 
 
-def announce_update_outcome(token: str, config: dict[str, Any]) -> None:
+def announce_update_outcome(token: str, config: dict[str, Any]) -> bool:
     owner_chat_id = str(config.get("owner_chat_id") or "").strip()
     if not owner_chat_id:
-        return
+        return False
     state = load_json(UPDATE_STATE_FILE, {})
     text = update_outcome_message(state if isinstance(state, dict) else {})
     if not text:
-        return
+        return False
     try:
         send_message(token, owner_chat_id, text)
     except Exception as exc:
         print(f"update announcement failed: {exc}", file=sys.stderr)
-        return
+        return False
     state["announced"] = True
     save_json(UPDATE_STATE_FILE, state)
+    return True
+
+
+def start_update_announcement_loop(token: str, config: dict[str, Any]) -> None:
+    """Watch for a finished runtime update and notify the owner exactly once.
+
+    A periodic check (not just a startup check) is required: the updater
+    restarts the bridge midway through and only writes the final
+    completed/failed status after the new bridge is already running.
+    """
+    if not str(config.get("owner_chat_id") or "").strip():
+        return
+
+    def worker() -> None:
+        while True:
+            try:
+                announce_update_outcome(token, config)
+            except Exception as exc:
+                print(f"update announcement loop failed: {exc}", file=sys.stderr)
+            time.sleep(30)
+
+    threading.Thread(target=worker, daemon=True, name="update-announce").start()
 
 
 def help_text() -> str:
@@ -1837,7 +1859,7 @@ def main() -> None:
 
     bot_username = get_bot_username(str(token))
     configure_bot_command_menu(str(token))
-    announce_update_outcome(str(token), config)
+    start_update_announcement_loop(str(token), config)
     chat_map = load_chat_map()
     chat_map_lock = threading.Lock()
     # Resume from the last seen Telegram update to avoid re-processing
