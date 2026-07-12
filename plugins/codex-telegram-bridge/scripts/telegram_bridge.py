@@ -61,6 +61,15 @@ REMINDER_CHECK_INTERVAL = 60
 VERSION_CHECK_INTERVAL = 5 * 60
 HEALTH_CHECK_INTERVAL = 30
 TRANSCRIPTION_MAX_BYTES = 25 * 1024 * 1024
+TRANSCRIPTION_MAX_ATTEMPTS = 3
+TRANSCRIPTION_RETRY_DELAYS = (1, 2)
+TRANSCRIPTION_RETRYABLE_CATEGORIES = {
+    "api_error",
+    "network",
+    "rate_limit",
+    "service_unavailable",
+    "timeout",
+}
 GENERATED_IMAGES_DIR = Path.home() / ".codex" / "generated_images"
 LONG_TERM_MEMORY_AGENTS_SCRIPT = (
     Path(__file__).resolve().parents[2]
@@ -652,44 +661,58 @@ def transcribe_audio(
 
     fields = {"model": "gpt-4o-transcribe"}
     payload, boundary = encode_multipart(fields, file_bytes, filename, mime_type)
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/audio/transcriptions",
-        data=payload,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
+    last_failure: tuple[str, str, int | None] | None = None
+    for attempt in range(1, TRANSCRIPTION_MAX_ATTEMPTS + 1):
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/audio/transcriptions",
+            data=payload,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            text = (result.get("text") or "").strip()
+            if not text:
+                detail = "OpenAI returned no transcription text."
+                changed = set_component_health(
+                    "transcription", "error", category="invalid_response", detail=detail
+                )
+                notify_transcription_failure(on_notice, detail, changed=changed)
+                return None
+            was_error = component_health("transcription").get("status") == "error"
+            set_component_health(
+                "transcription",
+                "ok",
+                detail="The most recent voice transcription succeeded.",
+            )
+            if was_error and on_notice:
+                on_notice("Voice transcription is working again.")
+            return text
+        except Exception as exc:
+            last_failure = classify_api_failure(exc, component="transcription")
+            category, _, _ = last_failure
+            if category not in TRANSCRIPTION_RETRYABLE_CATEGORIES or attempt >= TRANSCRIPTION_MAX_ATTEMPTS:
+                break
+            time.sleep(TRANSCRIPTION_RETRY_DELAYS[attempt - 1])
+
+    category, detail, http_status = last_failure or (
+        "api_error",
+        "Voice transcription failed for an unknown reason.",
+        None,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        text = (result.get("text") or "").strip()
-        if not text:
-            detail = "OpenAI returned no transcription text."
-            changed = set_component_health("transcription", "error", category="invalid_response", detail=detail)
-            notify_transcription_failure(on_notice, detail, changed=changed)
-            return None
-        was_error = component_health("transcription").get("status") == "error"
-        set_component_health(
-            "transcription",
-            "ok",
-            detail="The most recent voice transcription succeeded.",
-        )
-        if was_error and on_notice:
-            on_notice("Voice transcription is working again.")
-        return text
-    except Exception as exc:
-        category, detail, http_status = classify_api_failure(exc, component="transcription")
-        changed = set_component_health(
-            "transcription",
-            "error",
-            category=category,
-            detail=detail,
-            http_status=http_status,
-        )
-        notify_transcription_failure(on_notice, detail, changed=changed)
-        return None
+    changed = set_component_health(
+        "transcription",
+        "error",
+        category=category,
+        detail=detail,
+        http_status=http_status,
+    )
+    notify_transcription_failure(on_notice, detail, changed=changed)
+    return None
 
 
 def convert_audio_for_transcription(file_bytes: bytes, suffix: str) -> tuple[bytes, str, str] | None:

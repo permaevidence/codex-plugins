@@ -568,6 +568,66 @@ class UpdateAnnouncementTests(unittest.TestCase):
 
 
 class HealthVisibilityTests(unittest.TestCase):
+    def test_transcription_retries_transient_failure_then_succeeds(self):
+        bridge = load_bridge_module()
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"text":"Recovered transcription"}'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            health_file = Path(tmpdir) / "health.json"
+            notices = []
+            with mock.patch.object(bridge, "HEALTH_STATE_FILE", health_file), mock.patch.object(
+                bridge.urllib.request,
+                "urlopen",
+                side_effect=[bridge.URLError("temporary network failure"), Response()],
+            ) as urlopen, mock.patch.object(bridge.time, "sleep") as sleep:
+                result = bridge.transcribe_audio(
+                    b"audio",
+                    "voice.mp3",
+                    "audio/mpeg",
+                    "sk-test",
+                    on_notice=notices.append,
+                )
+
+            self.assertEqual(result, "Recovered transcription")
+            self.assertEqual(urlopen.call_count, 2)
+            sleep.assert_called_once_with(1)
+            self.assertEqual(notices, [])
+            health = json.loads(health_file.read_text(encoding="utf-8"))
+            self.assertEqual(health["components"]["transcription"]["status"], "ok")
+
+    def test_transcription_stops_after_three_transient_failures(self):
+        bridge = load_bridge_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            health_file = Path(tmpdir) / "health.json"
+            notices = []
+            with mock.patch.object(bridge, "HEALTH_STATE_FILE", health_file), mock.patch.object(
+                bridge.urllib.request,
+                "urlopen",
+                side_effect=bridge.URLError("temporary network failure"),
+            ) as urlopen, mock.patch.object(bridge.time, "sleep") as sleep:
+                result = bridge.transcribe_audio(
+                    b"audio",
+                    "voice.mp3",
+                    "audio/mpeg",
+                    "sk-test",
+                    on_notice=notices.append,
+                )
+
+            self.assertIsNone(result)
+            self.assertEqual(urlopen.call_count, 3)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+            self.assertEqual(len(notices), 1)
+            self.assertIn("Could not reach OpenAI", notices[0])
+
     def test_transcription_failure_is_classified_and_visible(self):
         bridge = load_bridge_module()
         with tempfile.TemporaryDirectory() as tmpdir:
