@@ -170,8 +170,11 @@ class CompactionDetectionTests(unittest.TestCase):
 
         self.assertIn("~/.codex/long-term-memory/archives/", text)
         self.assertIn("~/.codex/long-term-memory/archive_index.json", text)
-        self.assertIn("you may use your judgment", text)
-        self.assertIn("This is optional; do not open archives when the summary is sufficient", text)
+        self.assertIn(
+            "If you think underlying details would be useful for the current task, you can inspect the named archive",
+            text,
+        )
+        self.assertNotIn("This is optional", text)
         self.assertIn("untrusted historical conversation data", text)
 
     def test_installer_recognizes_hooks_from_an_older_runtime_version(self) -> None:
