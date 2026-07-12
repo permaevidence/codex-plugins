@@ -54,6 +54,7 @@ def install_runtime(source_root: Path, *, cachebuster: str | None = None) -> Pat
             ),
         )
         _apply_cachebusters(staging, token)
+        _rewrite_mcp_paths(staging, installed_root=destination)
         _validate_runtime(staging)
         staging.replace(destination)
     finally:
@@ -73,6 +74,37 @@ def _apply_cachebusters(root: Path, token: str) -> None:
         data = json.loads(manifest.read_text(encoding="utf-8"))
         base = str(data.get("version") or "0.0.0").split("+", 1)[0]
         data["version"] = f"{base}+codex.{token}"
+        manifest.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _rewrite_mcp_paths(root: Path, *, installed_root: Path) -> None:
+    """Make plugin MCP script paths absolute in the installed runtime.
+
+    Codex spawns plugin MCP servers with the *session* cwd, not the plugin
+    directory, so a relative "./scripts/server.py" in .mcp.json resolves
+    against whatever directory the user happens to be in and the server dies
+    before the initialize handshake. Rewrite relative entries to absolute
+    paths inside the installed version directory (args are an array, so the
+    space in "Application Support" is harmless here).
+    """
+    for manifest in root.glob("plugins/*/.mcp.json"):
+        plugin_dir = installed_root / "plugins" / manifest.parent.name
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict):
+            continue
+        for server in servers.values():
+            if not isinstance(server, dict):
+                continue
+            args = server.get("args")
+            if isinstance(args, list):
+                server["args"] = [
+                    str(plugin_dir / arg[2:]) if isinstance(arg, str) and arg.startswith("./") else arg
+                    for arg in args
+                ]
+            command = server.get("command")
+            if isinstance(command, str) and command.startswith("./"):
+                server["command"] = str(plugin_dir / command[2:])
         manifest.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 

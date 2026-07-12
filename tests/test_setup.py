@@ -194,6 +194,42 @@ class RuntimeInstallTests(unittest.TestCase):
             )
             self.assertEqual(manifest["version"], "1.2.3+codex.commit-abc123")
 
+    def test_runtime_install_rewrites_relative_mcp_paths_to_absolute(self) -> None:
+        # Codex launches plugin MCP servers with the session cwd, so relative
+        # script paths in .mcp.json must become absolute at install time.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self.make_source(root)
+            (source / "plugins/codex-telegram-bridge/.mcp.json").write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "telegram-actions": {
+                                "command": "python3",
+                                "args": ["-u", "./scripts/telegram_actions_mcp.py"],
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            app = root / "Application Support/PermaEvidenceCodex"
+            with mock.patch.object(runtime_install, "APP_SUPPORT_ROOT", app), mock.patch.object(
+                runtime_install, "VERSIONS_DIR", app / "versions"
+            ), mock.patch.object(runtime_install, "CURRENT_LINK", app / "current"):
+                current = runtime_install.install_runtime(source, cachebuster="commit-abc123")
+                installed_dir = current.resolve()
+            servers = json.loads(
+                (current / "plugins/codex-telegram-bridge/.mcp.json").read_text(encoding="utf-8")
+            )["mcpServers"]
+            args = servers["telegram-actions"]["args"]
+            self.assertEqual(args[0], "-u")
+            expected = installed_dir / "plugins/codex-telegram-bridge/scripts/telegram_actions_mcp.py"
+            self.assertEqual(Path(args[1]).resolve(), expected.resolve())
+            self.assertTrue(Path(args[1]).is_absolute())
+            # A bare interpreter name resolves via PATH and must stay untouched.
+            self.assertEqual(servers["telegram-actions"]["command"], "python3")
+
 
 if __name__ == "__main__":
     unittest.main()

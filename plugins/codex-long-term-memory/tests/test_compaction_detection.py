@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shlex
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -47,6 +49,24 @@ class CompactionDetectionTests(unittest.TestCase):
             ]
         }
         self.assertTrue(memory_install.is_our_group(group))
+
+    def test_hook_commands_survive_paths_with_spaces(self) -> None:
+        # The runtime lives under "~/Library/Application Support/…"; an
+        # unquoted space in the hook command makes Codex split the path and
+        # every hook fails with exit code 2 (UserPromptSubmit then blocks
+        # the prompt outright).
+        spaced_root = Path(
+            "/tmp/Application Support/PermaEvidenceCodex/current/plugins/codex-long-term-memory"
+        )
+        with mock.patch.object(memory_install, "PLUGIN_ROOT", spaced_root):
+            group = memory_install.hook_group(
+                "session_start.py", "SessionStart", "startup|resume|clear", "Loading long-term memory"
+            )
+            self.assertTrue(memory_install.is_our_group(group))
+        command = group["hooks"][0]["command"]
+        parts = shlex.split(command)
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(parts[1], str(spaced_root / "hooks" / "session_start.py"))
 
     def test_installer_writes_canonical_hooks_feature_for_new_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

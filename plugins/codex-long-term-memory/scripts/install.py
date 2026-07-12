@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -60,7 +61,12 @@ def hook_group(
         "hooks": [
             {
                 "type": "command",
-                "command": f"{PYTHON} {PLUGIN_ROOT / 'hooks' / script_name}",
+                # shlex.quote both parts: Codex parses this string with POSIX
+                # shell rules, and the runtime now lives under
+                # "~/Library/Application Support/…" — an unquoted space there
+                # makes every hook fail with exit code 2 (and a failing
+                # UserPromptSubmit hook blocks the prompt entirely).
+                "command": f"{shlex.quote(PYTHON)} {shlex.quote(str(PLUGIN_ROOT / 'hooks' / script_name))}",
                 "timeout": timeout,
             }
         ]
