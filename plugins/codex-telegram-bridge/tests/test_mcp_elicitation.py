@@ -10,6 +10,7 @@ from pathlib import Path
 
 BRIDGE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "telegram_bridge.py"
 OPERATOR_PATH = Path(__file__).resolve().parents[1] / "scripts" / "bridge.py"
+COMMON_PATH = Path(__file__).resolve().parents[1] / "lib" / "telegram_common.py"
 
 
 def load_bridge_module():
@@ -22,6 +23,14 @@ def load_bridge_module():
 
 def load_operator_module():
     spec = importlib.util.spec_from_file_location("bridge_operator", OPERATOR_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_common_module():
+    spec = importlib.util.spec_from_file_location("telegram_common_test", COMMON_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -56,6 +65,56 @@ class McpElicitationTests(unittest.TestCase):
 
 
 class AppServerResilienceTests(unittest.TestCase):
+    def test_turn_omits_model_overrides_when_codex_defaults_are_unresolved(self):
+        bridge = load_bridge_module()
+        client = object.__new__(bridge.CodexAppServerClient)
+        client.config = {
+            "approval_policy": "never",
+            "default_cwd": "/tmp",
+            "personality": "friendly",
+            "sandbox_mode": "dangerFullAccess",
+            "model": None,
+            "effort": None,
+        }
+        params = client._turn_params("thread", "hello")
+        self.assertNotIn("model", params)
+        self.assertNotIn("effort", params)
+
+
+class ModelDefaultTests(unittest.TestCase):
+    def test_first_start_inherits_and_persists_codex_defaults(self):
+        common = load_common_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_file = root / "config.json"
+            with mock.patch.object(common, "STATE_DIR", root), mock.patch.object(
+                common, "INBOX_DIR", root / "inbox"
+            ), mock.patch.object(common, "CONFIG_FILE", config_file), mock.patch.object(
+                common, "ENV_FILE", root / ".env"
+            ), mock.patch.object(
+                common, "codex_model_defaults", return_value=("gpt-codex", "xhigh")
+            ):
+                config = common.load_config()
+            self.assertEqual(config["model"], "gpt-codex")
+            self.assertEqual(config["effort"], "xhigh")
+            written = json.loads(config_file.read_text(encoding="utf-8"))
+            self.assertEqual(written, {"model": "gpt-codex", "effort": "xhigh"})
+
+    def test_saved_bridge_selection_wins_on_restart(self):
+        common = load_common_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_file = root / "config.json"
+            config_file.write_text(json.dumps({"model": "gpt-saved", "effort": "high"}), encoding="utf-8")
+            with mock.patch.object(common, "STATE_DIR", root), mock.patch.object(
+                common, "INBOX_DIR", root / "inbox"
+            ), mock.patch.object(common, "CONFIG_FILE", config_file), mock.patch.object(
+                common, "ENV_FILE", root / ".env"
+            ), mock.patch.object(common, "codex_model_defaults") as defaults:
+                config = common.load_config()
+            defaults.assert_not_called()
+            self.assertEqual((config["model"], config["effort"]), ("gpt-saved", "high"))
+
     def test_pending_requests_are_failed_when_app_server_exits(self):
         bridge = load_bridge_module()
 

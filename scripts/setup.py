@@ -124,7 +124,13 @@ def main() -> int:
         if not prompt_yes_no("That OpenAI key does not start with 'sk-'. Continue anyway?", default=False):
             raise SystemExit("Setup cancelled.")
 
-    model, effort = resolve_model_selection(args.model, args.effort)
+    existing_telegram_config = load_json(TELEGRAM_CONFIG)
+    model, effort = resolve_model_selection(
+        args.model,
+        args.effort,
+        str(existing_telegram_config.get("model") or "") or None,
+        str(existing_telegram_config.get("effort") or "") or None,
+    )
 
     sandbox_mode = args.sandbox_mode or choose_sandbox_mode()
     network_access = resolve_network_access(args.network_access, sandbox_mode)
@@ -223,7 +229,12 @@ def require_codex() -> None:
         raise SystemExit("Codex is installed but is not logged in. Run `codex login`, then rerun setup.")
 
 
-def resolve_model_selection(requested_model: str | None, requested_effort: str | None) -> tuple[str, str]:
+def resolve_model_selection(
+    requested_model: str | None,
+    requested_effort: str | None,
+    existing_model: str | None = None,
+    existing_effort: str | None = None,
+) -> tuple[str, str]:
     codex = shutil.which("codex") or "codex"
     completed = subprocess.run(
         [codex, "debug", "models"], capture_output=True, text=True, check=False, timeout=30
@@ -248,31 +259,49 @@ def resolve_model_selection(requested_model: str | None, requested_effort: str |
         raise SystemExit("No selectable Codex models were found for this account.")
 
     by_slug = {item[0]: item for item in models}
-    model = requested_model
-    if not model:
-        print("Available Codex models:")
-        for index, item in enumerate(models[:8], 1):
-            print(f"{index}. {item[1]} ({item[0]})")
-        choice = prompt("Initial model", default="1")
-        if choice.isdigit() and 1 <= int(choice) <= min(8, len(models)):
-            model = models[int(choice) - 1][0]
-        else:
-            model = choice
+    codex_model, codex_effort = codex_effective_model_and_effort()
+    model = requested_model or existing_model or codex_model or models[0][0]
     if model not in by_slug:
-        raise SystemExit(f"Model `{model}` is not available in this Codex installation.")
+        if requested_model:
+            raise SystemExit(f"Model `{model}` is not available in this Codex installation.")
+        model = codex_model if codex_model in by_slug else models[0][0]
+        existing_effort = None
 
     selected = by_slug[model]
     efforts = selected[2]
-    effort = requested_effort
+    effort = requested_effort or (existing_effort if not requested_model else None)
     if not effort:
-        default_effort = "high" if "high" in efforts else (selected[3] or (efforts[0] if efforts else "medium"))
-        if efforts:
-            print(f"Available thinking efforts for {selected[1]}: {', '.join(efforts)}")
-            effort = prompt("Initial thinking effort", default=default_effort)
-        else:
-            effort = default_effort
+        effort = codex_effort if model == codex_model else None
+    if not effort:
+        effort = selected[3] or (efforts[0] if efforts else "medium")
     if efforts and effort not in efforts:
         raise SystemExit(f"Model `{model}` does not support effort `{effort}`. Available: {', '.join(efforts)}")
+    return model, effort
+
+
+def codex_effective_model_and_effort() -> tuple[str | None, str | None]:
+    codex = shutil.which("codex") or "codex"
+    model: str | None = None
+    effort: str | None = None
+    try:
+        completed = subprocess.run(
+            [codex, "doctor", "--json"], capture_output=True, text=True, check=False, timeout=30
+        )
+        if completed.returncode == 0:
+            payload = json.loads(completed.stdout)
+            model = str(
+                (((payload.get("checks") or {}).get("config.load") or {}).get("details") or {}).get("model")
+                or ""
+            ).strip() or None
+    except Exception:
+        pass
+    config_path = CODEX_DIR / "config.toml"
+    try:
+        top_level = config_path.read_text(encoding="utf-8").split("\n[", 1)[0]
+        match = re.search(r'(?m)^\s*model_reasoning_effort\s*=\s*["\']([^"\']+)["\']\s*$', top_level)
+        effort = match.group(1).strip() if match else None
+    except OSError:
+        pass
     return model, effort
 
 

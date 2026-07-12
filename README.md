@@ -73,7 +73,7 @@ It asks for:
 - the OpenAI API key, required for memory summaries and voice transcription
 - the Codex sandbox level for Telegram sessions, defaulting to broad autonomous access
 - whether to start the bridge immediately
-- an available Codex model and only the thinking efforts supported by that model
+- preserves an existing Telegram model selection, or inherits Codex's effective model and effort on the first setup
 - whether to complete secure local pairing inside the wizard
 
 Then it:
@@ -207,8 +207,6 @@ Create `config.json`. For the intended dedicated-computer setup, this example gi
 cat > ~/.codex/telegram-bridge/config.json <<'EOF'
 {
   "default_cwd": "/Users/your-name",
-  "model": "gpt-5.5",
-  "effort": "high",
   "approval_policy": "never",
   "personality": "friendly",
   "sandbox_mode": "dangerFullAccess",
@@ -222,6 +220,8 @@ cat > ~/.codex/telegram-bridge/config.json <<'EOF'
 }
 EOF
 ```
+
+On the first bridge start, omit `model` and `effort` as shown above. The bridge inherits Codex's effective model and reasoning effort and saves that selection. Later `/model` choices are persisted and win on every restart.
 
 You do **not** need to know your Telegram chat ID for basic DM use. Leave `owner_chat_id` blank, start the bridge, send the bot a DM, and approve the pairing code. The bridge will learn the active chat ID automatically.
 

@@ -218,8 +218,8 @@ def find_codex_model(models: list[dict[str, Any]], slug: str) -> dict[str, Any] 
 
 
 def current_model_text(config: dict[str, Any]) -> str:
-    model = str(config.get("model") or "default").strip()
-    effort = str(config.get("effort") or "default").strip()
+    model = str(config.get("model") or "Codex default").strip()
+    effort = str(config.get("effort") or "default effort").strip()
     return f"{model} / {effort}"
 
 
@@ -851,16 +851,19 @@ class CodexAppServerClient:
         return f"Idle.\nNo thread has been created for this chat yet.{model_line}{suffix}"
 
     def _turn_params(self, thread_id: str, text: str) -> dict[str, Any]:
-        return {
+        params = {
             "threadId": thread_id,
             "input": [{"type": "text", "text": text}],
             "approvalPolicy": self.config.get("approval_policy", "never"),
-            "model": self.config.get("model"),
-            "effort": self.config.get("effort"),
             "cwd": self.config.get("default_cwd"),
             "personality": self.config.get("personality"),
             "sandboxPolicy": self._sandbox_policy(),
         }
+        if self.config.get("model"):
+            params["model"] = self.config["model"]
+        if self.config.get("effort"):
+            params["effort"] = self.config["effort"]
+        return params
 
     def _sandbox_policy(self) -> dict[str, Any]:
         mode = self.config.get("sandbox_mode", "workspaceWrite")

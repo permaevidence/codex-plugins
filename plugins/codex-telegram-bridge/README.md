@@ -39,8 +39,6 @@ Example `config.json`:
 ```json
 {
   "default_cwd": "/Users/your-name",
-  "model": "gpt-5.5",
-  "effort": "high",
   "approval_policy": "never",
   "personality": "friendly",
   "sandbox_mode": "dangerFullAccess",
@@ -53,6 +51,8 @@ Example `config.json`:
   "enable_email_notifications": false
 }
 ```
+
+If `model` and `effort` are absent on the first start, the bridge inherits Codex's effective defaults and saves them. A selection made later through `/model` is stored in `config.json` and takes precedence on all subsequent restarts.
 
 By default the bridge does not post the per-message `Sent to Codex...` acknowledgement before the actual reply arrives. Set `"send_queue_confirmation": true` if you want that extra queue-status message back.
 
@@ -120,8 +120,6 @@ EOF
 cat > ~/.codex/telegram-bridge/config.json <<'EOF'
 {
   "default_cwd": "/Users/your-name",
-  "model": "gpt-5.5",
-  "effort": "high",
   "approval_policy": "never",
   "personality": "friendly",
   "sandbox_mode": "dangerFullAccess",

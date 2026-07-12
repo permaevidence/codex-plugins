@@ -27,6 +27,41 @@ runtime_spec.loader.exec_module(runtime_install)
 
 
 class SetupWizardTests(unittest.TestCase):
+    def model_catalog_result(self):
+        payload = {
+            "models": [
+                {
+                    "slug": "gpt-current",
+                    "display_name": "Current",
+                    "visibility": "list",
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [{"effort": "medium"}, {"effort": "high"}],
+                },
+                {
+                    "slug": "gpt-saved",
+                    "display_name": "Saved",
+                    "visibility": "list",
+                    "default_reasoning_level": "low",
+                    "supported_reasoning_levels": [{"effort": "low"}, {"effort": "xhigh"}],
+                },
+            ]
+        }
+        return mock.Mock(returncode=0, stdout=json.dumps(payload))
+
+    def test_model_selection_preserves_saved_bridge_choice(self) -> None:
+        with mock.patch.object(setup_wizard.subprocess, "run", return_value=self.model_catalog_result()), mock.patch.object(
+            setup_wizard, "codex_effective_model_and_effort", return_value=("gpt-current", "high")
+        ):
+            selected = setup_wizard.resolve_model_selection(None, None, "gpt-saved", "xhigh")
+        self.assertEqual(selected, ("gpt-saved", "xhigh"))
+
+    def test_first_model_selection_inherits_codex_defaults(self) -> None:
+        with mock.patch.object(setup_wizard.subprocess, "run", return_value=self.model_catalog_result()), mock.patch.object(
+            setup_wizard, "codex_effective_model_and_effort", return_value=("gpt-current", "high")
+        ):
+            selected = setup_wizard.resolve_model_selection(None, None)
+        self.assertEqual(selected, ("gpt-current", "high"))
+
     def test_update_env_file_preserves_unknown_lines_and_updates_known_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".env"

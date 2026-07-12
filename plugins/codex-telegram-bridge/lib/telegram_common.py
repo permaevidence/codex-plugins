@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import json
 import os
+import re
 import secrets
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
 
 STATE_DIR = Path.home() / ".codex" / "telegram-bridge"
 CONFIG_FILE = STATE_DIR / "config.json"
+CODEX_CONFIG_FILE = Path.home() / ".codex" / "config.toml"
 ACCESS_FILE = STATE_DIR / "access.json"
 CHAT_MAP_FILE = STATE_DIR / "chat-map.json"
 REMINDERS_FILE = STATE_DIR / "scheduled_reminders.json"
@@ -32,8 +37,8 @@ DEFAULT_ACCESS = {
 DEFAULT_CONFIG = {
     "codex_cmd": "codex",
     "default_cwd": str(Path.home()),
-    "model": "gpt-5.5",
-    "effort": "high",
+    "model": None,
+    "effort": None,
     "approval_policy": "never",
     "personality": "friendly",
     "sandbox_mode": "dangerFullAccess",
@@ -92,6 +97,20 @@ def load_config() -> dict[str, Any]:
     ensure_state_dir()
     env = load_env_file()
     data = load_json(CONFIG_FILE, {})
+    if not isinstance(data, dict):
+        data = {}
+    codex_cmd = os.environ.get("CODEX_CMD") or str(data.get("codex_cmd") or DEFAULT_CONFIG["codex_cmd"])
+    if not data.get("model") or not data.get("effort"):
+        inherited_model, inherited_effort = codex_model_defaults(codex_cmd)
+        changed = False
+        if not data.get("model") and inherited_model:
+            data["model"] = inherited_model
+            changed = True
+        if not data.get("effort") and inherited_effort:
+            data["effort"] = inherited_effort
+            changed = True
+        if changed:
+            save_json(CONFIG_FILE, data)
     merged = dict(DEFAULT_CONFIG)
     merged.update(data)
 
@@ -100,6 +119,56 @@ def load_config() -> dict[str, Any]:
     merged["codex_cmd"] = os.environ.get("CODEX_CMD", merged["codex_cmd"])
     merged["openai_api_key"] = os.environ.get("OPENAI_API_KEY") or env.get("OPENAI_API_KEY") or merged.get("openai_api_key")
     return merged
+
+
+def codex_model_defaults(codex_cmd: str = "codex") -> tuple[str | None, str | None]:
+    """Resolve Codex's effective model and effort without imposing bridge defaults."""
+    model: str | None = None
+    effort = read_top_level_toml_string(CODEX_CONFIG_FILE, "model_reasoning_effort")
+    try:
+        completed = subprocess.run(
+            [codex_cmd, "doctor", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if completed.returncode == 0:
+            payload = json.loads(completed.stdout)
+            model = str(
+                (((payload.get("checks") or {}).get("config.load") or {}).get("details") or {}).get("model")
+                or ""
+            ).strip() or None
+    except Exception:
+        pass
+
+    if model and not effort:
+        try:
+            completed = subprocess.run(
+                [codex_cmd, "debug", "models"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            if completed.returncode == 0:
+                for item in json.loads(completed.stdout).get("models", []):
+                    if isinstance(item, dict) and item.get("slug") == model:
+                        effort = str(item.get("default_reasoning_level") or "").strip() or None
+                        break
+        except Exception:
+            pass
+    return model, effort
+
+
+def read_top_level_toml_string(path: Path, key: str) -> str | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    top_level = text.split("\n[", 1)[0]
+    match = re.search(rf'(?m)^\s*{re.escape(key)}\s*=\s*["\']([^"\']+)["\']\s*$', top_level)
+    return match.group(1).strip() if match else None
 
 
 def load_access() -> dict[str, Any]:
