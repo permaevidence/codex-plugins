@@ -75,12 +75,23 @@ BOT_COMMANDS = [
     {"command": "resume", "description": "Retry a parked interrupted task"},
     {"command": "stop", "description": "Interrupt the active Codex turn"},
     {"command": "newsession", "description": "Restart Codex and start a fresh thread"},
+    {"command": "update", "description": "Update the plugins runtime and restart the bridge"},
 ]
 
 MODEL_CALLBACK_PREFIX = "model:"
 PENDING_UPDATE_FILE = STATE_DIR / "pending_update.json"
 FAILED_UPDATES_DIR = STATE_DIR / "failed_updates"
 TURN_RECOVERY_FILE = STATE_DIR / "turn_recovery_queue.json"
+UPDATE_STATE_FILE = STATE_DIR / "update_state.json"
+UPDATE_SCRIPT = (
+    Path.home()
+    / "Library"
+    / "Application Support"
+    / "PermaEvidenceCodex"
+    / "current"
+    / "scripts"
+    / "update.py"
+)
 
 
 def rate_limit_retry_at(snapshot: dict[str, Any], *, now: float | None = None, buffer_seconds: int = 60) -> float | None:
@@ -851,6 +862,9 @@ class CodexAppServerClient:
             }
         )
         return turn_id
+
+    def has_active_turn(self, chat_id: str) -> bool:
+        return bool(self._active_turn_by_chat.get(chat_id))
 
     def pending_recovery_count(self, chat_id: str | None = None) -> int:
         with self._recovery_lock:
@@ -1757,6 +1771,45 @@ def build_auto_user_input_answers(params: dict[str, Any]) -> dict[str, str]:
     return {key: value for key, value in answers.items() if value != ""}
 
 
+def update_outcome_message(state: dict[str, Any]) -> str | None:
+    """Build the owner notification for a finished runtime update, if one is due."""
+    if not isinstance(state, dict) or state.get("announced"):
+        return None
+    status = state.get("status")
+    commit = str(state.get("commit") or "")[:12]
+    if status == "completed":
+        return (
+            f"Runtime update complete at commit {commit}. The bridge restarted; "
+            "any task interrupted by the restart resumes automatically.\n"
+            "Send /newsession before testing updated MCP tools or skills."
+        )
+    if status == "failed":
+        reason = str(state.get("error") or "unknown error")
+        return (
+            f"Runtime update to {state.get('ref') or commit or 'requested ref'} FAILED: {reason}\n"
+            "The previous runtime was restored and is still running. "
+            "Log: ~/.codex/telegram-bridge/update-handoff.log"
+        )
+    return None
+
+
+def announce_update_outcome(token: str, config: dict[str, Any]) -> None:
+    owner_chat_id = str(config.get("owner_chat_id") or "").strip()
+    if not owner_chat_id:
+        return
+    state = load_json(UPDATE_STATE_FILE, {})
+    text = update_outcome_message(state if isinstance(state, dict) else {})
+    if not text:
+        return
+    try:
+        send_message(token, owner_chat_id, text)
+    except Exception as exc:
+        print(f"update announcement failed: {exc}", file=sys.stderr)
+        return
+    state["announced"] = True
+    save_json(UPDATE_STATE_FILE, state)
+
+
 def help_text() -> str:
     command_lines = "\n".join(f"/{item['command']} - {item['description']}" for item in BOT_COMMANDS)
     return (
@@ -1784,6 +1837,7 @@ def main() -> None:
 
     bot_username = get_bot_username(str(token))
     configure_bot_command_menu(str(token))
+    announce_update_outcome(str(token), config)
     chat_map = load_chat_map()
     chat_map_lock = threading.Lock()
     # Resume from the last seen Telegram update to avoid re-processing
@@ -1954,6 +2008,49 @@ def main() -> None:
                             message.get("message_id"),
                             access=access,
                         )
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
+                    continue
+                if command == "/update":
+                    parts = text.strip().split()
+                    ref = parts[1] if len(parts) > 1 else "main"
+                    if not re.fullmatch(r"[A-Za-z0-9._/-]{1,64}", ref):
+                        send_message(str(token), chat_id, "That does not look like a valid git ref.", message.get("message_id"), access=access)
+                        continue
+                    if codex.has_active_turn(chat_id):
+                        send_message(
+                            str(token),
+                            chat_id,
+                            "A turn is still running. Send /stop first, or wait for it to finish — the update restart would kill it mid-flight.",
+                            message.get("message_id"),
+                            access=access,
+                        )
+                        continue
+                    if not UPDATE_SCRIPT.is_file():
+                        send_message(str(token), chat_id, f"Updater not found at {UPDATE_SCRIPT}.", message.get("message_id"), access=access)
+                        continue
+                    detail = ""
+                    try:
+                        scheduled = subprocess.run(
+                            [sys.executable, str(UPDATE_SCRIPT), "--ref", ref, "--defer-seconds", "10"],
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
+                        )
+                        ok = scheduled.returncode == 0
+                        detail = (scheduled.stderr or scheduled.stdout or "").strip()
+                    except Exception as exc:
+                        ok = False
+                        detail = str(exc)
+                    if ok:
+                        send_message(
+                            str(token),
+                            chat_id,
+                            f"Update to '{ref}' scheduled. The bridge restarts in about 10 seconds and will confirm here once the update finishes.",
+                            message.get("message_id"),
+                            access=access,
+                        )
+                    else:
+                        send_message(str(token), chat_id, f"Could not schedule the update: {detail or 'unknown error'}", message.get("message_id"), access=access)
                     PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
                 if command == "/newsession":

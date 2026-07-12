@@ -9,8 +9,8 @@ This plugin ports the Telegram control loop from `claude-telegram-plugin` to Cod
 - Starts, steers, and interrupts turns through `codex app-server`
 - Auto-approves command, file-change, and permission approval requests
 - Auto-answers structured `item/tool/requestUserInput` prompts with default options when possible
-- Supports `/help`, `/status`, `/model`, `/resume`, `/stop`, and `/newsession`
-- Registers Telegram's native bot command menu for `/start`, `/help`, `/status`, `/model`, `/resume`, `/stop`, and `/newsession`
+- Supports `/help`, `/status`, `/model`, `/resume`, `/stop`, `/newsession`, and `/update`
+- Registers Telegram's native bot command menu for `/start`, `/help`, `/status`, `/model`, `/resume`, `/stop`, `/newsession`, and `/update`
 - Supports DM pairing, allowlists, groups, mention policies, and mention regexes
 - Transcribes voice messages with OpenAI `gpt-4o-transcribe`
 - Forwards inbound photos and documents as downloaded local paths, with other Telegram attachments as downloadable file IDs
@@ -161,6 +161,13 @@ When the bridge starts, it registers Telegram's native bot command menu. In Tele
 - `/resume` - retry a parked task after fixing the underlying failure
 - `/stop` - interrupt the active Codex turn
 - `/newsession` - restart Codex and start a fresh thread
+- `/update [ref]` - update the plugins runtime to the latest commit (or a specific
+  git ref) and restart the bridge. Safe from Telegram: the update runs as a
+  detached one-shot after a short delay, in-flight recovery records are marked
+  as interrupted by the update so they retry promptly instead of looking like
+  crashes, and the restarted bridge sends a confirmation (or the rollback
+  failure reason) to the owner chat. Updates initiated any other way get the
+  same post-restart confirmation via `~/.codex/telegram-bridge/update_state.json`.
 
 `/model` shows the current model/effort and opens Telegram inline buttons built
 from `codex debug models`, so the choices track the installed Codex CLI. You can

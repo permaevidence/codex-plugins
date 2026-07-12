@@ -334,7 +334,7 @@ class BotCommandMenuTests(unittest.TestCase):
 
         self.assertEqual(
             [item["command"] for item in bridge.BOT_COMMANDS],
-            ["start", "help", "status", "model", "resume", "stop", "newsession"],
+            ["start", "help", "status", "model", "resume", "stop", "newsession", "update"],
         )
         for item in bridge.BOT_COMMANDS:
             self.assertIn(f"/{item['command']} - {item['description']}", help_text)
@@ -534,3 +534,34 @@ class SafetyAndReminderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpdateAnnouncementTests(unittest.TestCase):
+    def test_completed_update_produces_owner_notification_once(self):
+        bridge = load_bridge_module()
+        state = {"status": "completed", "commit": "44eeb81f07ec86e72ad464e7dd6f0ac660eaa0fd", "announced": False}
+        text = bridge.update_outcome_message(state)
+        self.assertIsNotNone(text)
+        self.assertIn("44eeb81f07ec", text)
+        self.assertIn("/newsession", text)
+        state["announced"] = True
+        self.assertIsNone(bridge.update_outcome_message(state))
+
+    def test_failed_update_reports_error_and_rollback(self):
+        bridge = load_bridge_module()
+        text = bridge.update_outcome_message(
+            {"status": "failed", "ref": "main", "error": "doctor found failing checks", "announced": False}
+        )
+        self.assertIsNotNone(text)
+        self.assertIn("FAILED", text)
+        self.assertIn("doctor found failing checks", text)
+        self.assertIn("previous runtime was restored", text)
+
+    def test_running_or_empty_state_stays_silent(self):
+        bridge = load_bridge_module()
+        self.assertIsNone(bridge.update_outcome_message({}))
+        self.assertIsNone(bridge.update_outcome_message({"status": "running", "announced": False}))
+
+    def test_update_is_a_registered_bot_command(self):
+        bridge = load_bridge_module()
+        self.assertIn("update", {item["command"] for item in bridge.BOT_COMMANDS})

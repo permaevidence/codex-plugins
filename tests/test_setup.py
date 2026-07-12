@@ -322,5 +322,59 @@ class RuntimeInstallTests(unittest.TestCase):
             self.assertEqual(log, home / ".codex/telegram-bridge/update-handoff.log")
 
 
+
+UPDATE_PATH = REPO_ROOT / "scripts" / "update.py"
+update_spec = importlib.util.spec_from_file_location("update_script_test", UPDATE_PATH)
+assert update_spec and update_spec.loader
+update_script = importlib.util.module_from_spec(update_spec)
+update_spec.loader.exec_module(update_script)
+
+
+class UpdateHandoffTests(unittest.TestCase):
+    def test_annotate_recovery_marks_only_inflight_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = Path(tmp) / "turn_recovery_queue.json"
+            queue.write_text(
+                json.dumps(
+                    [
+                        {"id": "a", "state": "in_progress", "active_retry_turn_id": "t1", "due_at": 1, "attempts": 2},
+                        {"id": "b", "state": "starting", "due_at": 1},
+                        {"id": "c", "state": "parked", "due_at": None},
+                        {"id": "d", "state": "pending", "due_at": 99},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            changed = update_script.annotate_recovery_for_restart(queue)
+            self.assertEqual(changed, 2)
+            records = {item["id"]: item for item in json.loads(queue.read_text(encoding="utf-8"))}
+            for rec_id in ("a", "b"):
+                self.assertEqual(records[rec_id]["state"], "pending")
+                self.assertIsNone(records[rec_id]["active_retry_turn_id"])
+                self.assertEqual(records[rec_id]["reason"], "interrupted by runtime update restart")
+            self.assertEqual(records["a"]["attempts"], 2)  # attempts untouched
+            self.assertEqual(records["c"]["state"], "parked")
+            self.assertEqual(records["d"]["due_at"], 99)
+
+    def test_annotate_recovery_handles_missing_or_corrupt_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "nope.json"
+            self.assertEqual(update_script.annotate_recovery_for_restart(missing), 0)
+            corrupt = Path(tmp) / "bad.json"
+            corrupt.write_text("{not json", encoding="utf-8")
+            self.assertEqual(update_script.annotate_recovery_for_restart(corrupt), 0)
+
+    def test_write_update_state_replaces_file_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "update_state.json"
+            with mock.patch.object(update_script, "UPDATE_STATE_FILE", state_file):
+                update_script.write_update_state(status="running", ref="main", announced=False)
+                update_script.write_update_state(status="completed", ref="main", commit="abc", announced=False)
+            data = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual(data["status"], "completed")
+            self.assertEqual(data["commit"], "abc")
+            self.assertFalse(data["announced"])
+
+
 if __name__ == "__main__":
     unittest.main()

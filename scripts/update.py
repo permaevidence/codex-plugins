@@ -20,6 +20,67 @@ from pathlib import Path
 REPOSITORY = "permaevidence/codex-plugins"
 APP_SUPPORT_ROOT = Path.home() / "Library" / "Application Support" / "PermaEvidenceCodex"
 CURRENT_LINK = APP_SUPPORT_ROOT / "current"
+BRIDGE_STATE_DIR = Path.home() / ".codex" / "telegram-bridge"
+UPDATE_STATE_FILE = BRIDGE_STATE_DIR / "update_state.json"
+RECOVERY_QUEUE_FILE = BRIDGE_STATE_DIR / "turn_recovery_queue.json"
+
+
+def write_json_atomic(path: Path, data: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_path = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    temp_path = Path(raw_path)
+    try:
+        with open(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def write_update_state(**fields: object) -> None:
+    """Record update progress where the bridge can find it after restarting.
+
+    The bridge announces the outcome to the owner chat on its next startup,
+    so an update initiated from inside a Telegram turn still produces a
+    visible confirmation even though the initiating turn dies with the old
+    bridge process.
+    """
+    try:
+        write_json_atomic(UPDATE_STATE_FILE, dict(fields))
+    except OSError as exc:
+        print(f"Could not persist update state: {exc}", file=sys.stderr)
+
+
+def annotate_recovery_for_restart(queue_file: Path = RECOVERY_QUEUE_FILE) -> int:
+    """Mark in-flight turn recovery records as interrupted by this update.
+
+    The bridge restart is intentional, so records should retry promptly once
+    the new bridge is up instead of waiting out their crash-recovery delay —
+    and their reason should say what actually happened.
+    """
+    try:
+        records = json.loads(queue_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if not isinstance(records, list):
+        return 0
+    changed = 0
+    for record in records:
+        if not isinstance(record, dict) or record.get("state") not in {"in_progress", "starting"}:
+            continue
+        record.update(
+            {
+                "state": "pending",
+                "active_retry_turn_id": None,
+                "due_at": time.time() + 90,
+                "reason": "interrupted by runtime update restart",
+            }
+        )
+        changed += 1
+    if changed:
+        write_json_atomic(queue_file, records)
+    return changed
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,6 +172,12 @@ def configure_runtime(root: Path) -> None:
     setup.trust_memory_hooks(cwd)
     run([sys.executable, str(root / "plugins/codex-long-term-memory/scripts/update_agents_injection.py"), "--cwd", str(cwd)])
     bridge = root / "plugins/codex-telegram-bridge/scripts/bridge.py"
+    # Stop the old bridge before touching the recovery queue: its in-process
+    # lock does not extend to other processes, and it is about to die anyway.
+    subprocess.run([sys.executable, str(bridge), "stop"], check=False)
+    annotated = annotate_recovery_for_restart()
+    if annotated:
+        print(f"Marked {annotated} in-flight task(s) as interrupted by this update; they retry after restart.")
     run([sys.executable, str(bridge), "install-service"])
     run([sys.executable, str(bridge), "doctor"])
 
@@ -139,25 +206,38 @@ def main() -> int:
     previous = CURRENT_LINK.resolve() if CURRENT_LINK.exists() else None
     commit = resolve_commit(args.ref)
     print(f"Resolved {args.ref} to {commit}")
-    with tempfile.TemporaryDirectory(prefix="permaevidence-update-") as tmp:
-        tmp_path = Path(tmp)
-        archive = tmp_path / "source.zip"
-        url = f"https://github.com/{REPOSITORY}/archive/{commit}.zip"
-        with urllib.request.urlopen(url, timeout=60) as response, archive.open("wb") as handle:
-            shutil.copyfileobj(response, handle)
-        with zipfile.ZipFile(archive) as bundle:
-            bundle.extractall(tmp_path / "source")
-        roots = [path for path in (tmp_path / "source").iterdir() if path.is_dir()]
-        if len(roots) != 1:
-            raise RuntimeError("Downloaded archive had an unexpected layout")
-        try:
-            installed = activate_runtime(roots[0], commit)
-            configure_runtime(installed)
-            runtime_module = import_module(installed / "scripts/runtime_install.py", "installed_runtime_cleanup")
-            runtime_module.prune_old_versions(active=installed.resolve())
-        except Exception:
-            restore(previous)
-            raise
+    write_update_state(status="running", ref=args.ref, commit=commit, started_at=time.time(), announced=False)
+    try:
+        with tempfile.TemporaryDirectory(prefix="permaevidence-update-") as tmp:
+            tmp_path = Path(tmp)
+            archive = tmp_path / "source.zip"
+            url = f"https://github.com/{REPOSITORY}/archive/{commit}.zip"
+            with urllib.request.urlopen(url, timeout=60) as response, archive.open("wb") as handle:
+                shutil.copyfileobj(response, handle)
+            with zipfile.ZipFile(archive) as bundle:
+                bundle.extractall(tmp_path / "source")
+            roots = [path for path in (tmp_path / "source").iterdir() if path.is_dir()]
+            if len(roots) != 1:
+                raise RuntimeError("Downloaded archive had an unexpected layout")
+            try:
+                installed = activate_runtime(roots[0], commit)
+                configure_runtime(installed)
+                runtime_module = import_module(installed / "scripts/runtime_install.py", "installed_runtime_cleanup")
+                runtime_module.prune_old_versions(active=installed.resolve())
+            except Exception:
+                restore(previous)
+                raise
+    except Exception as exc:
+        write_update_state(
+            status="failed",
+            ref=args.ref,
+            commit=commit,
+            error=str(exc),
+            completed_at=time.time(),
+            announced=False,
+        )
+        raise
+    write_update_state(status="completed", ref=args.ref, commit=commit, completed_at=time.time(), announced=False)
     print(f"Update complete at commit {commit[:12]}.")
     print("Send /newsession in Telegram before testing updated MCP tools or skills.")
     return 0
