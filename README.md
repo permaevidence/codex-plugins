@@ -88,6 +88,7 @@ Then it:
 - writes `~/.codex/telegram-bridge/config.json`
 - optionally starts the bridge
 - runs `bridge.py doctor`
+- functionally executes all four hooks, initializes the bundled MCP server, checks the live Telegram/OpenAI APIs, and verifies the bridge's app-server child
 - validates Codex login, the Telegram bot with `getMe`, and the OpenAI API key before modifying the installation
 - backs up existing Codex/plugin configuration
 - installs versioned runtime code in Application Support with plugin cachebusters
@@ -104,7 +105,7 @@ Then send `/newsession` from Telegram so Codex starts fresh with the installed p
 
 ### Updating safely
 
-The permanent installation includes an updater. It resolves the requested Git ref to an immutable commit SHA, downloads that exact archive, installs it into a new version directory, applies Codex cachebusters, runs health checks, restarts the LaunchAgent, and rolls back to the previous runtime if activation fails:
+The permanent installation includes an updater. It resolves the requested Git ref to an immutable commit SHA, downloads that exact archive, runs the complete test suites before activation, installs it into a new version directory, applies Codex cachebusters, runs functional health checks, restarts the LaunchAgent, and rolls back to the previous runtime if activation fails:
 
 ```bash
 python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/scripts/update.py"

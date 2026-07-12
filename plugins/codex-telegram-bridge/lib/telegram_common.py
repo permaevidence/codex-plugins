@@ -55,7 +55,26 @@ DEFAULT_CONFIG = {
 
 def ensure_state_dir() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        STATE_DIR.chmod(0o700)
+    except OSError:
+        pass
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    for path in (
+        CONFIG_FILE,
+        ACCESS_FILE,
+        CHAT_MAP_FILE,
+        REMINDERS_FILE,
+        EMAIL_STATE_FILE,
+        VERSION_STATE_FILE,
+        RUNTIME_STATE_FILE,
+        ENV_FILE,
+    ):
+        if path.exists():
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
 
 
 def load_env_file() -> dict[str, str]:

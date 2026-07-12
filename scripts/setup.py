@@ -38,6 +38,7 @@ TELEGRAM_ENV = TELEGRAM_DIR / ".env"
 TELEGRAM_CONFIG = TELEGRAM_DIR / "config.json"
 LOCAL_CAPABILITIES_BEGIN = "<!-- BEGIN PERMAEVIDENCE CODEX PLUGIN LOCAL CAPABILITIES -->"
 LOCAL_CAPABILITIES_END = "<!-- END PERMAEVIDENCE CODEX PLUGIN LOCAL CAPABILITIES -->"
+CURRENT_RUNTIME_LINK = Path.home() / "Library" / "Application Support" / "PermaEvidenceCodex" / "current"
 
 
 def parse_args() -> argparse.Namespace:
@@ -164,52 +165,59 @@ def main() -> int:
 
     backup_dir = create_setup_backup(agents_md_path)
     print(f"Configuration backup: {backup_dir}")
+    previous_runtime = CURRENT_RUNTIME_LINK.resolve() if CURRENT_RUNTIME_LINK.exists() else None
+    try:
+        validate_source_runtime(REPO_ROOT)
+        installed_root = install_runtime(REPO_ROOT)
+        install_plugins = installed_root / "scripts" / "install_plugins.py"
+        memory_installer = installed_root / "plugins" / "codex-long-term-memory" / "scripts" / "install.py"
+        memory_agents_updater = installed_root / "plugins" / "codex-long-term-memory" / "scripts" / "update_agents_injection.py"
+        bridge_cli = installed_root / "plugins" / "codex-telegram-bridge" / "scripts" / "bridge.py"
 
-    installed_root = install_runtime(REPO_ROOT)
-    install_plugins = installed_root / "scripts" / "install_plugins.py"
-    memory_installer = installed_root / "plugins" / "codex-long-term-memory" / "scripts" / "install.py"
-    memory_agents_updater = installed_root / "plugins" / "codex-long-term-memory" / "scripts" / "update_agents_injection.py"
-    bridge_cli = installed_root / "plugins" / "codex-telegram-bridge" / "scripts" / "bridge.py"
+        run([sys.executable, str(install_plugins), "--replace-marketplace"])
+        run([sys.executable, str(memory_installer)])
 
-    run([sys.executable, str(install_plugins), "--replace-marketplace"])
-    run([sys.executable, str(memory_installer)])
+        configure_memory(openai_key=openai_key, agents_md_path=agents_md_path)
+        configure_telegram(
+            telegram_token=telegram_token,
+            openai_key=openai_key,
+            project_dir=project_dir,
+            model=model,
+            effort=effort,
+            sandbox_mode=sandbox_mode,
+            network_access=network_access,
+        )
+        write_local_capabilities_block(agents_md_path)
+        trust_memory_hooks(project_dir)
+        run([sys.executable, str(memory_agents_updater), "--cwd", str(project_dir)])
 
-    configure_memory(openai_key=openai_key, agents_md_path=agents_md_path)
-    configure_telegram(
-        telegram_token=telegram_token,
-        openai_key=openai_key,
-        project_dir=project_dir,
-        model=model,
-        effort=effort,
-        sandbox_mode=sandbox_mode,
-        network_access=network_access,
-    )
-    write_local_capabilities_block(agents_md_path)
-    trust_memory_hooks(project_dir)
-    run([sys.executable, str(memory_agents_updater), "--cwd", str(project_dir)])
+        print()
+        print("Configuration written.")
+        print(f"- memory env:   {MEMORY_ENV}")
+        print(f"- memory config:{MEMORY_CONFIG}")
+        print(f"- Telegram env: {TELEGRAM_ENV}")
+        print(f"- Telegram cfg: {TELEGRAM_CONFIG}")
+        print(f"- AGENTS.md:    {agents_md_path}")
 
-    print()
-    print("Configuration written.")
-    print(f"- memory env:   {MEMORY_ENV}")
-    print(f"- memory config:{MEMORY_CONFIG}")
-    print(f"- Telegram env: {TELEGRAM_ENV}")
-    print(f"- Telegram cfg: {TELEGRAM_CONFIG}")
-    print(f"- AGENTS.md:    {agents_md_path}")
+        if start_bridge:
+            run([sys.executable, str(bridge_cli), "install-service"])
 
-    if start_bridge:
-        run([sys.executable, str(bridge_cli), "install-service"])
+        paired = False
+        if pair_now:
+            paired = guided_pairing(installed_root)
 
-    paired = False
-    if pair_now:
-        paired = guided_pairing(installed_root)
-
-    print()
-    doctor_command = [sys.executable, str(bridge_cli), "doctor"]
-    if not paired and not existing_allowed_chat():
-        doctor_command.append("--allow-unpaired")
-    if not start_bridge:
-        doctor_command.append("--allow-stopped")
-    run(doctor_command)
+        print()
+        doctor_command = [sys.executable, str(bridge_cli), "doctor"]
+        if not paired and not existing_allowed_chat():
+            doctor_command.append("--allow-unpaired")
+        if not start_bridge:
+            doctor_command.append("--allow-stopped")
+        run(doctor_command)
+    except BaseException:
+        restore_setup_backup(backup_dir, agents_md_path)
+        restore_runtime_link(previous_runtime)
+        reactivate_previous_runtime(previous_runtime)
+        raise
 
     print()
     print("Next:")
@@ -467,7 +475,75 @@ def create_setup_backup(agents_md_path: Path) -> Path:
             destination = backup_dir / name
             shutil.copy2(source, destination)
             destination.chmod(0o600)
+    (backup_dir / "manifest.json").write_text(
+        json.dumps({name: source.is_file() for name, source in files.items()}, indent=2) + "\n",
+        encoding="utf-8",
+    )
     return backup_dir
+
+
+def setup_file_targets(agents_md_path: Path) -> dict[str, Path]:
+    return {
+        "config.toml": CODEX_DIR / "config.toml",
+        "hooks.json": CODEX_DIR / "hooks.json",
+        "long-term-memory.env": MEMORY_ENV,
+        "long-term-memory.config.json": MEMORY_CONFIG,
+        "telegram-bridge.env": TELEGRAM_ENV,
+        "telegram-bridge.config.json": TELEGRAM_CONFIG,
+        "AGENTS.md": agents_md_path,
+    }
+
+
+def restore_setup_backup(backup_dir: Path, agents_md_path: Path) -> None:
+    try:
+        manifest = json.loads((backup_dir / "manifest.json").read_text(encoding="utf-8"))
+    except Exception:
+        manifest = {}
+    for name, target in setup_file_targets(agents_md_path).items():
+        backup = backup_dir / name
+        if backup.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup, target)
+        elif manifest.get(name) is False:
+            target.unlink(missing_ok=True)
+
+
+def restore_runtime_link(previous: Path | None) -> None:
+    if previous is None:
+        CURRENT_RUNTIME_LINK.unlink(missing_ok=True)
+        return
+    CURRENT_RUNTIME_LINK.parent.mkdir(parents=True, exist_ok=True)
+    next_link = CURRENT_RUNTIME_LINK.parent / ".current.setup-rollback"
+    next_link.unlink(missing_ok=True)
+    next_link.symlink_to(previous)
+    os.replace(next_link, CURRENT_RUNTIME_LINK)
+
+
+def reactivate_previous_runtime(previous: Path | None) -> None:
+    if previous is None or not previous.is_dir():
+        return
+    commands = [
+        [sys.executable, str(previous / "scripts/install_plugins.py"), "--replace-marketplace"],
+        [sys.executable, str(previous / "plugins/codex-long-term-memory/scripts/install.py")],
+    ]
+    bridge = previous / "plugins/codex-telegram-bridge/scripts/bridge.py"
+    if (Path.home() / "Library/LaunchAgents/com.permaevidence.codex-telegram-bridge.plist").exists():
+        commands.append([sys.executable, str(bridge), "install-service"])
+    for command in commands:
+        subprocess.run(command, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def validate_source_runtime(root: Path) -> None:
+    commands = [
+        [sys.executable, "-m", "compileall", "-q", "plugins", "scripts", "tests"],
+        [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"],
+        [sys.executable, "-m", "unittest", "discover", "-s", "plugins/codex-long-term-memory/tests", "-p", "test_*.py"],
+        [sys.executable, "-m", "unittest", "discover", "-s", "plugins/codex-telegram-bridge/tests", "-p", "test_*.py"],
+    ]
+    for command in commands:
+        completed = subprocess.run(command, cwd=str(root), check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(f"Runtime validation failed: {' '.join(command)}")
 
 
 def trust_memory_hooks(cwd: Path) -> None:
@@ -631,6 +707,7 @@ def build_local_capabilities_block() -> str:
 - Per-chat thread mappings are in `~/.codex/telegram-bridge/chat-map.json`.
 - Inbound Telegram photos and documents are downloaded into `~/.codex/telegram-bridge/inbox` and are exposed to Codex as local paths when available.
 - Codex can send files back to Telegram through the bundled `telegram-actions` MCP `reply` tool using a `files` array of absolute paths. Images are sent as photos; other files are sent as documents.
+- When more than one Telegram chat is authorized, pass the `chat_id` from the active `<channel ...>` message explicitly to Telegram action tools; the MCP rejects ambiguous or unauthorized destinations.
 - Do not auto-send arbitrary local files unless the user explicitly asks to send them.
 
 ### Telegram Reminders
@@ -654,6 +731,7 @@ def build_local_capabilities_block() -> str:
 - `recurring` is optional. Supported values are only `daily`, `weekly`, and `monthly`.
 - `due` must be in local-time `YYYY-MM-DDTHH:MM[:SS]` format accepted by the bridge.
 - The reminder loop polls every 60 seconds, so reminders can fire up to about one minute late.
+- Recurring reminders missed while the bridge was offline fire once and advance to the next future occurrence; monthly reminders use calendar months.
 - For reminders meant for the current Telegram conversation, use the active chat id from `~/.codex/telegram-bridge/runtime_state.json` or `chat-map.json` if needed.
 
 ### Google Workspace CLI

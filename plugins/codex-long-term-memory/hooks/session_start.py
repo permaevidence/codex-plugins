@@ -11,12 +11,14 @@ from lib.common import (
     load_config,
     print_session_start_context,
     read_history,
+    schedule_memory_maintenance,
     uses_agents_md_injection,
 )
 
 
 def main() -> None:
     config = load_config()
+    schedule_memory_maintenance(config)
     if uses_agents_md_injection(config):
         empty_success()
         return

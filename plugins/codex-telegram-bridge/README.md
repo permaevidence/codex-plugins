@@ -20,6 +20,9 @@ This plugin ports the Telegram control loop from `claude-telegram-plugin` to Cod
 - Monitors on-disk Codex CLI version changes and notifies the owner chat
 - Supports delivery controls such as ack reactions, chunking, and reply threading
 - Bundles Telegram MCP action tools so Codex can send replies and attachments, download inbound files, edit progress messages, and react mid-turn
+- Journals each Telegram update before acknowledging it, retries transient failures, and quarantines persistently bad updates
+- Restarts the complete bridge process tree automatically if `codex app-server` exits
+- Enforces MCP destination authorization and requires explicit chat binding when multiple chats are configured
 
 ## Configuration
 
@@ -168,6 +171,10 @@ also set both fields directly:
 
 The change is saved to `~/.codex/telegram-bridge/config.json` and applies to the
 next new Codex turn. It does not change an already-running turn.
+
+Recurring reminders use local calendar time. `monthly` advances by calendar
+month rather than by 30 days, and a reminder missed while the Mac was offline
+fires once before advancing directly to its next future occurrence.
 
 Useful checks:
 

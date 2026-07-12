@@ -53,7 +53,8 @@ TEXT_EXTENSIONS = {
     ".yml",
 }
 
-CHANNEL_REPLY_RE = re.compile(r"telegram.*reply|whatsapp.*reply|slack.*reply|discord.*reply", re.IGNORECASE)
+CHANNEL_REPLY_RE = re.compile(r"telegram.*reply|whatsapp.*reply|slack.*reply|discord.*reply|^reply$", re.IGNORECASE)
+CHANNEL_PATH_RE = re.compile(r'<channel\b[^>]*\b(?:image_path|file_path)=["\']([^"\']+)["\']')
 
 
 def main() -> None:
@@ -126,8 +127,9 @@ def find_last_turn_start(transcript_path: str) -> int:
 
 
 def is_user_message(obj: dict[str, Any]) -> bool:
-    if obj.get("type") == "user" or obj.get("role") == "user":
-        content = ((obj.get("message") or {}).get("content")) if isinstance(obj.get("message"), dict) else obj.get("content")
+    item = rollout_item(obj)
+    if item.get("type") == "user" or item.get("role") == "user":
+        content = ((item.get("message") or {}).get("content")) if isinstance(item.get("message"), dict) else item.get("content")
         if isinstance(content, list) and any(isinstance(block, dict) and block.get("type") == "tool_result" for block in content):
             return False
         return True
@@ -153,12 +155,13 @@ def extract_last_assistant_message(transcript_path: str, turn_start: int = 0) ->
                 for block in content_blocks(obj):
                     if not isinstance(block, dict):
                         continue
-                    if block.get("type") == "text":
+                    if block.get("type") in {"text", "output_text"}:
                         text = str(block.get("text") or "").strip()
                         if text:
                             parts.append(text)
-                if isinstance(obj.get("content"), str):
-                    text = str(obj.get("content") or "").strip()
+                item = rollout_item(obj)
+                if isinstance(item.get("content"), str):
+                    text = str(item.get("content") or "").strip()
                     if text:
                         parts.append(text)
     except Exception:
@@ -180,20 +183,16 @@ def extract_channel_reply_text(transcript_path: str, turn_start: int = 0) -> str
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if not is_assistant_message(obj):
+                item = rollout_item(obj)
+                if item.get("type") not in {"tool_use", "tool_call", "function_call", "custom_tool_call"}:
                     continue
-                for block in content_blocks(obj):
-                    if not isinstance(block, dict):
-                        continue
-                    if block.get("type") not in {"tool_use", "tool_call"}:
-                        continue
-                    tool_name = str(block.get("name") or block.get("tool_name") or "")
-                    if not CHANNEL_REPLY_RE.search(tool_name):
-                        continue
-                    tool_input = block.get("input") or block.get("arguments") or {}
-                    text = tool_input.get("text")
-                    if isinstance(text, str) and text.strip():
-                        texts.append(text.strip())
+                tool_name = str(item.get("name") or item.get("tool_name") or "")
+                if not CHANNEL_REPLY_RE.search(tool_name):
+                    continue
+                tool_input = parse_tool_input(item.get("input") or item.get("arguments") or {})
+                text = tool_input.get("text")
+                if isinstance(text, str) and text.strip():
+                    texts.append(text.strip())
     except Exception:
         return ""
     return "\n\n".join(texts).strip()
@@ -222,9 +221,8 @@ def extract_files_from_turn(
             except json.JSONDecodeError:
                 continue
 
+            item = rollout_item(obj)
             source_role = "user" if is_user_message(obj) else "assistant" if is_assistant_message(obj) else ""
-            if not source_role:
-                continue
 
             for block in content_blocks(obj):
                 if not isinstance(block, dict):
@@ -237,15 +235,15 @@ def extract_files_from_turn(
                         seen.add(dedupe_key(entry))
                         files.append(entry)
 
-                if block_type == "text" and source_role == "user":
-                    for path in extract_channel_image_paths(str(block.get("text") or "")):
+                if block_type in {"text", "input_text"} and source_role == "user":
+                    for path in extract_channel_file_paths(str(block.get("text") or "")):
                         entry = create_file_entry_from_path(
                             path,
                             source_role,
                             timestamp,
                             config=config,
                             chat_context=chat_context,
-                            preserve_original=True,
+                            preserve_original=False,
                         )
                         if entry and dedupe_key(entry) not in seen:
                             seen.add(dedupe_key(entry))
@@ -265,23 +263,58 @@ def extract_files_from_turn(
                         if entry and dedupe_key(entry) not in seen:
                             seen.add(dedupe_key(entry))
                             files.append(entry)
+
+            if item.get("type") in {"function_call", "custom_tool_call"}:
+                tool_name = str(item.get("name") or "")
+                tool_input = parse_tool_input(item.get("input") or item.get("arguments") or {})
+                for path in extract_paths_from_tool(tool_name, tool_input):
+                    entry = create_file_entry_from_path(
+                        path,
+                        "assistant",
+                        timestamp,
+                        config=config,
+                        chat_context=chat_context,
+                    )
+                    if entry and dedupe_key(entry) not in seen:
+                        seen.add(dedupe_key(entry))
+                        files.append(entry)
     return files
 
 
 def content_blocks(obj: dict[str, Any]) -> list[Any]:
-    message = obj.get("message")
+    item = rollout_item(obj)
+    message = item.get("message")
     if isinstance(message, dict):
         content = message.get("content")
         if isinstance(content, list):
             return content
-    content = obj.get("content")
+    content = item.get("content")
     if isinstance(content, list):
         return content
     return []
 
 
 def is_assistant_message(obj: dict[str, Any]) -> bool:
-    return obj.get("type") == "assistant" or obj.get("role") == "assistant"
+    item = rollout_item(obj)
+    return item.get("type") == "assistant" or item.get("role") == "assistant"
+
+
+def rollout_item(obj: dict[str, Any]) -> dict[str, Any]:
+    if obj.get("type") == "response_item" and isinstance(obj.get("payload"), dict):
+        return obj["payload"]
+    return obj
+
+
+def parse_tool_input(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
 
 
 def extract_inline_attachment(
@@ -308,7 +341,7 @@ def extract_inline_attachment(
             config=config,
             chat_context=chat_context,
             media_type=media_type,
-            include_description=True,
+            include_description=False,
         )
 
     for key in ("path", "file_path", "pathOrUrl"):
@@ -327,35 +360,17 @@ def extract_inline_attachment(
 def extract_paths_from_tool(tool_name: str, tool_input: Any) -> list[str]:
     if not isinstance(tool_input, dict):
         return []
+    # Only capture files the assistant explicitly sent through a channel reply.
+    # Never copy arbitrary paths from read/exec/view tools: those may be secrets
+    # and must not be persisted or uploaded merely because Codex inspected them.
+    if not CHANNEL_REPLY_RE.search(tool_name):
+        return []
     paths: list[str] = []
-    keys = {
-        "file_path",
-        "path",
-        "target_file",
-        "source_file",
-        "destination",
-        "output_file",
-        "image_path",
-    }
-    for key, value in tool_input.items():
-        if key in keys and isinstance(value, str) and looks_like_local_path(value):
-            paths.append(value)
-        elif key == "files" and isinstance(value, list):
-            for item in value:
-                if isinstance(item, str) and looks_like_local_path(item):
-                    paths.append(item)
-        elif isinstance(value, dict):
-            paths.extend(extract_paths_from_tool(tool_name, value))
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    paths.extend(extract_paths_from_tool(tool_name, item))
-    if CHANNEL_REPLY_RE.search(tool_name):
-        file_values = tool_input.get("files")
-        if isinstance(file_values, list):
-            for item in file_values:
-                if isinstance(item, str) and looks_like_local_path(item):
-                    paths.append(item)
+    file_values = tool_input.get("files")
+    if isinstance(file_values, list):
+        for item in file_values:
+            if isinstance(item, str) and looks_like_local_path(item):
+                paths.append(item)
     return dedupe_paths(paths)
 
 
@@ -383,16 +398,18 @@ def create_file_entry_from_path(
     if not path.exists() or not path.is_file():
         return None
 
-    managed_path = str(path) if preserve_original else copy_file_to_store(path)
-    return build_file_entry(
-        managed_path,
+    entry = build_file_entry(
+        str(path),
         source_role,
         timestamp,
         config=config,
         chat_context=chat_context,
         original_path=str(path),
-        include_description=True,
+        include_description=False,
     )
+    if not preserve_original:
+        entry["archive_copy_pending"] = True
+    return entry
 
 
 def build_file_entry(
@@ -420,6 +437,8 @@ def build_file_entry(
         entry["original_path"] = original_path
     if include_description:
         entry["description"] = describe_file_entry(path, media_type, config=config, chat_context=chat_context)
+    else:
+        entry["description_pending"] = True
     return entry
 
 
@@ -454,8 +473,13 @@ def copy_file_to_store(path: Path) -> str:
     return str(destination)
 
 
+def extract_channel_file_paths(text: str) -> list[str]:
+    return [match.group(1) for match in CHANNEL_PATH_RE.finditer(text)]
+
+
 def extract_channel_image_paths(text: str) -> list[str]:
-    return [match.group(1) for match in re.finditer(r'<channel\b[^>]*\bimage_path=["\']([^"\']+)["\']', text)]
+    """Backward-compatible alias for older tests/callers."""
+    return extract_channel_file_paths(text)
 
 
 def looks_like_local_path(value: str) -> bool:

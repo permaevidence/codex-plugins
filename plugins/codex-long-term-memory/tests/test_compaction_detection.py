@@ -31,9 +31,77 @@ assert INSTALL_SPEC is not None
 memory_install = importlib.util.module_from_spec(INSTALL_SPEC)
 assert INSTALL_SPEC.loader is not None
 INSTALL_SPEC.loader.exec_module(memory_install)
+STOP_SCRIPT = Path(__file__).resolve().parents[1] / "hooks" / "stop.py"
+STOP_SPEC = importlib.util.spec_from_file_location("memory_stop_hook", STOP_SCRIPT)
+assert STOP_SPEC and STOP_SPEC.loader
+memory_stop = importlib.util.module_from_spec(STOP_SPEC)
+STOP_SPEC.loader.exec_module(memory_stop)
 
 
 class CompactionDetectionTests(unittest.TestCase):
+    def test_history_append_schedules_background_maintenance_without_compacting_inline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(
+            common, "HISTORY_FILE", Path(tmpdir) / "history.jsonl"
+        ), mock.patch.object(
+            common, "HISTORY_LOCK_FILE", Path(tmpdir) / "history.lock"
+        ), mock.patch.object(
+            common, "ensure_state_dir"
+        ), mock.patch.object(
+            common, "load_config", return_value={"enable_user_facts": False}
+        ), mock.patch.object(
+            common, "schedule_memory_maintenance"
+        ) as schedule, mock.patch.object(
+            common, "maybe_compact_history", side_effect=AssertionError("must not run in hook")
+        ):
+            common.append_history_entries([{"role": "user", "content": "hello"}])
+            schedule.assert_called_once()
+
+    def test_codex_rollout_parser_captures_channel_files_but_not_arbitrary_tool_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            incoming = root / "incoming.pdf"
+            outgoing = root / "report.pdf"
+            secret = root / ".env"
+            incoming.write_bytes(b"incoming")
+            outgoing.write_bytes(b"outgoing")
+            secret.write_text("SECRET=value", encoding="utf-8")
+            rollout = root / "rollout.jsonl"
+            records = [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": f'<channel file_path="{incoming}">Review this'}],
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {"type": "function_call", "name": "exec_command", "arguments": json.dumps({"path": str(secret)})},
+                },
+                {
+                    "type": "response_item",
+                    "payload": {"type": "function_call", "name": "reply", "arguments": json.dumps({"files": [str(outgoing)]})},
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Done"}],
+                    },
+                },
+            ]
+            rollout.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
+            with mock.patch.object(memory_stop, "FILES_DIR", root / "stored"):
+                (root / "stored").mkdir()
+                files = memory_stop.extract_files_from_turn(
+                    str(rollout), 0, {}, {"enable_model_file_descriptions": False}
+                )
+            originals = {Path(str(item.get("original_path"))).name for item in files}
+            self.assertEqual(originals, {"incoming.pdf", "report.pdf"})
+            self.assertNotIn(".env", originals)
+            self.assertEqual(memory_stop.extract_last_assistant_message(str(rollout)), "Done")
     def test_default_memory_model_is_luna_high(self) -> None:
         self.assertEqual(common.DEFAULT_CONFIG["openai_model"], "gpt-5.6-luna")
         self.assertEqual(common.DEFAULT_CONFIG["openai_reasoning_effort"], "high")

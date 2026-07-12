@@ -58,6 +58,8 @@ def import_module(path: Path, name: str):
 
 
 def activate_runtime(source: Path, commit: str) -> Path:
+    setup_module = import_module(source / "scripts/setup.py", "downloaded_setup_validation")
+    setup_module.validate_source_runtime(source)
     runtime_module = import_module(source / "scripts/runtime_install.py", "downloaded_runtime_install")
     installed = runtime_module.install_runtime(source, cachebuster=f"commit-{commit[:12]}")
     metadata = {"repository": REPOSITORY, "commit": commit}

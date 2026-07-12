@@ -25,7 +25,7 @@ When Codex offers a better primitive, parity uses the Codex-native primitive rat
   - optional calendar injection via `gws`
   - history compaction with temporary, consolidated, and meta archive-backed summaries
   - OpenAI-backed summaries, file captions, and user-fact extraction with deterministic fallback
-  - persistent pending-summary retry queue with background refresh workers
+  - durable single-worker maintenance queue for summary retries, compaction, fact cleanup, and file descriptions
   - backup, reset, and restore workflows
 - Remaining gap:
   - no major memory workflow gap remains relative to the Claude plugin
@@ -69,9 +69,9 @@ When Codex offers a better primitive, parity uses the Codex-native primitive rat
 
 - Status: in progress
 - Remaining work:
-  - run a live end-to-end Telegram test with real bot credentials
+  - continue expanding live end-to-end regression coverage across Codex releases
   - document intentional Codex-native differences more explicitly
-  - run one live OpenAI-backed memory smoke test with a real API key
+  - keep the installed-runtime hook/MCP/API smoke tests current as Codex evolves
 
 ## Implementation principles
 

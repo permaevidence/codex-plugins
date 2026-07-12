@@ -10,7 +10,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,11 @@ BACKUPS_DIR = STATE_DIR / "backups"
 FILES_DIR = STATE_DIR / "files"
 PENDING_DIR = STATE_DIR / "pending"
 COMPACTION_STATE_FILE = STATE_DIR / "compaction_scan_state.json"
+HISTORY_LOCK_FILE = STATE_DIR / "history.lock"
+FACTS_LOCK_FILE = STATE_DIR / "user_facts.lock"
+MAINTENANCE_TASK_FILE = PENDING_DIR / "memory-maintenance.json"
+MAINTENANCE_PID_FILE = PENDING_DIR / "memory-maintenance.pid"
+MAINTENANCE_LOCK_FILE = PENDING_DIR / "memory-maintenance.lock"
 SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 CODEX_CONFIG_FILE = Path.home() / ".codex" / "config.toml"
 
@@ -193,9 +200,30 @@ def load_env_file() -> dict[str, str]:
 
 def save_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2)
-        handle.write("\n")
+    descriptor, raw_path = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    temp_path = Path(raw_path)
+    try:
+        with open(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+        temp_path.chmod(0o600)
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+@contextmanager
+def state_lock(path: Path, *, exclusive: bool = True, nonblocking: bool = False):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as handle:
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        if nonblocking:
+            operation |= fcntl.LOCK_NB
+        fcntl.flock(handle.fileno(), operation)
+        try:
+            yield handle
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def load_compaction_state_locked(handle: Any) -> dict[str, Any]:
@@ -406,7 +434,6 @@ def append_history_entries(entries: list[dict[str, Any]], payload: dict[str, Any
 
     ensure_state_dir()
     config = load_config()
-    resume_pending_tasks(config)
 
     normalized: list[dict[str, Any]] = []
     payload = payload or {}
@@ -439,11 +466,10 @@ def append_history_entries(entries: list[dict[str, Any]], payload: dict[str, Any
     if not normalized:
         return
 
-    with HISTORY_FILE.open("a", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        for entry in normalized:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    with state_lock(HISTORY_LOCK_FILE):
+        with HISTORY_FILE.open("a", encoding="utf-8") as handle:
+            for entry in normalized:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     if config.get("enable_user_facts"):
         fallback_facts: list[str] = []
@@ -452,7 +478,7 @@ def append_history_entries(entries: list[dict[str, Any]], payload: dict[str, Any
                 fallback_facts.extend(extract_user_facts(str(entry.get("content", ""))))
         append_user_facts(fallback_facts, config)
 
-    maybe_compact_history(config)
+    schedule_memory_maintenance(config)
 
 
 def read_history() -> list[dict[str, Any]]:
@@ -460,27 +486,43 @@ def read_history() -> list[dict[str, Any]]:
         return []
 
     entries: list[dict[str, Any]] = []
-    with HISTORY_FILE.open("r", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    with state_lock(HISTORY_LOCK_FILE, exclusive=False):
+        with HISTORY_FILE.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
     return entries
 
 
-def rewrite_history(entries: list[dict[str, Any]]) -> None:
+def rewrite_history(
+    entries: list[dict[str, Any]],
+    *,
+    expected_prefix: list[dict[str, Any]] | None = None,
+) -> bool:
     ensure_state_dir()
-    temp_path = HISTORY_FILE.with_suffix(".jsonl.tmp")
-    with temp_path.open("w", encoding="utf-8") as handle:
-        for entry in entries:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    temp_path.replace(HISTORY_FILE)
+    with state_lock(HISTORY_LOCK_FILE):
+        current: list[dict[str, Any]] = []
+        if HISTORY_FILE.exists():
+            for line in HISTORY_FILE.read_text(encoding="utf-8").splitlines():
+                try:
+                    current.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        if expected_prefix is not None:
+            if current[: len(expected_prefix)] != expected_prefix:
+                return False
+            entries = list(entries) + current[len(expected_prefix) :]
+        temp_path = HISTORY_FILE.with_suffix(".jsonl.tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
+            for entry in entries:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        temp_path.replace(HISTORY_FILE)
+    return True
 
 
 def read_facts() -> list[dict[str, Any]]:
@@ -504,27 +546,26 @@ def append_user_facts(facts: list[str], config: dict[str, Any] | None = None) ->
         return
 
     config = config or load_config()
-    existing = read_facts()
-    existing_ids = {fact.get("id") for fact in existing}
-    now = datetime.now(timezone.utc).isoformat()
+    with state_lock(FACTS_LOCK_FILE):
+        existing = read_facts()
+        existing_ids = {fact.get("id") for fact in existing}
+        now = datetime.now(timezone.utc).isoformat()
 
-    with FACTS_FILE.open("a", encoding="utf-8") as handle:
-        for fact_text in facts:
-            normalized_fact = normalize_fact(fact_text)
-            if not normalized_fact:
-                continue
-            fact_identifier = fact_id(normalized_fact)
-            if fact_identifier in existing_ids:
-                continue
-            payload = {
-                "id": fact_identifier,
-                "fact": normalized_fact,
-                "added": now,
-            }
-            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            existing_ids.add(fact_identifier)
-
-    condense_user_facts_if_needed(config)
+        with FACTS_FILE.open("a", encoding="utf-8") as handle:
+            for fact_text in facts:
+                normalized_fact = normalize_fact(fact_text)
+                if not normalized_fact:
+                    continue
+                fact_identifier = fact_id(normalized_fact)
+                if fact_identifier in existing_ids:
+                    continue
+                payload = {
+                    "id": fact_identifier,
+                    "fact": normalized_fact,
+                    "added": now,
+                }
+                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                existing_ids.add(fact_identifier)
 
 
 def fact_id(fact_text: str) -> str:
@@ -754,6 +795,7 @@ def group_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def maybe_compact_history(config: dict[str, Any] | None = None) -> None:
     config = config or load_config()
     entries = read_history()
+    original_entries = list(entries)
     conversation_entries = [entry for entry in entries if entry.get("role") != "summary"]
     total_chars = sum(entry_content_size(entry) for entry in conversation_entries)
     threshold = int(config.get("compact_threshold_chars", DEFAULT_CONFIG["compact_threshold_chars"]))
@@ -791,11 +833,6 @@ def maybe_compact_history(config: dict[str, Any] | None = None) -> None:
             label="temporary",
             config=config,
             context_entries=context_entries,
-            pending_meta={
-                "summary_type": "temporary",
-                "covers_from": chunk_entries[0].get("timestamp", "?"),
-                "covers_to": chunk_entries[-1].get("timestamp", "?"),
-            },
         )
         if summary_text is None:
             break
@@ -829,16 +866,15 @@ def maybe_compact_history(config: dict[str, Any] | None = None) -> None:
 
         if raw_entries:
             context_entries = consolidated + remaining_temp + conversation
-            cons_summary, pending_id = summarize_entries(
-                raw_entries,
+            # Consolidate the already validated temporary summaries rather than
+            # concatenating roughly 4 x 40K raw chunks into a 120K model-input
+            # ceiling. The raw entries remain losslessly preserved in the new
+            # consolidated archive, while the active summary covers every chunk.
+            cons_summary, pending_id = summarize_summary_entries(
+                to_consolidate,
                 label="consolidated",
                 config=config,
                 context_entries=context_entries,
-                pending_meta={
-                    "summary_type": "consolidated",
-                    "covers_from": to_consolidate[0].get("covers_from", ""),
-                    "covers_to": to_consolidate[-1].get("covers_to", ""),
-                },
             )
             if cons_summary is None:
                 break
@@ -867,11 +903,6 @@ def maybe_compact_history(config: dict[str, Any] | None = None) -> None:
                 label="consolidated",
                 config=config,
                 context_entries=consolidated + remaining_temp + conversation,
-                pending_meta={
-                    "summary_type": "consolidated",
-                    "covers_from": to_consolidate[0].get("covers_from", ""),
-                    "covers_to": to_consolidate[-1].get("covers_to", ""),
-                },
             )
             if cons_summary is None:
                 break
@@ -910,14 +941,12 @@ def maybe_compact_history(config: dict[str, Any] | None = None) -> None:
             label="meta",
             config=config,
             context_entries=meta_perm + to_keep,
-            pending_meta={
-                "summary_type": "meta_permanent" if len(source_archives) >= meta_perm_threshold else "meta_temporary",
-                "covers_from": covers_from,
-                "covers_to": covers_to,
-            },
         )
         if summary_content is None:
-            rewrite_history(meta_perm + consolidated + meta_temp + temporary + conversation)
+            rewrite_history(
+                meta_perm + consolidated + meta_temp + temporary + conversation,
+                expected_prefix=original_entries,
+            )
             return
 
         new_meta = {
@@ -938,7 +967,10 @@ def maybe_compact_history(config: dict[str, Any] | None = None) -> None:
             meta_temp = [new_meta]
         consolidated = to_keep
 
-    rewrite_history(meta_perm + consolidated + meta_temp + temporary + conversation)
+    rewrite_history(
+        meta_perm + consolidated + meta_temp + temporary + conversation,
+        expected_prefix=original_entries,
+    )
 
 
 def select_conversation_chunk(
@@ -1074,7 +1106,6 @@ def summarize_entries(
     label: str = "temporary",
     config: dict[str, Any] | None = None,
     context_entries: list[dict[str, Any]] | None = None,
-    pending_meta: dict[str, Any] | None = None,
 ) -> tuple[str | None, str | None]:
     config = config or load_config()
     context_text = format_entries_for_model(context_entries or [], max_chars=MODEL_CONTEXT_MAX_CHARS)
@@ -1093,7 +1124,6 @@ def summarize_summary_entries(
     label: str = "meta",
     config: dict[str, Any] | None = None,
     context_entries: list[dict[str, Any]] | None = None,
-    pending_meta: dict[str, Any] | None = None,
 ) -> tuple[str | None, str | None]:
     config = config or load_config()
     context_text = format_entries_for_model(context_entries or [], max_chars=MODEL_CONTEXT_MAX_CHARS)
@@ -1575,75 +1605,59 @@ def condense_user_facts_if_needed(config: dict[str, Any]) -> None:
         return
 
     now = datetime.now(timezone.utc).isoformat()
-    temp_path = FACTS_FILE.with_suffix(".jsonl.tmp")
-    with temp_path.open("w", encoding="utf-8") as handle:
-        for fact_text in parsed:
-            handle.write(json.dumps({"id": fact_id(fact_text), "fact": fact_text, "added": now}, ensure_ascii=False) + "\n")
-    temp_path.replace(FACTS_FILE)
+    with state_lock(FACTS_LOCK_FILE):
+        current = read_facts()
+        if current[: len(facts)] != facts:
+            return
+        rewritten = [
+            {"id": fact_id(fact_text), "fact": fact_text, "added": now}
+            for fact_text in parsed
+        ] + current[len(facts) :]
+        temp_path = FACTS_FILE.with_suffix(".jsonl.tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
+            for entry in rewritten:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        temp_path.replace(FACTS_FILE)
 
 
-def queue_pending_summary(
-    entries: list[dict[str, Any]],
-    label: str,
-    context_entries: list[dict[str, Any]],
-    pending_meta: dict[str, Any],
-    config: dict[str, Any],
-) -> str | None:
-    covers_from = str(pending_meta.get("covers_from") or "")
-    covers_to = str(pending_meta.get("covers_to") or "")
-    summary_type = str(pending_meta.get("summary_type") or label)
-    pending_id = hashlib.sha256(f"{summary_type}:{covers_from}:{covers_to}".encode("utf-8")).hexdigest()[:12]
-    task = {
-        "kind": "summary_refresh",
-        "label": label,
-        "summary_type": summary_type,
-        "covers_from": covers_from,
-        "covers_to": covers_to,
-        "entries": entries,
-        "context_entries": context_entries,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    task_path = pending_task_path(pending_id)
-    if not task_path.exists():
-        save_json(task_path, task)
-    spawn_background_worker(pending_id, config)
-    return pending_id
+def schedule_memory_maintenance(config: dict[str, Any] | None = None) -> None:
+    """Persist a maintenance request and ensure one detached worker is running.
+
+    Hooks call this after fast append-only work. Model requests and compaction must
+    never run in a hook process because hook timeouts are intentionally short.
+    """
+    config = config or load_config()
+    ensure_state_dir()
+    save_json(
+        MAINTENANCE_TASK_FILE,
+        {
+            "kind": "memory_maintenance",
+            "generation": time.time_ns(),
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    spawn_memory_maintenance_worker(config)
 
 
-def pending_task_path(pending_id: str) -> Path:
-    return PENDING_DIR / f"{pending_id}.json"
-
-
-def pending_pid_path(pending_id: str) -> Path:
-    return PENDING_DIR / f"{pending_id}.pid"
-
-
-def is_worker_alive(pending_id: str) -> bool:
-    pid_path = pending_pid_path(pending_id)
-    if not pid_path.exists():
+def memory_maintenance_worker_alive() -> bool:
+    if not MAINTENANCE_PID_FILE.exists():
         return False
     try:
-        pid = int(pid_path.read_text(encoding="utf-8").strip())
+        pid = int(MAINTENANCE_PID_FILE.read_text(encoding="utf-8").strip())
         os.kill(pid, 0)
         return True
     except Exception:
-        try:
-            pid_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        MAINTENANCE_PID_FILE.unlink(missing_ok=True)
         return False
 
 
-def spawn_background_worker(pending_id: str, config: dict[str, Any] | None = None) -> None:
+def spawn_memory_maintenance_worker(config: dict[str, Any] | None = None) -> None:
     config = config or load_config()
-    if not config.get("pending_retry_enabled", True):
+    if not config.get("pending_retry_enabled", True) or memory_maintenance_worker_alive():
         return
-    if is_worker_alive(pending_id):
-        return
-
     try:
         subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), "--retry-pending", pending_id],
+            [sys.executable, str(Path(__file__).resolve()), "--memory-maintenance"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -1653,117 +1667,104 @@ def spawn_background_worker(pending_id: str, config: dict[str, Any] | None = Non
         return
 
 
-def resume_pending_tasks(config: dict[str, Any] | None = None) -> None:
-    config = config or load_config()
-    if not config.get("pending_retry_enabled", True):
+def pending_file_descriptions(entries: list[dict[str, Any]]) -> bool:
+    return any(
+        entry.get("role") == "file"
+        and (entry.get("description_pending") or entry.get("archive_copy_pending"))
+        for entry in entries
+    )
+
+
+def enrich_pending_file_descriptions(config: dict[str, Any]) -> None:
+    original = read_history()
+    if not pending_file_descriptions(original):
         return
+    updated = [dict(entry) for entry in original]
+    chat_context = format_entries_for_model(original[-20:], max_chars=12000)
+    changed = False
+    for entry in updated:
+        if entry.get("role") != "file" or not (
+            entry.get("description_pending") or entry.get("archive_copy_pending")
+        ):
+            continue
+        path = Path(str(entry.get("path") or "")).expanduser()
+        if entry.get("archive_copy_pending") and path.is_file():
+            try:
+                raw = path.read_bytes()
+                digest = hashlib.sha256(raw).hexdigest()[:12]
+                suffix = path.suffix or ".bin"
+                destination = FILES_DIR / f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{digest}{suffix}"
+                if not destination.exists():
+                    destination.write_bytes(raw)
+                entry["path"] = str(destination)
+                path = destination
+            except OSError:
+                pass
+        entry.pop("archive_copy_pending", None)
+        if path.is_file():
+            entry["description"] = describe_file_entry(
+                path,
+                str(entry.get("media_type") or guess_media_type(str(path))),
+                config=config,
+                chat_context=chat_context,
+            )
+        entry.pop("description_pending", None)
+        changed = True
+    if changed:
+        rewrite_history(updated, expected_prefix=original)
+
+
+def memory_maintenance_needed(config: dict[str, Any]) -> bool:
+    entries = read_history()
+    raw_chars = sum(entry_content_size(entry) for entry in entries if entry.get("role") != "summary")
+    if raw_chars > int(config.get("compact_threshold_chars", DEFAULT_CONFIG["compact_threshold_chars"])):
+        return True
+    if pending_file_descriptions(entries):
+        return True
+    facts = read_facts()
+    fact_chars = sum(len(str(fact.get("fact") or "")) for fact in facts)
+    return fact_chars > int(config.get("user_facts_max_chars", DEFAULT_CONFIG["user_facts_max_chars"]))
+
+
+def run_memory_maintenance_once(config: dict[str, Any]) -> None:
+    enrich_pending_file_descriptions(config)
+    maybe_compact_history(config)
+    condense_user_facts_if_needed(config)
+    if uses_agents_md_injection(config):
+        refresh_agents_memory_injection(config)
+
+
+def run_memory_maintenance_worker() -> None:
     ensure_state_dir()
-    for path in sorted(PENDING_DIR.glob("*.json")):
-        pending_id = path.stem
-        if not is_worker_alive(pending_id):
-            spawn_background_worker(pending_id, config)
-
-
-def run_pending_worker(pending_id: str) -> None:
-    config = load_config()
-    task_path = pending_task_path(pending_id)
-    pid_path = pending_pid_path(pending_id)
-
-    if not task_path.exists():
-        return
-
     try:
-        pid_path.write_text(str(os.getpid()), encoding="utf-8")
-    except Exception:
-        return
-
-    delay = int(config.get("pending_retry_base_seconds", 30))
-    max_delay = int(config.get("pending_retry_max_seconds", 480))
-
-    try:
-        while task_path.exists():
-            if retry_pending_task(pending_id, config):
+        with state_lock(MAINTENANCE_LOCK_FILE, nonblocking=True):
+            MAINTENANCE_PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+            delay = int(load_config().get("pending_retry_base_seconds", 30))
+            while MAINTENANCE_TASK_FILE.exists():
+                config = load_config()
                 try:
-                    task_path.unlink(missing_ok=True)
+                    before = json.loads(MAINTENANCE_TASK_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    before = {}
+                try:
+                    run_memory_maintenance_once(config)
                 except Exception:
                     pass
-                return
-            time.sleep(delay)
-            delay = min(delay * 2, max_delay)
+                if memory_maintenance_needed(config):
+                    time.sleep(delay)
+                    delay = min(delay * 2, int(config.get("pending_retry_max_seconds", 480)))
+                    continue
+                try:
+                    after = json.loads(MAINTENANCE_TASK_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    after = {}
+                if before.get("generation") == after.get("generation"):
+                    MAINTENANCE_TASK_FILE.unlink(missing_ok=True)
+                delay = int(config.get("pending_retry_base_seconds", 30))
+    except BlockingIOError:
+        return
     finally:
-        try:
-            pid_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-
-def retry_pending_task(pending_id: str, config: dict[str, Any]) -> bool:
-    task_path = pending_task_path(pending_id)
-    if not task_path.exists():
-        return True
-    try:
-        task = json.loads(task_path.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-
-    if task.get("kind") != "summary_refresh":
-        return True
-
-    label = str(task.get("label") or "temporary")
-    entries = list(task.get("entries") or [])
-    context_entries = list(task.get("context_entries") or [])
-    context_text = format_entries_for_model(context_entries, max_chars=MODEL_CONTEXT_MAX_CHARS)
-    summary_text = generate_model_summary(entries, label, context_text, config)
-    if not summary_text:
-        return False
-
-    update_summary_entry(
-        pending_id=pending_id,
-        covers_from=str(task.get("covers_from") or ""),
-        covers_to=str(task.get("covers_to") or ""),
-        summary_text=summary_text,
-    )
-    return True
-
-
-def update_summary_entry(pending_id: str, covers_from: str, covers_to: str, summary_text: str) -> None:
-    entries = read_history()
-    changed = False
-    for entry in entries:
-        if entry.get("role") != "summary":
-            continue
-        if entry.get("summary_pending_id") == pending_id or (
-            entry.get("covers_from") == covers_from and entry.get("covers_to") == covers_to
-        ):
-            entry["content"] = summary_text
-            entry.pop("summary_pending_id", None)
-            update_archive_header(entry, summary_text)
-            changed = True
-            break
-    if changed:
-        rewrite_history(entries)
-
-
-def update_archive_header(entry: dict[str, Any], summary_text: str) -> None:
-    archive_name = str(entry.get("archive_file") or "")
-    if not archive_name:
-        return
-    archive_path = ARCHIVES_DIR / archive_name
-    if not archive_path.exists():
-        return
-
-    try:
-        lines = archive_path.read_text(encoding="utf-8").splitlines()
-        if not lines:
-            return
-        header = json.loads(lines[0])
-        if not isinstance(header, dict):
-            return
-        header["summary"] = summary_text
-        lines[0] = json.dumps(header, ensure_ascii=False)
-        archive_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    except Exception:
-        return
+        MAINTENANCE_PID_FILE.unlink(missing_ok=True)
 
 
 def fetch_calendar_section(days: int = 30, timeout: int = 10) -> str:
@@ -2164,8 +2165,8 @@ def print_session_start_context(context: str) -> None:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) == 3 and argv[1] == "--retry-pending":
-        run_pending_worker(argv[2])
+    if len(argv) == 2 and argv[1] == "--memory-maintenance":
+        run_memory_maintenance_worker()
         return 0
     return 0
 

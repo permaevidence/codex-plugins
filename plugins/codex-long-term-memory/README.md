@@ -6,7 +6,7 @@ This plugin ports the core idea of `Claude-Code-Long-Term-Memory` to Codex hooks
 
 - Logs every submitted user prompt
 - Logs every final assistant reply
-- Captures file attachments and assistant file/tool references when transcript data is available
+- Parses Codex-native rollout records to capture inbound Telegram files and files explicitly sent by channel reply tools
 - Injects recent cross-thread history at `SessionStart` for small/legacy hook-transport setups
 - Writes large memory overlays into a marked `AGENTS.md` block for modern Codex releases that spill large hook output
 - Refreshes the marked `AGENTS.md` block from a real `PreCompact` hook before Codex compacts
@@ -14,7 +14,7 @@ This plugin ports the core idea of `Claude-Code-Long-Term-Memory` to Codex hooks
 - Optionally injects upcoming calendar items via `gws`
 - Compacts older history into archive-backed summaries with temporary, consolidated, and meta tiers
 - Uses the OpenAI Responses API for summaries, user-fact extraction, and file descriptions when configured
-- Queues failed summary refreshes under `~/.codex/long-term-memory/pending/` and retries them in the background
+- Keeps hook execution append-only and runs summaries, compaction, fact cleanup, file descriptions, and retries in one durable background maintenance worker
 - Stores everything under `~/.codex/long-term-memory/`
 - Merges its hook registrations into `~/.codex/hooks.json`
 
@@ -193,7 +193,9 @@ Use it only when your rendered memory is small enough for your Codex version's h
 - Consolidated summaries: older temporary chunks are merged into `cons_*` archive files and re-expressed as one summary.
 - Meta summaries: older overflow consolidated summaries are folded into meta summaries with source-archive references, while the most recent consolidated summaries stay visible individually.
 
-When model-backed summarization is enabled, compaction requires a non-empty, substantive model summary. If the API is unavailable or returns an output that is too short, the source material is left in place and compaction retries on a later stop/start cycle. Deterministic fallback summaries are used only when model-backed summaries are intentionally disabled.
+When model-backed summarization is enabled, compaction requires a non-empty, substantive model summary. If the API is unavailable or returns an output that is too short, the source material and durable maintenance request remain in place and the detached worker retries with bounded backoff. Hooks never wait for those model calls. Deterministic fallback summaries are used only when model-backed summaries are intentionally disabled.
+
+File capture is deliberately narrow: arbitrary files merely read by Codex are never copied or uploaded. The plugin captures user-provided channel attachments and files explicitly sent through a channel reply, then performs optional descriptions in the background.
 
 ## Codex compaction hooks
 

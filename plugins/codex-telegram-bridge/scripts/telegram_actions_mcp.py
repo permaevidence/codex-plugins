@@ -137,8 +137,26 @@ def current_context() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], d
     access = load_access()
     chat_map = load_chat_map()
     runtime = load_runtime_state()
-    chat_id = str(runtime.get("active_chat_id") or config.get("owner_chat_id") or "").strip()
+    authorized = authorized_chat_ids(access)
+    active = str(runtime.get("active_chat_id") or config.get("owner_chat_id") or "").strip()
+    # A global "last active" chat is safe only in the common single-chat
+    # deployment. With multiple authorized chats the caller must bind the tool
+    # call explicitly, preventing one concurrent turn from replying to another.
+    chat_id = active if len(authorized) == 1 and active in authorized else ""
     return config, access, chat_map, runtime, chat_id
+
+
+def authorized_chat_ids(access: dict[str, Any]) -> set[str]:
+    result = {str(item) for item in access.get("allowFrom", []) if str(item).strip()}
+    groups = access.get("groups") or {}
+    if isinstance(groups, dict):
+        result.update(str(item) for item in groups if str(item).strip())
+    return result
+
+
+def require_authorized_chat(access: dict[str, Any], chat_id: str) -> None:
+    if chat_id not in authorized_chat_ids(access):
+        raise RuntimeError("Telegram destination is not authorized by access.json.")
 
 
 def require_token(config: dict[str, Any]) -> str:
@@ -151,7 +169,9 @@ def require_token(config: dict[str, Any]) -> str:
 def resolve_chat(chat_id: Any, default_chat_id: str) -> str:
     resolved = str(chat_id or default_chat_id or "").strip()
     if not resolved:
-        raise RuntimeError("No active Telegram chat is known yet. Send a Telegram message first or pass chat_id.")
+        raise RuntimeError(
+            "No unambiguous Telegram destination is available. Pass the chat_id from the active <channel ...> message."
+        )
     return resolved
 
 
@@ -163,6 +183,7 @@ def handle_reply(arguments: dict[str, Any]) -> dict[str, Any]:
     config, access, chat_map, runtime, default_chat_id = current_context()
     token = require_token(config)
     chat_id = resolve_chat(arguments.get("chat_id"), default_chat_id)
+    require_authorized_chat(access, chat_id)
     entry = resolve_entry(chat_map, chat_id)
 
     reply_to_message_id = arguments.get("reply_to_message_id")
@@ -221,9 +242,10 @@ def handle_reply(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_edit_message(arguments: dict[str, Any]) -> dict[str, Any]:
-    config, _, chat_map, runtime, default_chat_id = current_context()
+    config, access, chat_map, runtime, default_chat_id = current_context()
     token = require_token(config)
     chat_id = resolve_chat(arguments.get("chat_id"), default_chat_id)
+    require_authorized_chat(access, chat_id)
     entry = resolve_entry(chat_map, chat_id)
 
     message_id = arguments.get("message_id")
@@ -255,9 +277,10 @@ def handle_edit_message(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_react(arguments: dict[str, Any]) -> dict[str, Any]:
-    config, _, chat_map, runtime, default_chat_id = current_context()
+    config, access, chat_map, runtime, default_chat_id = current_context()
     token = require_token(config)
     chat_id = resolve_chat(arguments.get("chat_id"), default_chat_id)
+    require_authorized_chat(access, chat_id)
     entry = resolve_entry(chat_map, chat_id)
 
     message_id = arguments.get("message_id")

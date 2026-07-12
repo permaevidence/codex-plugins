@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import calendar
 import mimetypes
 import os
 import queue
@@ -13,6 +14,7 @@ import threading
 import time
 import traceback
 import urllib.request
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,7 @@ from lib.telegram_api import (
 from lib.telegram_common import (
     CONFIG_FILE,
     INBOX_DIR,
+    STATE_DIR,
     load_access,
     load_chat_map,
     load_config,
@@ -73,6 +76,8 @@ BOT_COMMANDS = [
 ]
 
 MODEL_CALLBACK_PREFIX = "model:"
+PENDING_UPDATE_FILE = STATE_DIR / "pending_update.json"
+FAILED_UPDATES_DIR = STATE_DIR / "failed_updates"
 
 
 def normalize_command(text: str, bot_username: str) -> str:
@@ -534,6 +539,7 @@ class CodexAppServerClient:
         self._turns: dict[str, dict[str, Any]] = {}
         self._active_turn_by_chat: dict[str, str] = {}
         self._thread_to_chat: dict[str, str] = {}
+        self._restart_on_exit = True
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
         self._initialize()
@@ -552,6 +558,7 @@ class CodexAppServerClient:
         self.notify("initialized", {})
 
     def shutdown(self, timeout: float = 5.0) -> None:
+        self._restart_on_exit = False
         if self.process.poll() is not None:
             return
         try:
@@ -625,6 +632,11 @@ class CodexAppServerClient:
                     pending.put_nowait(error)
                 except queue.Full:
                     pass
+            # A live bridge with a dead app-server cannot recover useful work.
+            # Exit the child so the supervisor/LaunchAgent restarts the complete
+            # process tree. Intentional /newsession shutdown disables this path.
+            if getattr(self, "_restart_on_exit", False):
+                os._exit(75)
 
     def _handle_message(self, message: dict[str, Any]) -> None:
         if "id" in message and "method" not in message:
@@ -945,14 +957,28 @@ def maybe_start_reminder_loop(
                                 codex.inject_external_message(chat_id, chat_map, event_text)
                                 save_chat_map(chat_map)
 
-                        recurring = reminder.get("recurring")
-                        if recurring:
-                            reminder["due"] = advance_recurring(reminder["due"], recurring)
+                        recurring = str(reminder.get("recurring") or "").strip()
+                        if recurring in {"daily", "weekly", "monthly"}:
+                            reminder["due"] = advance_recurring(reminder["due"], recurring, after=now)
                             kept.append(reminder)
+                        elif recurring:
+                            print(
+                                f"reminder {reminder.get('id', '?')} has unsupported recurrence {recurring!r}; treating as one-off",
+                                file=sys.stderr,
+                            )
                         changed = True
 
                     if changed:
-                        save_reminders(kept)
+                        # Preserve reminders concurrently added by Codex after this
+                        # poll began. Reminder ids are required by the documented
+                        # format and provide a stable merge key.
+                        original_ids = {str(item.get("id") or "") for item in reminders}
+                        current = load_reminders()
+                        additions = [
+                            item for item in current
+                            if str(item.get("id") or "") not in original_ids
+                        ]
+                        save_reminders(kept + additions)
             except Exception as exc:
                 print(f"reminder loop failed: {exc}", file=sys.stderr)
             time.sleep(REMINDER_CHECK_INTERVAL)
@@ -973,15 +999,29 @@ def parse_due(value: Any) -> float | None:
             return None
 
 
-def advance_recurring(due: str, interval: str) -> str:
-    current = parse_due(due) or time.time()
-    if interval == "daily":
-        current += 24 * 60 * 60
-    elif interval == "weekly":
-        current += 7 * 24 * 60 * 60
-    elif interval == "monthly":
-        current += 30 * 24 * 60 * 60
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(current))
+def advance_recurring(due: str, interval: str, *, after: float | None = None) -> str:
+    try:
+        current = datetime.strptime(str(due), "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        current = datetime.strptime(str(due), "%Y-%m-%dT%H:%M")
+    after_dt = datetime.fromtimestamp(after if after is not None else time.time())
+
+    def advance_once(value: datetime) -> datetime:
+        if interval == "daily":
+            return value + timedelta(days=1)
+        if interval == "weekly":
+            return value + timedelta(weeks=1)
+        if interval == "monthly":
+            year = value.year + (1 if value.month == 12 else 0)
+            month = 1 if value.month == 12 else value.month + 1
+            day = min(value.day, calendar.monthrange(year, month)[1])
+            return value.replace(year=year, month=month, day=day)
+        raise ValueError(f"Unsupported recurrence: {interval}")
+
+    current = advance_once(current)
+    while current <= after_dt:
+        current = advance_once(current)
+    return current.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def maybe_start_email_loop(
@@ -1351,11 +1391,18 @@ def build_auto_user_input_answers(params: dict[str, Any]) -> dict[str, str]:
             continue
         options = question.get("options")
         if isinstance(options, list) and options:
-            first_option = options[0]
-            if isinstance(first_option, dict):
-                answer = first_option.get("label") or first_option.get("value") or first_option.get("id") or ""
+            recommended = next(
+                (
+                    option for option in options
+                    if isinstance(option, dict)
+                    and "recommended" in str(option.get("label") or "").lower()
+                ),
+                None,
+            )
+            if recommended is not None:
+                answer = recommended.get("label") or recommended.get("value") or recommended.get("id") or ""
             else:
-                answer = str(first_option)
+                answer = question.get("default") or ""
         else:
             answer = question.get("default") or ""
         answers[question_id] = str(answer)
@@ -1439,36 +1486,47 @@ def main() -> None:
 
     print("Codex Telegram bridge is running.")
     while True:
-        try:
-            result = telegram_request(
-                str(token),
-                "getUpdates",
-                {
-                    "timeout": "30",
-                    "offset": str(offset),
-                },
-            )
-        except Exception as exc:
-            print(f"telegram poll failed: {exc}", file=sys.stderr)
-            time.sleep(3)
-            continue
+        pending_update = load_json(PENDING_UPDATE_FILE, {})
+        if isinstance(pending_update, dict) and pending_update.get("update_id") is not None:
+            result = {"result": [pending_update]}
+        else:
+            try:
+                result = telegram_request(
+                    str(token),
+                    "getUpdates",
+                    {
+                        "timeout": "30",
+                        "offset": str(offset),
+                    },
+                )
+            except Exception as exc:
+                print(f"telegram poll failed: {exc}", file=sys.stderr)
+                time.sleep(3)
+                continue
 
         for update in result.get("result", []):
             try:
+                # Journal before acknowledging the Telegram offset. If processing
+                # crashes, the bridge replays this update before polling again.
+                save_json(PENDING_UPDATE_FILE, update)
                 offset = max(offset, int(update["update_id"]) + 1)
-                # Persist offset immediately so restarts never re-process this update.
+                # Telegram itself may advance because the durable journal now owns
+                # retry responsibility for this update.
                 save_runtime_state({**load_runtime_state(), "telegram_update_offset": offset})
                 callback = update.get("callback_query")
                 if callback:
                     access = load_access()
                     handle_model_callback(str(token), callback, config, access)
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
 
                 message = update.get("message") or update.get("edited_message")
                 if not message:
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
 
                 if not gate_message(message, str(token), bot_username):
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
 
                 chat = message.get("chat", {})
@@ -1498,13 +1556,16 @@ def main() -> None:
 
                 if not text:
                     send_message(str(token), chat_id, "This message type is not supported yet.", access=access)
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
 
                 command = normalize_command(text, bot_username)
                 if command.startswith("/") and chat.get("type") != "private":
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
                 if command in {"/start", "/help"}:
                     send_message(str(token), chat_id, help_text(), message.get("message_id"), access=access)
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
                 if command == "/status":
                     send_message(
@@ -1514,6 +1575,7 @@ def main() -> None:
                         message.get("message_id"),
                         access=access,
                     )
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
                 if command == "/model":
                     handle_model_command(
@@ -1524,6 +1586,7 @@ def main() -> None:
                         config,
                         access,
                     )
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
                 if command == "/newsession":
                     update_long_term_memory_agents_file(config)
@@ -1549,6 +1612,7 @@ def main() -> None:
                         message.get("message_id"),
                         access=access,
                     )
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     codex.shutdown()
                     return
                 if command == "/stop":
@@ -1562,6 +1626,7 @@ def main() -> None:
                             message.get("message_id"),
                             access=access,
                         )
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
 
                 text = build_channel_message(message, text, attachment)
@@ -1584,6 +1649,7 @@ def main() -> None:
                         message.get("message_id"),
                         access=access,
                     )
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
 
                 with chat_map_lock:
@@ -1606,6 +1672,7 @@ def main() -> None:
                         message.get("message_id"),
                         access=access,
                     )
+                PENDING_UPDATE_FILE.unlink(missing_ok=True)
             except Exception as exc:
                 print(f"telegram update handling failed: {exc}", file=sys.stderr)
                 traceback.print_exc()
@@ -1615,6 +1682,28 @@ def main() -> None:
                         send_message(str(token), chat_id, f"Bridge error: {exc}")
                     except Exception:
                         pass
+                runtime_state = load_runtime_state()
+                update_id = str(update.get("update_id") or "unknown")
+                previous_id = str(runtime_state.get("pending_update_id") or "")
+                attempts = int(runtime_state.get("pending_update_attempts") or 0) + 1 if previous_id == update_id else 1
+                runtime_state.update(
+                    {
+                        "pending_update_id": update_id,
+                        "pending_update_attempts": attempts,
+                        "pending_update_error": str(exc)[:1000],
+                    }
+                )
+                save_runtime_state(runtime_state)
+                # Leave the journal in place for bounded retry. Persistent bad
+                # updates are quarantined rather than blocking all later chats.
+                if attempts >= 5:
+                    FAILED_UPDATES_DIR.mkdir(parents=True, exist_ok=True)
+                    failed_path = FAILED_UPDATES_DIR / f"update-{update_id}.json"
+                    PENDING_UPDATE_FILE.replace(failed_path)
+                    print(f"telegram update {update_id} quarantined after {attempts} attempts", file=sys.stderr)
+                else:
+                    time.sleep(min(3 * attempts, 15))
+                break
 
 
 if __name__ == "__main__":

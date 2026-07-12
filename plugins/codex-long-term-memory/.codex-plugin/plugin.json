@@ -1,6 +1,6 @@
 {
   "name": "codex-long-term-memory",
-  "version": "0.3.2+codex.20260712053630",
+  "version": "0.3.3",
   "description": "Cross-thread conversation memory for Codex using hooks, AGENTS.md transport, and model-backed summaries.",
   "author": {
     "name": "Perma Evidence",

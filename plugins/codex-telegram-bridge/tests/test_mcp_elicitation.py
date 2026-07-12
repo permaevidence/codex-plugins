@@ -11,6 +11,7 @@ from pathlib import Path
 BRIDGE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "telegram_bridge.py"
 OPERATOR_PATH = Path(__file__).resolve().parents[1] / "scripts" / "bridge.py"
 COMMON_PATH = Path(__file__).resolve().parents[1] / "lib" / "telegram_common.py"
+MCP_PATH = Path(__file__).resolve().parents[1] / "scripts" / "telegram_actions_mcp.py"
 
 
 def load_bridge_module():
@@ -31,6 +32,14 @@ def load_operator_module():
 
 def load_common_module():
     spec = importlib.util.spec_from_file_location("telegram_common_test", COMMON_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_mcp_module():
+    spec = importlib.util.spec_from_file_location("telegram_actions_mcp_test", MCP_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -65,6 +74,24 @@ class McpElicitationTests(unittest.TestCase):
 
 
 class AppServerResilienceTests(unittest.TestCase):
+    def test_real_app_server_exit_terminates_bridge_for_supervisor_restart(self):
+        bridge = load_bridge_module()
+
+        class EmptyStdout:
+            def __iter__(self):
+                return iter(())
+
+        class FakeProcess:
+            stdout = EmptyStdout()
+
+        client = object.__new__(bridge.CodexAppServerClient)
+        client.process = FakeProcess()
+        client._pending = {}
+        client._restart_on_exit = True
+        with mock.patch.object(bridge.os, "_exit") as exit_process:
+            client._read_loop()
+        exit_process.assert_called_once_with(75)
+
     def test_turn_omits_model_overrides_when_codex_defaults_are_unresolved(self):
         bridge = load_bridge_module()
         client = object.__new__(bridge.CodexAppServerClient)
@@ -326,6 +353,37 @@ class ModelSelectionTests(unittest.TestCase):
             self.assertEqual(calls[0], ("answer", ("token", "cb1", "Model updated.")))
             self.assertEqual(calls[1][0], "edit")
             self.assertIn("gpt-5.6-sol / low", calls[1][1][3])
+
+
+class SafetyAndReminderTests(unittest.TestCase):
+    def test_user_input_auto_answer_requires_recommended_or_explicit_default(self):
+        bridge = load_bridge_module()
+        unsafe = {"questions": [{"id": "choice", "options": [{"label": "Delete"}, {"label": "Keep"}]}]}
+        safe = {"questions": [{"id": "choice", "options": [{"label": "Keep (Recommended)"}, {"label": "Delete"}]}]}
+        self.assertEqual(bridge.build_auto_user_input_answers(unsafe), {})
+        self.assertEqual(bridge.build_auto_user_input_answers(safe), {"choice": "Keep (Recommended)"})
+
+    def test_monthly_reminders_use_calendar_months_and_skip_missed_intervals(self):
+        bridge = load_bridge_module()
+        after = bridge.time.mktime(bridge.time.strptime("2026-01-31T09:00:01", "%Y-%m-%dT%H:%M:%S"))
+        self.assertEqual(
+            bridge.advance_recurring("2026-01-31T09:00:00", "monthly", after=after),
+            "2026-02-28T09:00:00",
+        )
+        far_after = bridge.time.mktime(bridge.time.strptime("2026-07-10T09:00:00", "%Y-%m-%dT%H:%M:%S"))
+        self.assertEqual(
+            bridge.advance_recurring("2026-07-01T09:00:00", "daily", after=far_after),
+            "2026-07-11T09:00:00",
+        )
+
+    def test_mcp_rejects_unauthorized_and_ambiguous_chat_destinations(self):
+        mcp = load_mcp_module()
+        access = {"allowFrom": ["1", "2"], "groups": {"-100": {}}}
+        self.assertEqual(mcp.authorized_chat_ids(access), {"1", "2", "-100"})
+        with self.assertRaises(RuntimeError):
+            mcp.require_authorized_chat(access, "999")
+        with self.assertRaises(RuntimeError):
+            mcp.resolve_chat(None, "")
 
 
 if __name__ == "__main__":

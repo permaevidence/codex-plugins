@@ -8,11 +8,13 @@ import json
 import os
 import plistlib
 import select
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 
@@ -381,6 +383,8 @@ def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
 
     mcp_list = run_text([codex, "mcp", "list"]) if codex else ""
     checks.append(("telegram-actions MCP visible", "telegram-actions" in mcp_list, "found" if "telegram-actions" in mcp_list else "not visible"))
+    mcp_ok, mcp_detail = smoke_test_telegram_mcp()
+    checks.append(("telegram-actions MCP initializes", mcp_ok, mcp_detail))
 
     config = load_json(CONFIG_FILE)
     checks.append(("Telegram config.json", bool(config), str(CONFIG_FILE) if config else "missing or invalid"))
@@ -393,6 +397,8 @@ def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
     checks.append(("Telegram .env", ENV_FILE.exists(), str(ENV_FILE) if ENV_FILE.exists() else "missing"))
     checks.append(("TELEGRAM_BOT_TOKEN set", "TELEGRAM_BOT_TOKEN" in env_values, "set" if "TELEGRAM_BOT_TOKEN" in env_values else "missing"))
     checks.append(("Telegram OPENAI_API_KEY set", "OPENAI_API_KEY" in env_values, "set" if "OPENAI_API_KEY" in env_values else "missing; voice transcription will not work"))
+    telegram_ok, telegram_detail = smoke_test_telegram_api()
+    checks.append(("Telegram bot API reachable", telegram_ok, telegram_detail))
 
     access = load_json(ACCESS_FILE)
     allow_list = access.get("allowFrom", []) if isinstance(access, dict) else []
@@ -409,6 +415,8 @@ def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
     checks.append(("long-term-memory config", bool(memory_config), str(MEMORY_CONFIG_FILE) if memory_config else "missing or invalid"))
     memory_env_values = load_env_keys(MEMORY_ENV_FILE)
     checks.append(("memory OPENAI_API_KEY set", "OPENAI_API_KEY" in memory_env_values, "set" if "OPENAI_API_KEY" in memory_env_values else "missing; model-backed memory will not work"))
+    openai_ok, openai_detail = smoke_test_openai_api()
+    checks.append(("OpenAI API reachable", openai_ok, openai_detail))
     if memory_config:
         transport = str(memory_config.get("injection_transport") or "")
         checks.append(("memory transport configured", bool(transport), transport or "not set"))
@@ -425,6 +433,8 @@ def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
         if item.get("enabled") and item.get("trustStatus") == "trusted"
     }
     checks.append(("memory hooks enabled and trusted", expected_hooks.issubset(trusted_hooks), f"{len(trusted_hooks & expected_hooks)}/4 trusted"))
+    hooks_ok, hooks_detail = smoke_test_memory_hooks(hook_records, config.get("default_cwd") if config else None)
+    checks.append(("memory hooks execute", hooks_ok, hooks_detail))
 
     if not allow_stopped:
         checks.append(("LaunchAgent installed", LAUNCH_AGENT_FILE.is_file(), str(LAUNCH_AGENT_FILE) if LAUNCH_AGENT_FILE.exists() else "missing"))
@@ -434,7 +444,16 @@ def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
         checks.append(("bridge supervisor running", bridge_running(), format_pid(supervisor_pid())))
         checks.append(("bridge child running", is_pid_alive(child_pid()), format_pid(child_pid())))
         child_command = process_command(child_pid())
-        checks.append(("bridge child command valid", "telegram_bridge.py" in child_command, child_command or "not running"))
+        expected_bridge = str(SCRIPT_DIR / "telegram_bridge.py")
+        checks.append(
+            (
+                "bridge child command valid",
+                expected_bridge in child_command,
+                child_command or "not running",
+            )
+        )
+        app_server_ok, app_server_detail = app_server_child_status(child_pid())
+        checks.append(("Codex app-server child running", app_server_ok, app_server_detail))
 
     failures = 0
     print("Codex Telegram bridge doctor")
@@ -526,6 +545,134 @@ def query_memory_hooks(cwd: str | None) -> list[dict]:
         except subprocess.TimeoutExpired:
             process.kill()
     return []
+
+
+def smoke_test_telegram_mcp() -> tuple[bool, str]:
+    script = REPO_ROOT / "plugins/codex-telegram-bridge/scripts/telegram_actions_mcp.py"
+    if not script.is_file():
+        return False, f"missing {script}"
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(script)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert process.stdin is not None and process.stdout is not None
+        for message in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "doctor", "version": "1"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        ):
+            process.stdin.write(json.dumps(message) + "\n")
+        process.stdin.flush()
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            ready, _, _ = select.select([process.stdout], [], [], 0.5)
+            if not ready:
+                continue
+            reply = json.loads(process.stdout.readline())
+            if reply.get("id") == 2:
+                names = {item.get("name") for item in (reply.get("result") or {}).get("tools", [])}
+                expected = {"reply", "edit_message", "react", "download_attachment"}
+                return expected.issubset(names), f"{len(names & expected)}/4 tools"
+        return False, "tools/list timed out"
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        if "process" in locals():
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+
+def smoke_test_memory_hooks(records: list[dict], cwd: str | None) -> tuple[bool, str]:
+    if not records:
+        return False, "no hooks discovered"
+    failures: list[str] = []
+    for record in records:
+        event = str(record.get("eventName") or "unknown")
+        command = str(record.get("command") or "")
+        if not command:
+            failures.append(f"{event}: missing command")
+            continue
+        try:
+            completed = subprocess.run(
+                shlex.split(command),
+                input=json.dumps({"cwd": str(cwd or Path.home()), "thread_id": "doctor-smoke"}),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=20,
+                cwd=str(Path(str(cwd or Path.home())).expanduser()),
+            )
+            if completed.returncode != 0:
+                failures.append(f"{event}: exit {completed.returncode}")
+        except Exception as exc:
+            failures.append(f"{event}: {exc}")
+    return not failures, "4/4 executed" if not failures else "; ".join(failures)
+
+
+def _env_value(path: Path, key: str) -> str:
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                found, value = line.split("=", 1)
+                if found.strip() == key:
+                    return value.strip()
+    except OSError:
+        pass
+    return ""
+
+
+def smoke_test_telegram_api() -> tuple[bool, str]:
+    token = _env_value(ENV_FILE, "TELEGRAM_BOT_TOKEN")
+    if not token:
+        return False, "token missing"
+    try:
+        with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/getMe", timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return bool(payload.get("ok")), "getMe succeeded" if payload.get("ok") else "getMe rejected"
+    except Exception as exc:
+        return False, type(exc).__name__
+
+
+def smoke_test_openai_api() -> tuple[bool, str]:
+    key = _env_value(MEMORY_ENV_FILE, "OPENAI_API_KEY")
+    if not key:
+        return False, "key missing"
+    try:
+        request = urllib.request.Request(
+            "https://api.openai.com/v1/models?limit=1",
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            ok = 200 <= response.status < 300
+        return ok, "models endpoint succeeded" if ok else f"HTTP {response.status}"
+    except Exception as exc:
+        return False, type(exc).__name__
+
+
+def app_server_child_status(parent_pid: int | None) -> tuple[bool, str]:
+    if not is_pid_alive(parent_pid):
+        return False, "bridge child not running"
+    try:
+        proc = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True, check=False, timeout=5
+        )
+        for line in proc.stdout.splitlines():
+            parts = line.strip().split(None, 2)
+            if len(parts) != 3:
+                continue
+            pid, ppid, command = parts
+            if ppid == str(parent_pid) and "codex app-server" in command:
+                return True, f"pid {pid}"
+    except Exception as exc:
+        return False, str(exc)
+    return False, "no direct app-server child"
 
 
 def load_json(path: Path) -> dict:
