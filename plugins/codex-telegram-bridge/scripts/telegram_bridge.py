@@ -110,6 +110,7 @@ MEMORY_COMMON_SCRIPT = (
     Path(__file__).resolve().parents[2] / "codex-long-term-memory" / "lib" / "common.py"
 )
 UPDATE_SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "update.py"
+SETUP_SCRIPT = UPDATE_SCRIPT.parent / "setup.py"
 
 
 def rate_limit_retry_at(snapshot: dict[str, Any], *, now: float | None = None, buffer_seconds: int = 60) -> float | None:
@@ -833,6 +834,25 @@ class CodexAppServerClient:
 
     def notify(self, method: str, params: dict[str, Any]) -> None:
         self._send_json({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def list_apps(self) -> dict[str, dict[str, Any]]:
+        found: dict[str, dict[str, Any]] = {}
+        cursor: str | None = None
+        for page in range(6):
+            params: dict[str, Any] = {"limit": 200, "forceRefetch": page == 0}
+            if cursor:
+                params["cursor"] = cursor
+            result = self.request("app/list", params, timeout=15)
+            for app in (result or {}).get("data", []):
+                if not isinstance(app, dict):
+                    continue
+                app_id = str(app.get("id") or "").strip()
+                if app_id:
+                    found[app_id] = app
+            cursor = str((result or {}).get("nextCursor") or "").strip() or None
+            if not cursor:
+                break
+        return found
 
     def _reserve_id(self) -> int:
         with self._lock:
@@ -2124,7 +2144,36 @@ def compact_health_summary() -> str:
     return "Health: OK" if not problems else f"Health: ATTENTION — {'; '.join(problems)}. Use /health."
 
 
-def health_text() -> str:
+def setup_repair_command() -> str:
+    return f'python3 "{SETUP_SCRIPT}"'
+
+
+def find_google_app(apps: dict[str, dict[str, Any]], kind: str) -> dict[str, Any]:
+    wanted = str(kind or "").strip().lower()
+    for app in apps.values():
+        if not isinstance(app, dict):
+            continue
+        identity = " ".join(
+            str(app.get(field) or "")
+            for field in ("id", "name", "title", "displayName", "slug", "pluginName")
+        ).lower()
+        compact = re.sub(r"[^a-z0-9]+", "", identity)
+        if wanted == "gmail" and "gmail" in compact:
+            return app
+        if wanted == "calendar" and "googlecalendar" in compact:
+            return app
+    return {}
+
+
+def google_app_is_connected(app: dict[str, Any]) -> bool:
+    return bool(app.get("isEnabled")) and bool(app.get("isAccessible"))
+
+
+def health_text(
+    *,
+    google_apps: dict[str, dict[str, Any]] | None = None,
+    google_apps_error: str = "",
+) -> str:
     lines = ["System health", "", "✅ Bridge: running", "✅ Codex app-server: connected"]
     bridge_config = load_json(CONFIG_FILE, {})
     memory_config = load_json(MEMORY_STATE_DIR / "config.json", {})
@@ -2139,7 +2188,9 @@ def health_text() -> str:
     if memory["alert"]:
         detail = str(memory["alert"].get("last_error") or "maintenance made no progress")
         lines.append(f"❌ Memory summaries: parked — {detail[:300]}")
-        lines.append("   Raw conversation is still being saved. Fix the API/key problem, then use /retrymemory.")
+        lines.append(
+            "   Raw conversation is still being saved. Rerun setup to replace the OpenAI key if needed, then use /retrymemory."
+        )
     elif memory["pending"]:
         detail = str(memory_health.get("detail") or "background work is queued")
         worker = "worker running" if memory["worker_running"] else "waiting for retry worker"
@@ -2152,7 +2203,9 @@ def health_text() -> str:
     transcription = component_health("transcription")
     if transcription.get("status") == "error":
         lines.append(f"❌ Voice transcription: {transcription.get('detail') or 'unavailable'}")
-        lines.append("   Text messages still work. Check the OpenAI API key/billing and resend the voice message.")
+        lines.append(
+            "   Text messages still work. Check API billing or rerun setup to replace the OpenAI key, then resend the voice message."
+        )
     elif transcription.get("status") == "ok":
         lines.append("✅ Voice transcription: working")
     else:
@@ -2163,6 +2216,7 @@ def health_text() -> str:
         lines.append("ℹ️ Email notifications: disabled")
     elif email.get("status") == "error":
         lines.append(f"❌ Email notifications: {email.get('detail') or 'Gmail IMAP polling failed'}")
+        lines.append(f"   The bridge keeps retrying. Repair only the affected setting by rerunning: {setup_repair_command()}")
     elif email.get("status") == "ok":
         lines.append("✅ Email notifications: read-only Gmail IMAP polling works")
     else:
@@ -2173,8 +2227,10 @@ def health_text() -> str:
         lines.append("ℹ️ Calendar context: disabled")
     elif isinstance(calendar_health, dict) and calendar_health.get("status") == "error":
         lines.append(f"❌ Calendar context: {calendar_health.get('detail') or 'private iCal retrieval failed'}")
+        lines.append(f"   Rerun setup to keep working values and replace the private iCal URL: {setup_repair_command()}")
     elif isinstance(calendar_health, dict) and calendar_health.get("status") == "warning":
         lines.append(f"⚠️ Calendar context: {calendar_health.get('detail') or 'using a cached calendar feed'}")
+        lines.append("   Recent cached calendar data remains available while the plugin retries.")
     elif isinstance(calendar_health, dict) and calendar_health.get("status") == "ok":
         lines.append("✅ Calendar context: private iCal retrieval works")
     else:
@@ -2185,6 +2241,35 @@ def health_text() -> str:
         lines.append(f"⚠️ Last update: failed — {str(update_state.get('error') or 'unknown error')[:240]}")
     else:
         lines.append("✅ Runtime updates: no unresolved failure")
+
+    if not bridge_config.get("enable_google_apps"):
+        lines.append("ℹ️ Official Gmail/Calendar apps: disabled")
+    elif google_apps_error:
+        lines.append(f"⚠️ Official Gmail/Calendar apps: could not check — {google_apps_error[:240]}")
+    elif google_apps is None:
+        lines.append("⚠️ Official Gmail/Calendar apps: connection status was not checked")
+    else:
+        gmail = find_google_app(google_apps, "gmail")
+        calendar_app = find_google_app(google_apps, "calendar")
+        if google_app_is_connected(gmail):
+            lines.append("✅ Official Gmail app: connected and accessible")
+        else:
+            lines.append("❌ Official Gmail app: not connected or inaccessible — run codex, enter /apps, and reconnect Gmail")
+        if google_app_is_connected(calendar_app):
+            lines.append("✅ Official Google Calendar app: connected and accessible")
+        else:
+            lines.append(
+                "❌ Official Google Calendar app: not connected or inaccessible — run codex, enter /apps, and reconnect Google Calendar"
+            )
+
+    if any(line.startswith(("❌", "⚠️")) for line in lines):
+        lines.extend(
+            [
+                "",
+                "Saved working settings, pairing, allowlists, and memory history are preserved when setup is rerun.",
+                f"Setup/repair command: {setup_repair_command()}",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -2206,6 +2291,93 @@ def retry_memory_maintenance() -> tuple[bool, str]:
     if proc.returncode != 0:
         return False, (proc.stderr or proc.stdout or "memory retry failed").strip()
     return True, "Memory maintenance retry started. Use /health to check its progress."
+
+
+def _component_alert_transition(
+    notifications: dict[str, Any],
+    *,
+    key: str,
+    enabled: bool,
+    health: dict[str, Any],
+    problem_statuses: set[str],
+    problem_message: Callable[[str, str], str],
+    recovery_message: str,
+) -> list[str]:
+    fingerprint_key = f"{key}_fingerprint"
+    active_key = f"{key}_active"
+    if not enabled:
+        notifications.pop(fingerprint_key, None)
+        notifications.pop(active_key, None)
+        return []
+
+    status = str(health.get("status") or "").strip().lower()
+    detail = str(health.get("detail") or "").strip()
+    if status in problem_statuses:
+        fingerprint = f"{status}|{detail}"
+        if notifications.get(fingerprint_key) == fingerprint:
+            return []
+        notifications[fingerprint_key] = fingerprint
+        notifications[active_key] = True
+        return [problem_message(status, detail)]
+
+    if status == "ok" and notifications.get(active_key):
+        notifications[active_key] = False
+        notifications.pop(fingerprint_key, None)
+        return [recovery_message]
+    return []
+
+
+def google_background_alert_messages(
+    notifications: dict[str, Any],
+    bridge_config: dict[str, Any],
+    memory_config: dict[str, Any],
+    email_health: dict[str, Any],
+    calendar_health: dict[str, Any],
+) -> list[str]:
+    repair = setup_repair_command()
+    messages = _component_alert_transition(
+        notifications,
+        key="email",
+        enabled=bool(bridge_config.get("enable_email_notifications")),
+        health=email_health,
+        problem_statuses={"error"},
+        problem_message=lambda _status, detail: (
+            "Proactive Gmail notifications stopped working.\n"
+            f"Reason: {(detail or 'Gmail IMAP polling failed')[:500]}\n"
+            "The bridge will keep retrying and will not advance its email checkpoint. "
+            "Rerun setup, keep every working value, and replace only the Gmail address or app password if needed:\n"
+            f"{repair}\n"
+            "Use /health for the latest status."
+        ),
+        recovery_message="Proactive Gmail notifications are working again. Any queued unread notices will continue draining normally.",
+    )
+
+    def calendar_problem(status: str, detail: str) -> str:
+        if status == "warning":
+            heading = "Calendar context is temporarily degraded; recent cached data is still being used when available."
+        else:
+            heading = "Calendar context is unavailable, so upcoming events may be absent from Codex memory."
+        return (
+            f"{heading}\n"
+            f"Reason: {(detail or 'private iCal retrieval failed')[:500]}\n"
+            "The plugin will keep retrying. If the private calendar address changed, rerun setup, keep every working value, "
+            "and replace only the iCal URL:\n"
+            f"{repair}\n"
+            "Use /health for the latest status."
+        )
+
+    messages.extend(
+        _component_alert_transition(
+            notifications,
+            key="calendar",
+            enabled=bool(memory_config.get("enable_calendar")),
+            health=calendar_health,
+            problem_statuses={"warning", "error"},
+            problem_message=calendar_problem,
+            recovery_message="Private calendar context is working again and the next memory snapshot will use fresh events.",
+        )
+    )
+    return messages
 
 
 def start_health_alert_loop(token: str, config: dict[str, Any]) -> None:
@@ -2258,6 +2430,26 @@ def start_health_alert_loop(token: str, config: dict[str, Any]) -> None:
                     send_message(token, owner_chat_id, "Long-term memory summaries are working again.")
                     notifications["memory_alert_active"] = False
                     notifications["memory_error_active"] = False
+                    save_json(HEALTH_NOTIFICATION_FILE, notifications)
+
+                bridge_config = load_json(CONFIG_FILE, {})
+                bridge_config = bridge_config if isinstance(bridge_config, dict) else {}
+                memory_config = load_json(MEMORY_STATE_DIR / "config.json", {})
+                memory_config = memory_config if isinstance(memory_config, dict) else {}
+                email_health = component_health("email")
+                calendar_health = load_json(MEMORY_STATE_DIR / "calendar_health.json", {})
+                calendar_health = calendar_health if isinstance(calendar_health, dict) else {}
+                google_notification_state_before = json.dumps(notifications, sort_keys=True)
+                google_messages = google_background_alert_messages(
+                    notifications,
+                    bridge_config,
+                    memory_config,
+                    email_health,
+                    calendar_health,
+                )
+                for message in google_messages:
+                    send_message(token, owner_chat_id, message)
+                if google_messages or json.dumps(notifications, sort_keys=True) != google_notification_state_before:
                     save_json(HEALTH_NOTIFICATION_FILE, notifications)
             except Exception as exc:
                 print(f"health alert loop failed: {exc}", file=sys.stderr)
@@ -2455,10 +2647,20 @@ def main() -> None:
                     PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
                 if command == "/health":
+                    google_apps = None
+                    google_apps_error = ""
+                    if config.get("enable_google_apps"):
+                        try:
+                            google_apps = codex.list_apps()
+                        except Exception as exc:
+                            google_apps_error = f"{type(exc).__name__}: {exc}"
                     send_message(
                         str(token),
                         chat_id,
-                        health_text(),
+                        health_text(
+                            google_apps=google_apps,
+                            google_apps_error=google_apps_error,
+                        ),
                         message.get("message_id"),
                         access=access,
                     )

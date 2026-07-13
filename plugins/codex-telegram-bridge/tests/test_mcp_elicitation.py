@@ -104,6 +104,25 @@ class TelegramTimeEnvelopeTests(unittest.TestCase):
 
 
 class GoogleAppOnboardingTests(unittest.TestCase):
+    def test_live_bridge_lists_all_codex_app_pages(self):
+        bridge = load_bridge_module()
+        client = object.__new__(bridge.CodexAppServerClient)
+        client.request = mock.Mock(
+            side_effect=[
+                {
+                    "data": [{"id": "gmail-new", "name": "Gmail"}],
+                    "nextCursor": "page-2",
+                },
+                {
+                    "data": [{"id": "calendar-new", "displayName": "Google Calendar"}],
+                },
+            ]
+        )
+        apps = client.list_apps()
+        self.assertEqual(set(apps), {"gmail-new", "calendar-new"})
+        self.assertEqual(client.request.call_count, 2)
+        self.assertEqual(client.request.call_args_list[1].args[1]["cursor"], "page-2")
+
     def test_google_app_requires_enabled_and_accessible(self):
         operator = load_operator_module()
         connected, detail = operator.google_app_connection_status(
@@ -846,6 +865,113 @@ class HealthVisibilityTests(unittest.TestCase):
             self.assertNotIn("old IMAP error", text)
             self.assertNotIn("old calendar error", text)
             self.assertEqual(compact, "Health: OK")
+
+    def test_google_background_failures_alert_once_and_recovery_alerts_once(self):
+        bridge = load_bridge_module()
+        notifications = {}
+        bridge_config = {"enable_email_notifications": True}
+        memory_config = {"enable_calendar": True}
+        email_error = {"status": "error", "detail": "authentication failed"}
+        calendar_warning = {"status": "warning", "detail": "using cached feed"}
+
+        first = bridge.google_background_alert_messages(
+            notifications,
+            bridge_config,
+            memory_config,
+            email_error,
+            calendar_warning,
+        )
+        second = bridge.google_background_alert_messages(
+            notifications,
+            bridge_config,
+            memory_config,
+            email_error,
+            calendar_warning,
+        )
+        recovered = bridge.google_background_alert_messages(
+            notifications,
+            bridge_config,
+            memory_config,
+            {"status": "ok", "detail": "poll succeeded"},
+            {"status": "ok", "detail": "fresh feed"},
+        )
+        repeated_recovery = bridge.google_background_alert_messages(
+            notifications,
+            bridge_config,
+            memory_config,
+            {"status": "ok"},
+            {"status": "ok"},
+        )
+
+        self.assertEqual(len(first), 2)
+        self.assertIn("will not advance its email checkpoint", first[0])
+        self.assertIn("cached data", first[1])
+        self.assertIn("setup.py", first[0])
+        self.assertEqual(second, [])
+        self.assertEqual(len(recovered), 2)
+        self.assertIn("working again", recovered[0])
+        self.assertIn("working again", recovered[1])
+        self.assertEqual(repeated_recovery, [])
+
+    def test_disabling_background_feature_clears_active_alert_without_false_recovery(self):
+        bridge = load_bridge_module()
+        notifications = {
+            "email_active": True,
+            "email_fingerprint": "error|bad password",
+            "calendar_active": True,
+            "calendar_fingerprint": "error|bad URL",
+        }
+        messages = bridge.google_background_alert_messages(
+            notifications,
+            {"enable_email_notifications": False},
+            {"enable_calendar": False},
+            {"status": "ok"},
+            {"status": "ok"},
+        )
+        self.assertEqual(messages, [])
+        self.assertNotIn("email_active", notifications)
+        self.assertNotIn("calendar_active", notifications)
+
+    def test_health_checks_official_google_app_access_and_gives_repair_path(self):
+        bridge = load_bridge_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            telegram_config = root / "telegram-config.json"
+            memory_dir = root / "memory"
+            memory_dir.mkdir()
+            bridge.save_json(
+                telegram_config,
+                {"enable_google_apps": True, "enable_email_notifications": False},
+            )
+            bridge.save_json(memory_dir / "config.json", {"enable_calendar": False})
+            apps = {
+                "new-gmail-id": {
+                    "id": "new-gmail-id",
+                    "name": "Gmail",
+                    "isEnabled": True,
+                    "isAccessible": False,
+                },
+                "new-calendar-id": {
+                    "id": "new-calendar-id",
+                    "displayName": "Google Calendar",
+                    "isEnabled": True,
+                    "isAccessible": True,
+                },
+            }
+            with mock.patch.object(bridge, "CONFIG_FILE", telegram_config), mock.patch.object(
+                bridge, "MEMORY_STATE_DIR", memory_dir
+            ), mock.patch.object(bridge, "HEALTH_STATE_FILE", root / "health.json"), mock.patch.object(
+                bridge, "MEMORY_HEALTH_FILE", memory_dir / "health.json"
+            ), mock.patch.object(bridge, "MEMORY_ALERT_FILE", memory_dir / "alert.json"), mock.patch.object(
+                bridge, "MEMORY_TASK_FILE", memory_dir / "task.json"
+            ), mock.patch.object(bridge, "MEMORY_PID_FILE", memory_dir / "worker.pid"), mock.patch.object(
+                bridge, "UPDATE_STATE_FILE", root / "update.json"
+            ):
+                text = bridge.health_text(google_apps=apps)
+        self.assertIn("Official Gmail app: not connected", text)
+        self.assertIn("Official Google Calendar app: connected", text)
+        self.assertIn("Saved working settings", text)
+        self.assertIn("setup.py", text)
 
     def test_non_usage_codex_failure_is_saved_and_parked(self):
         bridge = load_bridge_module()

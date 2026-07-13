@@ -1,6 +1,6 @@
 {
   "name": "codex-telegram-bridge",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Telegram bridge for Codex backed by codex app-server.",
   "author": {
     "name": "Perma Evidence",

@@ -103,9 +103,22 @@ python3 /absolute/path/to/repo/scripts/setup.py
 
 It validates credentials and model availability, detects and stores the user's IANA timezone, can install the official Gmail and Google Calendar plugins without a custom Google Cloud project, optionally configures read-only IMAP and iCal background awareness, installs a permanent versioned runtime, writes this bridge config, requires the OpenAI key for voice transcription, installs a per-user macOS launchd or Linux systemd service, guides pairing, and runs `bridge.py doctor`.
 
+Rerun the same wizard to repair or change credentials. It identifies configured
+secrets without displaying them and defaults to keeping every existing value;
+choose **No** only for the Telegram token, OpenAI API key, Gmail app password,
+or other setting that should be replaced. Setup preserves pairing, allowlists,
+history, and unrelated configuration, validates replacements before activation,
+and rolls back if the final health checks fail.
+
 Every Telegram channel envelope keeps Telegram's original Unix `ts` and adds a readable `sent_at` in the configured timezone. This remains distinct from the memory hook's fresh `[now: ...]` prompt-processing time, which is useful when a saved turn is resumed later.
 
 When Google integration is selected, setup installs both curated plugins automatically. Google authorization is a separate one-time step: run `codex`, enter `/apps`, connect Gmail and Google Calendar through the browser prompts, exit with `/quit`, and rerun `bridge.py doctor`. The doctor requires both apps to be enabled and accessible; it does not treat installation alone as a successful connection. Gmail IMAP notifications and private-iCal calendar context are optional background features and are not required for the official apps.
+
+When proactive Gmail IMAP or private-iCal access fails, the owner receives one
+Telegram warning with the reason and the installed setup command. The bridge
+continues retrying and sends a recovery notice when access returns. `/health`
+shows the current IMAP/iCal state and checks whether the official Gmail and
+Google Calendar apps remain connected and accessible through Codex.
 
 Manual setup:
 

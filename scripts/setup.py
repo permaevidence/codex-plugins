@@ -125,7 +125,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    existing_telegram_config = load_json(TELEGRAM_CONFIG)
+    existing_memory_config = load_json(MEMORY_CONFIG)
+    existing_installation = bool(
+        existing_telegram_config
+        or existing_memory_config
+        or TELEGRAM_ENV.exists()
+        or MEMORY_ENV.exists()
+    )
     print("Perma Evidence Codex plugin setup")
+    if existing_installation:
+        print("Existing configuration found. Press Enter to keep each working setting, or choose Replace when needed.")
     print()
     print("This wizard will:")
     print("- install the local Codex plugins from this repo")
@@ -141,11 +151,15 @@ def main() -> int:
 
     require_codex()
 
-    project_dir = resolve_project_dir(args.project_dir)
+    project_dir = resolve_project_dir(
+        args.project_dir,
+        str(existing_telegram_config.get("default_cwd") or ""),
+    )
     agents_md_path = project_dir / "AGENTS.md"
+    existing_telegram_token = read_env_value(TELEGRAM_ENV, "TELEGRAM_BOT_TOKEN")
     telegram_token = resolve_secret(
         supplied=args.telegram_token,
-        existing=read_env_value(TELEGRAM_ENV, "TELEGRAM_BOT_TOKEN"),
+        existing=existing_telegram_token,
         label="Telegram bot token from BotFather",
         required_message="A Telegram bot token is required.",
     )
@@ -153,9 +167,12 @@ def main() -> int:
         if not prompt_yes_no("That token does not look like a normal BotFather token. Continue anyway?", default=False):
             raise SystemExit("Setup cancelled.")
 
+    memory_openai_key = read_env_value(MEMORY_ENV, "OPENAI_API_KEY")
+    telegram_openai_key = read_env_value(TELEGRAM_ENV, "OPENAI_API_KEY")
+    existing_openai_key = memory_openai_key or telegram_openai_key
     openai_key = resolve_secret(
         supplied=args.openai_api_key,
-        existing=read_env_value(MEMORY_ENV, "OPENAI_API_KEY") or read_env_value(TELEGRAM_ENV, "OPENAI_API_KEY"),
+        existing=existing_openai_key,
         label="OpenAI API key",
         required_message="An OpenAI API key is required for memory summaries and voice transcription.",
     )
@@ -163,8 +180,6 @@ def main() -> int:
         if not prompt_yes_no("That OpenAI key does not start with 'sk-'. Continue anyway?", default=False):
             raise SystemExit("Setup cancelled.")
 
-    existing_telegram_config = load_json(TELEGRAM_CONFIG)
-    existing_memory_config = load_json(MEMORY_CONFIG)
     timezone_name = resolve_timezone_name(
         args.timezone,
         str(existing_memory_config.get("timezone") or existing_telegram_config.get("timezone") or ""),
@@ -176,10 +191,17 @@ def main() -> int:
         str(existing_telegram_config.get("effort") or "") or None,
     )
 
-    sandbox_mode = args.sandbox_mode or choose_sandbox_mode()
-    network_access = resolve_network_access(args.network_access, sandbox_mode)
+    sandbox_mode = args.sandbox_mode or choose_sandbox_mode(
+        str(existing_telegram_config.get("sandbox_mode") or "")
+    )
+    network_access = resolve_network_access(
+        args.network_access,
+        sandbox_mode,
+        existing_telegram_config.get("network_access"),
+    )
     start_bridge = resolve_start_bridge(args.start_bridge)
-    pair_now = start_bridge and resolve_pair_now(args.pair_now)
+    already_paired = existing_allowed_chat()
+    pair_now = start_bridge and not already_paired and resolve_pair_now(args.pair_now)
     google_setup = resolve_google_setup(args)
 
     print()
@@ -208,8 +230,20 @@ def main() -> int:
         print("Warning: command-line secrets can be visible in shell history and process listings.")
 
     if not args.skip_credential_checks:
-        validate_telegram_token(telegram_token)
-        validate_openai_key(openai_key)
+        telegram_changed = not existing_telegram_token or telegram_token != existing_telegram_token
+        openai_changed = (
+            not existing_openai_key
+            or openai_key != existing_openai_key
+            or (memory_openai_key and telegram_openai_key and memory_openai_key != telegram_openai_key)
+        )
+        if telegram_changed:
+            validate_telegram_token(telegram_token)
+        else:
+            print("Keeping the existing Telegram bot token; the final doctor check will verify it.")
+        if openai_changed:
+            validate_openai_key(openai_key)
+        else:
+            print("Keeping the existing OpenAI API key; the final doctor check will verify memory and transcription.")
         validate_google_background_access(google_setup, timezone_name)
 
     backup_dir = create_setup_backup(agents_md_path)
@@ -304,6 +338,10 @@ def main() -> int:
     print(f"   python3 '{installed_root}/plugins/codex-telegram-bridge/scripts/access.py' pair <code>")
     next_step += 1
     print(f"{next_step}. Send /newsession in Telegram only after the preceding setup steps are complete.")
+    print()
+    print("To change a credential or repair an integration later, rerun:")
+    print(f'python3 "{installed_root}/scripts/setup.py"')
+    print("The wizard will keep every saved working value by default.")
     return 0
 
 
@@ -467,11 +505,11 @@ def openai_transcription_probe_body() -> tuple[bytes, str]:
     return bytes(body), boundary
 
 
-def resolve_project_dir(value: str | None) -> Path:
-    default = str(Path.home())
+def resolve_project_dir(value: str | None, existing: str = "") -> Path:
+    default = existing.strip() or str(Path.home())
     while True:
         raw = value or prompt(
-            "Codex starting folder (press Enter for your home folder; not a permission limit in autonomous mode)",
+            "Codex starting folder (press Enter to keep the shown folder; not a permission limit in autonomous mode)",
             default=default,
         )
         path = Path(raw).expanduser().resolve()
@@ -536,8 +574,10 @@ def resolve_secret(*, supplied: str | None, existing: str, label: str, required_
     if supplied:
         return supplied.strip()
     if existing:
-        if prompt_yes_no(f"Use existing {label} already found on disk?", default=True):
+        print(f"{label}: configured (the saved value is hidden).")
+        if prompt_yes_no(f"Keep the existing {label}? Choose No to replace it", default=True):
             return existing
+        print(f"Enter the replacement {label}. The existing value remains active unless setup completes successfully.")
     while True:
         value = getpass.getpass(f"{label}: ").strip()
         if value:
@@ -545,12 +585,13 @@ def resolve_secret(*, supplied: str | None, existing: str, label: str, required_
         print(required_message)
 
 
-def choose_sandbox_mode() -> str:
+def choose_sandbox_mode(existing: str = "") -> str:
     print("Choose Telegram-launched Codex permissions:")
     print("1. dangerFullAccess (recommended for a dedicated remote-control machine): broad local filesystem access")
     print("2. workspaceWrite: narrower mode; can edit only the chosen starting folder")
+    default = "2" if existing == "workspaceWrite" else "1"
     while True:
-        choice = prompt("Sandbox mode", default="1")
+        choice = prompt("Sandbox mode", default=default)
         if choice in {"1", "dangerFullAccess", "dangerfullaccess"}:
             return "dangerFullAccess"
         if choice in {"2", "workspaceWrite", "workspacewrite"}:
@@ -558,10 +599,10 @@ def choose_sandbox_mode() -> str:
         print("Choose 1 or 2.")
 
 
-def resolve_network_access(value: str | None, sandbox_mode: str) -> bool:
+def resolve_network_access(value: str | None, sandbox_mode: str, existing: object = None) -> bool:
     if value:
         return value == "yes"
-    default = sandbox_mode == "dangerFullAccess"
+    default = bool(existing) if isinstance(existing, bool) else sandbox_mode == "dangerFullAccess"
     return prompt_yes_no("Allow network access for Telegram-launched Codex sessions?", default=default)
 
 

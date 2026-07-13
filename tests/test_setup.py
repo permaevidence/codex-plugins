@@ -110,6 +110,50 @@ class SetupWizardTests(unittest.TestCase):
             )
             self.assertEqual(setup_wizard.read_env_value(path, "OPENAI_API_KEY"), "sk-test")
 
+    def test_existing_secret_can_be_kept_without_revealing_it(self) -> None:
+        output = io.StringIO()
+        with mock.patch.object(setup_wizard, "prompt_yes_no", return_value=True), mock.patch.object(
+            setup_wizard.getpass, "getpass"
+        ) as secret_prompt, contextlib.redirect_stdout(output):
+            value = setup_wizard.resolve_secret(
+                supplied=None,
+                existing="super-secret-value",
+                label="OpenAI API key",
+                required_message="required",
+            )
+        self.assertEqual(value, "super-secret-value")
+        secret_prompt.assert_not_called()
+        self.assertNotIn("super-secret-value", output.getvalue())
+        self.assertIn("configured", output.getvalue())
+
+    def test_existing_secret_can_be_replaced_without_overwriting_early(self) -> None:
+        with mock.patch.object(setup_wizard, "prompt_yes_no", return_value=False), mock.patch.object(
+            setup_wizard.getpass, "getpass", return_value="replacement"
+        ):
+            value = setup_wizard.resolve_secret(
+                supplied=None,
+                existing="old-secret",
+                label="Telegram bot token",
+                required_message="required",
+            )
+        self.assertEqual(value, "replacement")
+
+    def test_rerun_defaults_preserve_existing_non_secret_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            setup_wizard, "prompt", side_effect=lambda _label, default="": default
+        ), mock.patch.object(setup_wizard, "prompt_yes_no", side_effect=lambda _label, default=False: default):
+            self.assertEqual(
+                setup_wizard.resolve_project_dir(None, tmp),
+                Path(tmp).resolve(),
+            )
+            self.assertEqual(
+                setup_wizard.choose_sandbox_mode("workspaceWrite"),
+                "workspaceWrite",
+            )
+            self.assertFalse(
+                setup_wizard.resolve_network_access(None, "dangerFullAccess", False)
+            )
+
     def test_recommended_sandbox_mode_is_danger_full_access(self) -> None:
         with mock.patch.object(setup_wizard, "prompt", return_value="1"), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(setup_wizard.choose_sandbox_mode(), "dangerFullAccess")

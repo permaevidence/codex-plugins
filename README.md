@@ -77,6 +77,15 @@ The easiest path is the interactive terminal wizard:
 python3 /absolute/path/to/repo/scripts/setup.py
 ```
 
+The same command is also the normal repair and reconfiguration path. On a
+rerun, the wizard finds the existing installation and defaults to keeping every
+working value. Saved secrets are never displayed: choose **Yes** to keep one,
+or **No** to enter its replacement. Unchanged pairing, allowlists, conversation
+history, memory archives, hooks, model selection, permissions, Google settings,
+and other configuration remain in place. New credentials are validated before
+activation, the final doctor verifies the complete system, and setup restores
+its backup if anything fails.
+
 It asks for:
 
 - the starting folder for Telegram-launched Codex sessions; this is not a permission boundary in autonomous mode
@@ -149,6 +158,17 @@ Optional proactive awareness is deliberately separate and read-only:
   format**. The memory plugin expands recurring events, exclusions, and moved
   instances, and may use a recent permission-restricted cache during
   a temporary feed outage. All calendar writes go through the official app.
+
+IMAP and iCal failures are recorded in `/health`. The bridge sends the owner a
+single Telegram warning for each distinct failure and a recovery message when
+the integration works again. It continues retrying automatically; IMAP does
+not advance its checkpoint on failure, and calendar context uses its bounded
+last-good cache when possible. Every warning includes the installed
+`scripts/setup.py` command so a nontechnical user can rerun setup, keep all
+working values, and replace only the affected app password, iCal URL, Telegram
+token, or OpenAI API key. `/health` also checks whether the official Gmail and
+Google Calendar apps are connected and accessible, with `/apps` reconnection
+instructions when needed.
 
 The wizard stores app passwords and private feed URLs only in mode-`600` local
 state. They are never written to `AGENTS.md`, normal plugin configuration,
