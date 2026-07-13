@@ -19,6 +19,12 @@ assert spec and spec.loader
 setup_wizard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(setup_wizard)
 
+PLATFORM_PATH = REPO_ROOT / "scripts" / "platform_support.py"
+platform_spec = importlib.util.spec_from_file_location("platform_support_test", PLATFORM_PATH)
+assert platform_spec and platform_spec.loader
+platform_support = importlib.util.module_from_spec(platform_spec)
+platform_spec.loader.exec_module(platform_support)
+
 RUNTIME_PATH = REPO_ROOT / "scripts" / "runtime_install.py"
 runtime_spec = importlib.util.spec_from_file_location("runtime_install_test", RUNTIME_PATH)
 assert runtime_spec and runtime_spec.loader
@@ -137,8 +143,18 @@ class SetupWizardTests(unittest.TestCase):
             self.assertIn(setup_wizard.LOCAL_CAPABILITIES_BEGIN, second)
             self.assertIn("Telegram Reminders", second)
             self.assertIn("scheduled_reminders.json", second)
-            self.assertIn("Whole-Mac Codex Control", second)
+            self.assertIn("Whole-Computer Codex Control", second)
             self.assertIn("Communication Trust", second)
+
+    def test_linux_capabilities_block_uses_linux_language(self) -> None:
+        with mock.patch.object(setup_wizard, "platform_family", return_value="linux"), mock.patch.object(
+            setup_wizard, "platform_display_name", return_value="Linux computer"
+        ):
+            block = setup_wizard.build_local_capabilities_block()
+        self.assertIn("Whole-Computer Codex Control", block)
+        self.assertIn("trusted, dedicated Linux computer", block)
+        self.assertIn("local Linux user", block)
+        self.assertNotIn("Whole-Mac", block)
 
     def test_hook_trust_is_added_and_updated_without_duplicates(self) -> None:
         original = "[features]\nhooks = true\n\n[hooks.state]\n"
@@ -314,6 +330,42 @@ class RuntimeInstallTests(unittest.TestCase):
             self.assertFalse(installed[3].exists(), "unreferenced runtime should be pruned")
             self.assertTrue(installed[4].exists())
 
+    def test_runtime_prune_preserves_linux_systemd_references(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self.make_source(root)
+            home = root / "home"
+            app = home / ".local/share/permaevidence-codex"
+            unit_dir = home / ".config/systemd/user"
+            unit_dir.mkdir(parents=True)
+            with mock.patch.object(runtime_install, "APP_SUPPORT_ROOT", app), mock.patch.object(
+                runtime_install, "VERSIONS_DIR", app / "versions"
+            ), mock.patch.object(runtime_install, "CURRENT_LINK", app / "current"), mock.patch.object(
+                runtime_install.Path, "home", return_value=home
+            ), mock.patch.object(
+                runtime_install, "platform_family", return_value="linux"
+            ), mock.patch.object(
+                runtime_install, "systemd_user_dir", return_value=unit_dir
+            ):
+                installed = [
+                    runtime_install.install_runtime(source, cachebuster=name).resolve()
+                    for name in ("systemd-ref", "victim", "spare", "active")
+                ]
+                for index, path in enumerate(installed, start=1):
+                    os.utime(path, (index, index))
+                (unit_dir / "bridge.service").write_text(
+                    f"ExecStart=python3 {installed[0]}/bridge.py\n", encoding="utf-8"
+                )
+                with mock.patch.object(
+                    runtime_install.subprocess,
+                    "run",
+                    return_value=mock.Mock(returncode=0, stdout=""),
+                ):
+                    runtime_install.prune_old_versions(active=installed[-1])
+            self.assertTrue(installed[0].exists())
+            self.assertFalse(installed[1].exists())
+            self.assertTrue(installed[-1].exists())
+
     def test_deferred_update_is_one_shot_detached_process(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -326,6 +378,46 @@ class RuntimeInstallTests(unittest.TestCase):
             self.assertNotIn("launchctl", command)
             self.assertTrue(popen.call_args.kwargs["start_new_session"])
             self.assertEqual(log, home / ".codex/telegram-bridge/update-handoff.log")
+
+
+class PlatformSupportTests(unittest.TestCase):
+    def test_runtime_paths_follow_platform_conventions(self) -> None:
+        home = Path("/home/alice")
+        self.assertEqual(
+            platform_support.runtime_data_root(home=home, platform="darwin"),
+            home / "Library/Application Support/PermaEvidenceCodex",
+        )
+        self.assertEqual(
+            platform_support.runtime_data_root(home=home, platform="linux", environ={}),
+            home / ".local/share/permaevidence-codex",
+        )
+        self.assertEqual(
+            platform_support.runtime_data_root(
+                home=home,
+                platform="linux",
+                environ={"XDG_DATA_HOME": "/srv/alice/data"},
+            ),
+            Path("/srv/alice/data/permaevidence-codex"),
+        )
+        self.assertEqual(
+            platform_support.runtime_data_root(
+                home=home,
+                platform="linux",
+                environ={"XDG_DATA_HOME": "relative/data"},
+            ),
+            home / ".local/share/permaevidence-codex",
+        )
+
+    def test_linux_service_path_honors_xdg_config_home(self) -> None:
+        path = platform_support.service_definition_path(
+            home=Path("/home/alice"),
+            platform="linux",
+            environ={"XDG_CONFIG_HOME": "/srv/alice/config"},
+        )
+        self.assertEqual(
+            path,
+            Path("/srv/alice/config/systemd/user/permaevidence-codex-telegram-bridge.service"),
+        )
 
 
 

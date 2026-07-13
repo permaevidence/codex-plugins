@@ -90,7 +90,7 @@ For a first-time setup, prefer the repo-level wizard:
 python3 /absolute/path/to/repo/scripts/setup.py
 ```
 
-It validates credentials and model availability, installs a permanent versioned runtime, writes this bridge config, requires the OpenAI key for voice transcription, installs a per-user LaunchAgent, guides pairing, and runs `bridge.py doctor`.
+It validates credentials and model availability, installs a permanent versioned runtime, writes this bridge config, requires the OpenAI key for voice transcription, installs a per-user macOS launchd or Linux systemd service, guides pairing, and runs `bridge.py doctor`.
 
 Manual setup:
 
@@ -246,7 +246,7 @@ This matters because:
 
 - reminder creation is file-based and expects exact JSON in `~/.codex/telegram-bridge/scheduled_reminders.json`
 - Telegram files and the active Telegram chat id live in bridge state files
-- the recommended setup gives Codex whole-Mac access through `dangerFullAccess`
+- the recommended setup gives Codex whole-computer access through `dangerFullAccess`
 - `gws` availability is machine-specific, so Codex should be told which Google account and services are actually configured
 - unread email summaries, web pages, and documents are external input and should not be treated as official user instructions
 
@@ -255,12 +255,12 @@ If you are doing manual setup or auditing the wizard output, these are the recom
 ~~~md
 ## Local Capabilities
 
-### Whole-Mac Codex Control
+### Whole-Computer Codex Control
 
-- This setup is intended for a trusted, dedicated Mac controlled remotely through Telegram.
+- This setup is intended for a trusted, dedicated computer controlled remotely through Telegram.
 - Telegram-launched Codex sessions normally use `dangerFullAccess`, `network_access = true`, and `approval_policy = "never"`.
 - In that mode, the configured `default_cwd` is only Codex's starting folder and the location for `AGENTS.md`; it is not a permission boundary.
-- Codex may read and modify files, run commands, use reachable local credentials, and make network requests as the local macOS user.
+- Codex may read and modify files, run commands, use reachable local credentials, and make network requests as the local operating-system user.
 
 ### Telegram Bridge
 
@@ -358,10 +358,14 @@ If you are not using a dedicated machine, switch back to `workspaceWrite`, restr
 
 ## Running
 
-The normal installed path is:
+The normal installed path is platform-specific:
 
 ```bash
+# macOS
 BRIDGE="$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py"
+
+# Linux
+BRIDGE="${XDG_DATA_HOME:-$HOME/.local/share}/permaevidence-codex/current/plugins/codex-telegram-bridge/scripts/bridge.py"
 ```
 
 ```bash
@@ -380,7 +384,7 @@ python3 "$BRIDGE" doctor
 python3 "$BRIDGE" uninstall-service
 ```
 
-`install-service` writes `~/Library/LaunchAgents/com.permaevidence.codex-telegram-bridge.plist` with `RunAtLoad` and `KeepAlive`, then loads it. `bridge.py start` controls that LaunchAgent after installation. The underlying supervisor:
+On macOS, `install-service` writes `~/Library/LaunchAgents/com.permaevidence.codex-telegram-bridge.plist` and loads it with launchd. On Linux, it writes `${XDG_CONFIG_HOME:-~/.config}/systemd/user/permaevidence-codex-telegram-bridge.service`, enables the user service, and attempts to enable user lingering for startup before login. `bridge.py start` controls the appropriate service. The underlying supervisor:
 
 - it writes `.bridge-supervisor.pid` and `.bridge-child.pid` under `~/.codex/telegram-bridge/`
 - it cleans stale pid files on startup
@@ -389,7 +393,7 @@ python3 "$BRIDGE" uninstall-service
 
 Avoid launching `telegram_bridge.py` directly for normal use. Running the raw Python script alongside the supervisor can create duplicate Telegram long-pollers and produce `HTTP Error 409: Conflict` in `bridge.log`.
 
-For unattended use, prefer the installed LaunchAgent. If FileVault is enabled, a local unlock may still be required after a full reboot before per-user services can start.
+For unattended use, prefer the installed platform service. If FileVault is enabled, a local unlock may still be required after a Mac reboot. On Linux, if setup cannot enable user lingering automatically, run the `sudo loginctl enable-linger <user>` command it prints.
 
 If you need to run the supervisor directly under another process manager, the lower-level command is still available:
 

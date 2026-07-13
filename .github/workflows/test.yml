@@ -1,0 +1,41 @@
+name: Test plugins
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Compile Python sources
+        run: python3 -m compileall -q plugins scripts tests
+      - name: Test setup and runtime
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Test long-term memory
+        run: python3 -m unittest discover -s plugins/codex-long-term-memory/tests -p 'test_*.py'
+      - name: Test Telegram bridge
+        run: python3 -m unittest discover -s plugins/codex-telegram-bridge/tests -p 'test_*.py'
+      - name: Check bridge supervisor shell
+        run: bash -n plugins/codex-telegram-bridge/scripts/start_bridge.sh
+      - name: Validate Linux systemd unit
+        if: runner.os == 'Linux'
+        run: |
+          python3 - <<'PY' > /tmp/permaevidence-codex-telegram-bridge.service
+          import importlib.util
+          from pathlib import Path
+          path = Path("plugins/codex-telegram-bridge/scripts/bridge.py").resolve()
+          spec = importlib.util.spec_from_file_location("bridge_operator_ci", path)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          print(module.build_systemd_unit(bash="/usr/bin/bash", path="/usr/local/bin:/usr/bin:/bin"))
+          PY
+          systemd-analyze verify /tmp/permaevidence-codex-telegram-bridge.service

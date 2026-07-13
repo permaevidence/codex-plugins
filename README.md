@@ -7,28 +7,37 @@ Codex-native ports of two Claude Code workflows:
 
 These plugins are designed for a trusted, dedicated computer that you are comfortable leaving unattended and controlling remotely. The setup wizard therefore defaults to broad autonomous Codex permissions: `dangerFullAccess`, network access enabled, and no per-command approval prompts. Read the security notes before using that profile on any shared or sensitive machine.
 
-This repo is structured as a local Codex plugin marketplace so both plugins can be installed from one workspace. The setup wizard copies it into a permanent, versioned runtime under `~/Library/Application Support/PermaEvidenceCodex/`; the downloaded ZIP is only an installer and can be deleted afterward. The Telegram bridge runs as a companion per-user macOS LaunchAgent, while Codex plugin installation exposes its skills and MCP tools.
+This repo is structured as a local Codex plugin marketplace so both plugins can be installed from one workspace. The setup wizard copies it into a permanent, versioned runtime (`~/Library/Application Support/PermaEvidenceCodex/` on macOS or `${XDG_DATA_HOME:-~/.local/share}/permaevidence-codex/` on Linux); the downloaded ZIP is only an installer and can be deleted afterward. The Telegram bridge runs as a per-user launchd service on macOS or systemd service on Linux, while Codex plugin installation exposes its skills and MCP tools.
 
 ## Start Here: Fresh Install
 
 Requirements:
 
 - Codex CLI installed and logged in.
-- Python 3.
+- Python 3.9 or newer.
+- `bash` (included with normal macOS and Linux installations).
 - A local clone of this repository.
 - For Telegram: a Telegram bot token from BotFather.
 - `OPENAI_API_KEY` for high-quality memory summaries and Telegram voice transcription.
 - Optional: `ffmpeg` for Telegram voice notes.
 - Optional: `gws` if you want Gmail, Calendar, or Google Workspace context.
 
-This is the intended beginner path from a clean machine. In the recommended setup, Codex is allowed to control the whole Mac as your local user. The folder chosen during setup is only Codex's starting folder and the place where `AGENTS.md` memory instructions live; it is not a limit on what Codex can access.
+Supported operating systems:
 
-### Non-technical Mac install: exact steps
+- macOS with a per-user launchd service.
+- Linux distributions with a user-level systemd service. The bridge can also be started manually when systemd is unavailable, but unattended boot startup then belongs to the machine's own process manager.
+
+The test suite runs on both `macos-latest` and `ubuntu-latest` for every pushed change.
+
+This is the intended beginner path from a clean macOS or Linux machine. In the recommended setup, Codex is allowed to control the whole computer as your local user. The folder chosen during setup is only Codex's starting folder and the place where `AGENTS.md` memory instructions live; it is not a limit on what Codex can access.
+
+### Non-technical macOS/Linux install: exact steps
 
 1. Install Codex CLI, log in, create an OpenAI API key, and create a Telegram bot with `@BotFather` (`/newbot`).
 2. Open Terminal, paste this whole block, and press Enter:
 
 ```bash
+mkdir -p ~/Downloads
 cd ~/Downloads
 curl -L https://github.com/permaevidence/codex-plugins/archive/refs/heads/main.zip -o codex-plugins.zip
 rm -rf codex-plugins-main
@@ -45,7 +54,7 @@ python3 scripts/setup.py
 /newsession
 ```
 
-After that, you can talk to Codex from Telegram. You may delete `~/Downloads/codex-plugins-main` and `codex-plugins.zip`; the live runtime is in Application Support. This setup is intended for a dedicated Mac you trust Codex to control remotely.
+After that, you can talk to Codex from Telegram. You may delete `~/Downloads/codex-plugins-main` and `codex-plugins.zip`; the live runtime is in the platform data directory described above. This setup is intended for a dedicated computer you trust Codex to control remotely.
 
 The wizard makes real OpenAI summary and transcription requests, so a key
 without active API billing is rejected during setup. After installation, use
@@ -55,7 +64,7 @@ conversation continues to be saved if summarization pauses. After fixing a
 memory API problem, send `/retrymemory`. Interrupted Codex tasks remain saved
 and can be retried with `/resume`.
 
-The LaunchAgent starts the bridge automatically whenever this macOS user logs in and restarts it after crashes. If FileVault is enabled, someone may still need to unlock the Mac locally after a full reboot before user services can start.
+The installed user service starts the bridge automatically and restarts it after crashes. On Linux, setup attempts to enable systemd user lingering so a dedicated headless machine can start the bridge before login. If policy prevents that, setup prints the exact `sudo loginctl enable-linger` command to run. On a FileVault-protected Mac, someone may still need to unlock the Mac locally after a full reboot.
 
 ### Recommended: run the setup wizard
 
@@ -80,7 +89,7 @@ Then it:
 - installs both Codex plugins from this repo marketplace
 - runs the long-term-memory hook installer
 - configures memory to use `agents_md`
-- writes the `AGENTS.md` local-capabilities instructions Codex needs for Telegram, reminders, whole-Mac control, files, `gws`, and communication trust
+- writes platform-aware `AGENTS.md` local-capabilities instructions Codex needs for Telegram, reminders, whole-computer control, files, `gws`, and communication trust
 - refreshes the long-term-memory `AGENTS.md` block
 - writes `~/.codex/long-term-memory/.env`
 - writes `~/.codex/telegram-bridge/.env`
@@ -90,24 +99,32 @@ Then it:
 - functionally executes all four hooks, initializes the bundled MCP server, checks the live Telegram/OpenAI APIs, and verifies the bridge's app-server child
 - validates Codex login, the Telegram bot with `getMe`, and the OpenAI API key before modifying the installation
 - backs up existing Codex/plugin configuration
-- installs versioned runtime code in Application Support with plugin cachebusters
+- installs versioned runtime code in the platform data directory with plugin cachebusters
 - explicitly verifies and trusts the four memory hooks being installed
-- installs a `launchd` service for login/reboot recovery
+- installs a macOS launchd or Linux systemd user service for login/reboot recovery
 
 If you skip guided pairing, send a Telegram DM to your bot and approve the pairing code locally:
 
 ```bash
-python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/access.py" pair a1b2c3
+python3 /path/printed/by/setup/plugins/codex-telegram-bridge/scripts/access.py pair a1b2c3
 ```
 
 Then send `/newsession` from Telegram so Codex starts fresh with the installed plugins and refreshed `AGENTS.md` memory.
 
 ### Updating safely
 
-The permanent installation includes an updater. It resolves the requested Git ref to an immutable commit SHA, downloads that exact archive, runs the complete test suites before activation, installs it into a new version directory, applies Codex cachebusters, runs functional health checks, restarts the LaunchAgent, and rolls back to the previous runtime if activation fails:
+The permanent installation includes an updater. The normal nontechnical update path on both platforms is Telegram `/update`. It resolves the requested Git ref to an immutable commit SHA, downloads that exact archive, runs the complete test suites before activation, installs it into a new version directory, applies Codex cachebusters, runs functional health checks, restarts the platform service, and rolls back to the previous runtime if activation fails.
+
+Terminal fallback on macOS:
 
 ```bash
 python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/scripts/update.py"
+```
+
+Terminal fallback on Linux:
+
+```bash
+python3 "${XDG_DATA_HOME:-$HOME/.local/share}/permaevidence-codex/current/scripts/update.py"
 ```
 
 If an update must begin after the current Codex reply/process has exited, use
@@ -117,15 +134,20 @@ the updater's one-shot detached handoff:
 python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/scripts/update.py" --defer-seconds 45
 ```
 
-Do not use `launchctl submit` for one-shot updates. Launchd keeps submitted
-jobs alive and can rerun the updater indefinitely. The deferred updater above
-runs exactly once and is not registered as a persistent service.
+On Linux, use the corresponding runtime path:
+
+```bash
+python3 "${XDG_DATA_HOME:-$HOME/.local/share}/permaevidence-codex/current/scripts/update.py" --defer-seconds 45
+```
+
+Do not register the updater itself as a persistent launchd or systemd job. The
+deferred updater runs exactly once and is not registered as a service.
 
 The last three runtime versions are retained so rollback does not depend on the Downloads folder.
 
 ### Manual/developer setup reference
 
-If you prefer to do each step by hand, use the manual flow below. Replace `/absolute/path/to/repo` with the real path to the repo. Replace `/Users/your-name` with your Mac home folder.
+If you prefer to do each step by hand, use the manual flow below. Replace `/absolute/path/to/repo` with the real path to the repo and use the appropriate home folder for your operating system.
 
 ### 1. Clone the repo and install the Codex plugins
 
@@ -242,19 +264,21 @@ In `dangerFullAccess` mode, `default_cwd` is only Codex's starting folder. It do
 
 ### 6. Start the Telegram bridge
 
+The setup wizard prints the exact installed path. From the source checkout, the platform-neutral command is:
+
 ```bash
-python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py" install-service
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py install-service
 ```
 
 Useful bridge commands:
 
 ```bash
-python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py" status
-python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py" doctor
-python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py" logs -f
-python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py" stop
-python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py" start
-python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/plugins/codex-telegram-bridge/scripts/bridge.py" uninstall-service
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py status
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py doctor
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py logs -f
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py stop
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py start
+python3 /absolute/path/to/repo/plugins/codex-telegram-bridge/scripts/bridge.py uninstall-service
 ```
 
 ### 7. Pair your Telegram chat
@@ -291,12 +315,12 @@ The doctor check verifies the common trapdoors:
 - `agents_md` memory transport points at an `AGENTS.md` target.
 - The bridge supervisor and child process are running.
 - All four memory hooks are enabled and trusted.
-- The macOS LaunchAgent is installed and loaded.
+- The macOS LaunchAgent or Linux systemd user unit is installed and active.
 - The bridge child PID actually belongs to `telegram_bridge.py`.
 
 Send `/newsession` from Telegram after changing Codex, hook, plugin, MCP, or `AGENTS.md` memory settings.
 
-Use `bridge.py start`/`stop`/`restart` rather than launching `telegram_bridge.py` directly. The wrapper controls `launchd`, the singleton supervisor, pid files under `~/.codex/telegram-bridge/`, and duplicate-long-poller protection.
+Use `bridge.py start`/`stop`/`restart` rather than launching `telegram_bridge.py` directly. The wrapper controls launchd or systemd, the singleton supervisor, pid files under `~/.codex/telegram-bridge/`, and duplicate-long-poller protection.
 
 If you want Codex on the other machine to do this itself, giving it the repo URL should be enough only if it is also told to clone the repo locally and run `python3 scripts/install_plugins.py`. The URL alone is not a complete install contract without those steps.
 
@@ -322,7 +346,7 @@ Telegram bridge:
 
 ## Tell Codex What It Can Use
 
-The setup wizard writes the recommended `AGENTS.md` local-capabilities block automatically. This is what teaches future Codex sessions how to use Telegram reminders, Telegram files, the active chat id, whole-Mac remote-control assumptions, optional `gws`, and communication trust boundaries.
+The setup wizard writes the recommended `AGENTS.md` local-capabilities block automatically. This is what teaches future Codex sessions how to use Telegram reminders, Telegram files, the active chat id, whole-computer remote-control assumptions, optional `gws`, and communication trust boundaries.
 
 If you are doing manual setup or want to audit what the wizard writes, this is the pattern:
 
@@ -337,12 +361,12 @@ Recommended `AGENTS.md` pattern:
 ~~~md
 ## Local Capabilities
 
-### Whole-Mac Codex Control
+### Whole-Computer Codex Control
 
-- This setup is intended for a trusted, dedicated Mac controlled remotely through Telegram.
+- This setup is intended for a trusted, dedicated computer controlled remotely through Telegram.
 - Telegram-launched Codex sessions normally use `dangerFullAccess`, `network_access = true`, and `approval_policy = "never"`.
 - In that mode, the configured `default_cwd` is only Codex's starting folder and the location for `AGENTS.md`; it is not a permission boundary.
-- Codex may read and modify files, run commands, use reachable local credentials, and make network requests as the local macOS user.
+- Codex may read and modify files, run commands, use reachable local credentials, and make network requests as the local operating-system user.
 
 ### Telegram Bridge
 

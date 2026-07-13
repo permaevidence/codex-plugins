@@ -319,12 +319,50 @@ class LaunchAgentTests(unittest.TestCase):
                 operator, "LAUNCH_AGENT_FILE", plist
             ), mock.patch.object(operator, "STATE_DIR", state), mock.patch.object(
                 operator, "stop_bridge", return_value=0
-            ), mock.patch.object(operator, "start_launch_service", return_value=0):
+            ), mock.patch.object(operator, "start_launch_service", return_value=0), mock.patch.object(
+                operator, "PLATFORM_FAMILY", "macos"
+            ):
                 self.assertEqual(operator.install_service(), 0)
             payload = operator.plistlib.loads(plist.read_bytes())
             self.assertTrue(payload["RunAtLoad"])
             self.assertTrue(payload["KeepAlive"])
             self.assertEqual(payload["Label"], operator.SERVICE_LABEL)
+
+
+class SystemdServiceTests(unittest.TestCase):
+    def test_install_service_writes_persistent_systemd_user_unit(self):
+        operator = load_operator_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            unit = root / "systemd/user/bridge.service"
+            state = root / "state"
+            with mock.patch.object(operator, "PLATFORM_FAMILY", "linux"), mock.patch.object(
+                operator, "SYSTEMD_USER_DIR", unit.parent
+            ), mock.patch.object(operator, "SYSTEMD_UNIT_FILE", unit), mock.patch.object(
+                operator, "STATE_DIR", state
+            ), mock.patch.object(operator, "stop_bridge", return_value=0), mock.patch.object(
+                operator, "start_systemd_service", return_value=0
+            ), mock.patch.object(operator, "enable_linux_linger", return_value=True), mock.patch.object(
+                operator.shutil, "which", return_value="/usr/bin/bash"
+            ):
+                self.assertEqual(operator.install_service(), 0)
+            contents = unit.read_text(encoding="utf-8")
+            self.assertIn("WantedBy=default.target", contents)
+            self.assertIn("Restart=always", contents)
+            self.assertIn("start_bridge.sh", contents)
+            self.assertIn("KillMode=control-group", contents)
+
+    def test_linux_service_status_uses_systemctl_user(self):
+        operator = load_operator_module()
+        completed = mock.Mock(returncode=0)
+        with mock.patch.object(operator, "PLATFORM_FAMILY", "linux"), mock.patch.object(
+            operator.subprocess, "run", return_value=completed
+        ) as run:
+            self.assertTrue(operator.service_loaded())
+        self.assertEqual(
+            run.call_args.args[0],
+            ["systemctl", "--user", "is-active", "--quiet", operator.SYSTEMD_SERVICE_NAME],
+        )
 
 
 class BotCommandMenuTests(unittest.TestCase):

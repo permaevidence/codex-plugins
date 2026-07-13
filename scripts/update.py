@@ -16,9 +16,13 @@ import zipfile
 import time
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from platform_support import runtime_data_root
 
 REPOSITORY = "permaevidence/codex-plugins"
-APP_SUPPORT_ROOT = Path.home() / "Library" / "Application Support" / "PermaEvidenceCodex"
+APP_SUPPORT_ROOT = runtime_data_root()
 CURRENT_LINK = APP_SUPPORT_ROOT / "current"
 BRIDGE_STATE_DIR = Path.home() / ".codex" / "telegram-bridge"
 UPDATE_STATE_FILE = BRIDGE_STATE_DIR / "update_state.json"
@@ -97,7 +101,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def schedule_deferred_update(ref: str, delay: int) -> Path:
-    """Start one detached updater process without registering a launchd job."""
+    """Start one detached updater process without registering a persistent service."""
     if delay < 1:
         raise ValueError("Deferred update delay must be at least one second")
     log_dir = Path.home() / ".codex" / "telegram-bridge"

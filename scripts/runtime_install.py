@@ -8,18 +8,23 @@ import os
 import shutil
 import subprocess
 import tempfile
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from platform_support import platform_family, runtime_data_root, systemd_user_dir
 
-APP_SUPPORT_ROOT = Path.home() / "Library" / "Application Support" / "PermaEvidenceCodex"
+APP_SUPPORT_ROOT = runtime_data_root()
 VERSIONS_DIR = APP_SUPPORT_ROOT / "versions"
 CURRENT_LINK = APP_SUPPORT_ROOT / "current"
 KEEP_VERSIONS = 3
 
 
 def runtime_root() -> Path:
-    """Return the stable path used by docs, LaunchAgents, and operator commands."""
+    """Return the stable path used by docs, user services, and operator commands."""
     return CURRENT_LINK
 
 
@@ -161,7 +166,7 @@ def referenced_versions() -> set[Path]:
     """Return installed versions still referenced by config or live processes.
 
     Absolute runtime paths are embedded in Codex hooks, cached MCP manifests,
-    the bridge LaunchAgent, and process command lines. A version remains
+    the bridge user service, and process command lines. A version remains
     protected for as long as any of those consumers still points at it.
     """
     if not VERSIONS_DIR.exists():
@@ -178,9 +183,17 @@ def referenced_versions() -> set[Path]:
             for path in plugin_dir.rglob("*")
             if path.is_file() and path.suffix in {".json", ".toml"}
         )
-    launch_agents = Path.home() / "Library" / "LaunchAgents"
-    if launch_agents.exists():
-        candidates.extend(path for path in launch_agents.glob("*.plist") if path.is_file())
+    if platform_family() == "macos":
+        service_dir = Path.home() / "Library" / "LaunchAgents"
+        pattern = "*.plist"
+    elif platform_family() == "linux":
+        service_dir = systemd_user_dir()
+        pattern = "*.service"
+    else:
+        service_dir = None
+        pattern = ""
+    if service_dir and service_dir.exists():
+        candidates.extend(path for path in service_dir.glob(pattern) if path.is_file())
     for path in candidates:
         try:
             if path.stat().st_size <= 2_000_000:

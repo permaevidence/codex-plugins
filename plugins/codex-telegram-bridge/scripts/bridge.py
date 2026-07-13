@@ -8,6 +8,7 @@ import io
 import json
 import os
 import plistlib
+import pwd
 import select
 import shlex
 import shutil
@@ -24,10 +25,23 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 PLUGIN_ROOT = SCRIPT_DIR.parent
 REPO_ROOT = PLUGIN_ROOT.parents[1]
+ROOT_SCRIPTS = REPO_ROOT / "scripts"
+if str(ROOT_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(ROOT_SCRIPTS))
+from platform_support import (
+    LAUNCHD_LABEL,
+    SYSTEMD_SERVICE_NAME,
+    platform_family,
+    systemd_user_dir,
+)
+
 START_SCRIPT = SCRIPT_DIR / "start_bridge.sh"
-SERVICE_LABEL = "com.permaevidence.codex-telegram-bridge"
+SERVICE_LABEL = LAUNCHD_LABEL
+PLATFORM_FAMILY = platform_family()
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 LAUNCH_AGENT_FILE = LAUNCH_AGENTS_DIR / f"{SERVICE_LABEL}.plist"
+SYSTEMD_USER_DIR = systemd_user_dir()
+SYSTEMD_UNIT_FILE = SYSTEMD_USER_DIR / SYSTEMD_SERVICE_NAME
 
 STATE_DIR = Path.home() / ".codex" / "telegram-bridge"
 SUPERVISOR_PID_FILE = STATE_DIR / ".bridge-supervisor.pid"
@@ -49,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Start, stop, and inspect the Codex Telegram bridge.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("start", help="Start the bridge, using its LaunchAgent when installed.")
+    subparsers.add_parser("start", help="Start the bridge, using the installed user service when available.")
     subparsers.add_parser("stop", help="Stop the bridge supervisor cleanly.")
     subparsers.add_parser("quit", help="Alias for stop.")
     subparsers.add_parser("restart", help="Stop and then start the bridge supervisor.")
@@ -64,10 +78,10 @@ def parse_args() -> argparse.Namespace:
     doctor_parser.add_argument(
         "--allow-stopped",
         action="store_true",
-        help="Do not fail when the LaunchAgent and bridge are intentionally not started.",
+        help="Do not fail when the user service and bridge are intentionally not started.",
     )
-    subparsers.add_parser("install-service", help="Install and start the per-user macOS LaunchAgent.")
-    subparsers.add_parser("uninstall-service", help="Stop and remove the macOS LaunchAgent.")
+    subparsers.add_parser("install-service", help="Install and start the macOS launchd or Linux systemd user service.")
+    subparsers.add_parser("uninstall-service", help="Stop and remove the platform user service.")
 
     logs = subparsers.add_parser("logs", help="Show bridge logs.")
     logs.add_argument("-f", "--follow", action="store_true", help="Follow new log lines.")
@@ -156,13 +170,31 @@ def launch_domain() -> str:
     return f"gui/{os.getuid()}"
 
 
+def service_installed() -> bool:
+    if PLATFORM_FAMILY == "macos":
+        return LAUNCH_AGENT_FILE.is_file()
+    if PLATFORM_FAMILY == "linux":
+        return SYSTEMD_UNIT_FILE.is_file()
+    return False
+
+
 def service_loaded() -> bool:
-    completed = subprocess.run(
-        ["launchctl", "print", f"{launch_domain()}/{SERVICE_LABEL}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    if PLATFORM_FAMILY == "macos":
+        command = ["launchctl", "print", f"{launch_domain()}/{SERVICE_LABEL}"]
+    elif PLATFORM_FAMILY == "linux":
+        command = ["systemctl", "--user", "is-active", "--quiet", SYSTEMD_SERVICE_NAME]
+    else:
+        return False
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
     return completed.returncode == 0
 
 
@@ -190,6 +222,42 @@ def start_launch_service() -> int:
     return wait_for_bridge_start()
 
 
+def start_systemd_service() -> int:
+    if not SYSTEMD_UNIT_FILE.exists():
+        return 1
+    try:
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=20)
+        completed = subprocess.run(
+            ["systemctl", "--user", "enable", "--now", SYSTEMD_SERVICE_NAME],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"Could not invoke systemctl: {exc}", file=sys.stderr)
+        return 1
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "systemctl --user failed").strip()
+        print(detail, file=sys.stderr)
+        print(
+            "A Linux user-service manager is required for unattended startup. "
+            "On a normal systemd installation, log in as the target user and try again.",
+            file=sys.stderr,
+        )
+        return completed.returncode
+    return wait_for_bridge_start()
+
+
+def start_platform_service() -> int:
+    if PLATFORM_FAMILY == "macos":
+        return start_launch_service()
+    if PLATFORM_FAMILY == "linux":
+        return start_systemd_service()
+    print(f"Unsupported operating system: {sys.platform}", file=sys.stderr)
+    return 1
+
+
 def wait_for_bridge_start() -> int:
     deadline = time.time() + 12
     while time.time() < deadline:
@@ -204,8 +272,8 @@ def wait_for_bridge_start() -> int:
 
 def start_bridge() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    if LAUNCH_AGENT_FILE.exists():
-        return start_launch_service()
+    if service_installed():
+        return start_platform_service()
     pid = supervisor_pid()
     if is_pid_alive(pid):
         print(f"Bridge supervisor already running (pid {pid}).")
@@ -216,8 +284,12 @@ def start_bridge() -> int:
         return 1
 
     STOP_FILE.unlink(missing_ok=True)
+    bash = shutil.which("bash")
+    if not bash:
+        print("bash is required to run the bridge supervisor.", file=sys.stderr)
+        return 1
     subprocess.Popen(
-        ["/bin/zsh", str(START_SCRIPT)],
+        [bash, str(START_SCRIPT)],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -232,13 +304,24 @@ def stop_bridge() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     STOP_FILE.touch()
 
-    if service_loaded():
-        subprocess.run(
-            ["launchctl", "bootout", f"{launch_domain()}/{SERVICE_LABEL}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+    if service_installed() or service_loaded():
+        if PLATFORM_FAMILY == "macos":
+            command = ["launchctl", "bootout", f"{launch_domain()}/{SERVICE_LABEL}"]
+        elif PLATFORM_FAMILY == "linux":
+            command = ["systemctl", "--user", "stop", SYSTEMD_SERVICE_NAME]
+        else:
+            command = []
+        if command:
+            try:
+                subprocess.run(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=20,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
 
     sup = supervisor_pid()
     child = child_pid()
@@ -281,37 +364,158 @@ def restart_bridge() -> int:
     return start_bridge()
 
 
+def systemd_quote(value: str) -> str:
+    escaped = value.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def build_systemd_unit(*, bash: str, path: str) -> str:
+    return "\n".join(
+        [
+            "[Unit]",
+            "Description=Perma Evidence Codex Telegram bridge",
+            "",
+            "[Service]",
+            "Type=simple",
+            f"ExecStart={systemd_quote(bash)} {systemd_quote(str(START_SCRIPT))}",
+            f"WorkingDirectory={systemd_quote(str(PLUGIN_ROOT))}",
+            f"Environment={systemd_quote(f'HOME={Path.home()}')}",
+            f"Environment={systemd_quote(f'PATH={path}')}",
+            "Restart=always",
+            "RestartSec=3",
+            "KillMode=control-group",
+            "TimeoutStopSec=25",
+            "",
+            "[Install]",
+            "WantedBy=default.target",
+            "",
+        ]
+    )
+
+
+def enable_linux_linger() -> bool:
+    """Best-effort boot startup for a user service on a headless Linux host."""
+    loginctl = shutil.which("loginctl")
+    if not loginctl:
+        print(
+            "Warning: loginctl was not found. The bridge will start with the user session, "
+            "but automatic startup before login could not be enabled.",
+            file=sys.stderr,
+        )
+        return False
+    username = os.environ.get("USER") or pwd.getpwuid(os.getuid()).pw_name
+    try:
+        check = subprocess.run(
+            [loginctl, "show-user", username, "--property=Linger", "--value"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"Warning: could not inspect systemd lingering: {exc}", file=sys.stderr)
+        return False
+    if check.returncode == 0 and check.stdout.strip().lower() == "yes":
+        print(f"systemd lingering is enabled for {username}; the bridge can start before login.")
+        return True
+    try:
+        enabled = subprocess.run(
+            [loginctl, "enable-linger", username],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(
+            f"Warning: could not enable systemd lingering for {username}: {exc}. "
+            f"For startup before login, run: sudo loginctl enable-linger {shlex.quote(username)}",
+            file=sys.stderr,
+        )
+        return False
+    if enabled.returncode == 0:
+        print(f"Enabled systemd lingering for {username}; the bridge can start before login.")
+        return True
+    detail = (enabled.stderr or enabled.stdout or "permission denied").strip()
+    print(
+        f"Warning: could not enable systemd lingering for {username}: {detail}. "
+        f"For startup before login, run: sudo loginctl enable-linger {shlex.quote(username)}",
+        file=sys.stderr,
+    )
+    return False
+
+
 def install_service() -> int:
-    if sys.platform != "darwin":
-        print("Automatic bridge startup is currently supported only on macOS.", file=sys.stderr)
+    if PLATFORM_FAMILY not in {"macos", "linux"}:
+        print("Automatic bridge startup is supported on macOS and Linux.", file=sys.stderr)
         return 1
-    LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     stop_bridge()
-    path = os.environ.get("PATH") or "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-    payload = {
-        "Label": SERVICE_LABEL,
-        "ProgramArguments": ["/bin/zsh", str(START_SCRIPT)],
-        "WorkingDirectory": str(PLUGIN_ROOT),
-        "RunAtLoad": True,
-        "KeepAlive": True,
-        "ProcessType": "Background",
-        "EnvironmentVariables": {"PATH": path, "HOME": str(Path.home())},
-        "StandardOutPath": str(STATE_DIR / "launchd.log"),
-        "StandardErrorPath": str(STATE_DIR / "launchd-error.log"),
-    }
-    temp = LAUNCH_AGENT_FILE.with_suffix(".plist.tmp")
-    temp.write_bytes(plistlib.dumps(payload, sort_keys=True))
+    path = os.environ.get("PATH") or "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+    bash = shutil.which("bash")
+    if not bash:
+        print("bash is required to run the bridge supervisor.", file=sys.stderr)
+        return 1
+
+    if PLATFORM_FAMILY == "macos":
+        LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "Label": SERVICE_LABEL,
+            "ProgramArguments": [bash, str(START_SCRIPT)],
+            "WorkingDirectory": str(PLUGIN_ROOT),
+            "RunAtLoad": True,
+            "KeepAlive": True,
+            "ProcessType": "Background",
+            "EnvironmentVariables": {"PATH": path, "HOME": str(Path.home())},
+            "StandardOutPath": str(STATE_DIR / "launchd.log"),
+            "StandardErrorPath": str(STATE_DIR / "launchd-error.log"),
+        }
+        temp = LAUNCH_AGENT_FILE.with_suffix(".plist.tmp")
+        temp.write_bytes(plistlib.dumps(payload, sort_keys=True))
+        temp.chmod(0o600)
+        temp.replace(LAUNCH_AGENT_FILE)
+        print(f"Installed LaunchAgent: {LAUNCH_AGENT_FILE}")
+        return start_launch_service()
+
+    SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+    unit = build_systemd_unit(bash=bash, path=path)
+    temp = SYSTEMD_UNIT_FILE.with_suffix(".service.tmp")
+    temp.write_text(unit, encoding="utf-8")
     temp.chmod(0o600)
-    temp.replace(LAUNCH_AGENT_FILE)
-    print(f"Installed LaunchAgent: {LAUNCH_AGENT_FILE}")
-    return start_launch_service()
+    temp.replace(SYSTEMD_UNIT_FILE)
+    print(f"Installed systemd user service: {SYSTEMD_UNIT_FILE}")
+    enable_linux_linger()
+    return start_systemd_service()
 
 
 def uninstall_service() -> int:
     stop_bridge()
-    LAUNCH_AGENT_FILE.unlink(missing_ok=True)
-    print(f"Removed LaunchAgent: {LAUNCH_AGENT_FILE}")
+    if PLATFORM_FAMILY == "macos":
+        LAUNCH_AGENT_FILE.unlink(missing_ok=True)
+        print(f"Removed LaunchAgent: {LAUNCH_AGENT_FILE}")
+    elif PLATFORM_FAMILY == "linux":
+        try:
+            subprocess.run(
+                ["systemctl", "--user", "disable", "--now", SYSTEMD_SERVICE_NAME],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=20,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        SYSTEMD_UNIT_FILE.unlink(missing_ok=True)
+        try:
+            subprocess.run(
+                ["systemctl", "--user", "daemon-reload"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=20,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        print(f"Removed systemd user service: {SYSTEMD_UNIT_FILE}")
     return 0
 
 
@@ -328,8 +532,12 @@ def show_status() -> int:
     print(f"- config: {CONFIG_FILE if CONFIG_FILE.exists() else 'missing'}")
     print(f"- env: {ENV_FILE if ENV_FILE.exists() else 'missing'}")
     print(f"- log: {LOG_FILE if LOG_FILE.exists() else 'missing'}")
-    print(f"- LaunchAgent: {'installed' if LAUNCH_AGENT_FILE.exists() else 'not installed'}")
-    print(f"- launchd service: {'loaded' if service_loaded() else 'not loaded'}")
+    if PLATFORM_FAMILY == "macos":
+        print(f"- LaunchAgent: {'installed' if LAUNCH_AGENT_FILE.exists() else 'not installed'}")
+        print(f"- launchd service: {'loaded' if service_loaded() else 'not loaded'}")
+    elif PLATFORM_FAMILY == "linux":
+        print(f"- systemd unit: {'installed' if SYSTEMD_UNIT_FILE.exists() else 'not installed'}")
+        print(f"- systemd user service: {'active' if service_loaded() else 'not active'}")
 
     runtime = load_json(RUNTIME_STATE_FILE)
     if runtime:
@@ -449,8 +657,14 @@ def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
     checks.append(("memory hooks execute", hooks_ok, hooks_detail))
 
     if not allow_stopped:
-        checks.append(("LaunchAgent installed", LAUNCH_AGENT_FILE.is_file(), str(LAUNCH_AGENT_FILE) if LAUNCH_AGENT_FILE.exists() else "missing"))
-        checks.append(("launchd service loaded", service_loaded(), SERVICE_LABEL if service_loaded() else "not loaded"))
+        if PLATFORM_FAMILY == "macos":
+            checks.append(("LaunchAgent installed", LAUNCH_AGENT_FILE.is_file(), str(LAUNCH_AGENT_FILE) if LAUNCH_AGENT_FILE.exists() else "missing"))
+            checks.append(("launchd service loaded", service_loaded(), SERVICE_LABEL if service_loaded() else "not loaded"))
+        elif PLATFORM_FAMILY == "linux":
+            checks.append(("systemd user unit installed", SYSTEMD_UNIT_FILE.is_file(), str(SYSTEMD_UNIT_FILE) if SYSTEMD_UNIT_FILE.exists() else "missing"))
+            checks.append(("systemd user service active", service_loaded(), SYSTEMD_SERVICE_NAME if service_loaded() else "not active"))
+        else:
+            checks.append(("supported operating system", False, sys.platform))
 
     if not allow_stopped:
         checks.append(("bridge supervisor running", bridge_running(), format_pid(supervisor_pid())))

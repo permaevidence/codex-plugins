@@ -107,15 +107,7 @@ MEMORY_ALERT_FILE = MEMORY_STATE_DIR / "pending" / "memory-maintenance.stuck.jso
 MEMORY_COMMON_SCRIPT = (
     Path(__file__).resolve().parents[2] / "codex-long-term-memory" / "lib" / "common.py"
 )
-UPDATE_SCRIPT = (
-    Path.home()
-    / "Library"
-    / "Application Support"
-    / "PermaEvidenceCodex"
-    / "current"
-    / "scripts"
-    / "update.py"
-)
+UPDATE_SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "update.py"
 
 
 def rate_limit_retry_at(snapshot: dict[str, Any], *, now: float | None = None, buffer_seconds: int = 60) -> float | None:
@@ -565,11 +557,11 @@ def classify_codex_failure(error: str) -> tuple[str, str]:
     if re.search(r"usage|rate.?limit|quota|credit|capacity", lowered):
         return "usage_limit", "Codex usage capacity is temporarily exhausted."
     if re.search(r"unauthori[sz]ed|authentication|not logged in|login required|sign.?in|token expired", lowered):
-        return "authentication", "Codex is no longer authenticated. Run `codex login` on the Mac, then use /resume."
+        return "authentication", "Codex is no longer authenticated. Run `codex login` on the computer, then use /resume."
     if re.search(r"subscription|plan|payment|billing", lowered):
         return "subscription", "The Codex subscription or billing needs attention. Fix it in the OpenAI account, then use /resume."
     if re.search(r"network|connection|timed? out|temporarily unavailable|service unavailable", lowered):
-        return "network", "Codex could not reach its service. Check the Mac's network, then use /resume."
+        return "network", "Codex could not reach its service. Check the computer's network, then use /resume."
     return "turn_failure", f"Codex reported: {error[:500]}"
 
 
@@ -876,7 +868,7 @@ class CodexAppServerClient:
                 except queue.Full:
                     pass
             # A live bridge with a dead app-server cannot recover useful work.
-            # Exit the child so the supervisor/LaunchAgent restarts the complete
+            # Exit the child so the supervisor/platform service restarts the complete
             # process tree. Intentional /newsession shutdown disables this path.
             if getattr(self, "_restart_on_exit", False):
                 set_component_health(
