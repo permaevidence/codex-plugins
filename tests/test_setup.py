@@ -249,6 +249,34 @@ class SetupWizardTests(unittest.TestCase):
             )
             self.assertEqual((memory_dir / "calendar_sources.json").stat().st_mode & 0o777, 0o600)
 
+    def test_google_connection_steps_are_plain_and_ordered(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            setup_wizard.print_google_connection_steps(start=3)
+        text = output.getvalue()
+        self.assertIn("3. In Terminal, run: codex", text)
+        self.assertIn("4. At the Codex prompt, type: /apps", text)
+        self.assertIn("5. Select Gmail, choose Connect", text)
+        self.assertIn("6. Return to /apps", text)
+        self.assertIn("7. Exit Codex with /quit", text)
+
+    def test_google_setup_explains_optional_background_features(self) -> None:
+        args = mock.Mock(
+            google_integration="yes",
+            email_notifications="no",
+            calendar_context="no",
+        )
+        output = io.StringIO()
+        with mock.patch.object(setup_wizard, "load_json", return_value={}), mock.patch.object(
+            setup_wizard, "read_calendar_sources", return_value=[]
+        ), contextlib.redirect_stdout(output):
+            result = setup_wizard.resolve_google_setup(args)
+        self.assertTrue(result["enabled"])
+        self.assertFalse(result["email_enabled"])
+        self.assertFalse(result["calendar_enabled"])
+        self.assertIn("optional background features", output.getvalue())
+        self.assertIn("not required for the official Gmail and Calendar apps", output.getvalue())
+
 
 class RuntimeInstallTests(unittest.TestCase):
     def make_source(self, root: Path, version: str = "1.2.3") -> Path:

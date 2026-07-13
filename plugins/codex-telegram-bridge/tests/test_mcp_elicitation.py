@@ -73,6 +73,31 @@ class McpElicitationTests(unittest.TestCase):
         )
 
 
+class GoogleAppOnboardingTests(unittest.TestCase):
+    def test_google_app_requires_enabled_and_accessible(self):
+        operator = load_operator_module()
+        connected, detail = operator.google_app_connection_status(
+            {"name": "Gmail", "isEnabled": True, "isAccessible": False}
+        )
+        self.assertFalse(connected)
+        self.assertIn("enabled=True", detail)
+        self.assertIn("accessible=False", detail)
+
+    def test_google_app_passes_when_enabled_and_accessible(self):
+        operator = load_operator_module()
+        connected, detail = operator.google_app_connection_status(
+            {"name": "Google Calendar", "isEnabled": True, "isAccessible": True}
+        )
+        self.assertTrue(connected)
+        self.assertIn("accessible=True", detail)
+
+    def test_missing_google_app_is_not_connected(self):
+        operator = load_operator_module()
+        connected, detail = operator.google_app_connection_status({})
+        self.assertFalse(connected)
+        self.assertIn("not returned by Codex app/list", detail)
+
+
 class AppServerResilienceTests(unittest.TestCase):
     def test_real_app_server_exit_terminates_bridge_for_supervisor_restart(self):
         bridge = load_bridge_module()

@@ -49,8 +49,9 @@ python3 scripts/setup.py
 ```
 
 3. Follow the wizard. Paste both keys when asked; if unsure about any choice, press Enter for the recommended option.
-4. When prompted, message your new Telegram bot, return to Terminal, press Enter, and approve the Telegram user shown.
-5. In Telegram, send:
+4. If you selected Google integration, the wizard installs both official plugins automatically. Follow its printed steps: run `codex`, type `/apps`, connect Gmail, connect Google Calendar, then leave Codex with `/quit`. This is the only required Google authorization step.
+5. When prompted, message your new Telegram bot, return to Terminal, press Enter, and approve the Telegram user shown.
+6. In Telegram, send this only after Google authorization and pairing are complete:
 
 ```text
 /newsession
@@ -107,6 +108,7 @@ Then it:
 - explicitly verifies and trusts the four memory hooks being installed
 - installs a macOS launchd or Linux systemd user service for login/reboot recovery
 - installs the curated Gmail and Google Calendar plugins when selected; users connect them through OpenAI's normal Google OAuth flow
+- checks `app/list` after connection and requires both apps to be enabled and accessible, rather than mistaking installation for authorization
 - validates optional Gmail IMAP and private iCal access without printing or storing secrets in `config.json`
 
 If you skip guided pairing, send a Telegram DM to your bot and approve the pairing code locally:
@@ -120,9 +122,21 @@ Then send `/newsession` from Telegram so Codex starts fresh with the installed p
 ### Google integration without a Google Cloud project
 
 When selected, the wizard installs `gmail@openai-curated` and
-`google-calendar@openai-curated`. Connect both from ChatGPT **Settings > Apps**
-using the same ChatGPT account used by Codex. OpenAI owns the OAuth client, so
-users do not create a Google Cloud project, client ID, or client secret.
+`google-calendar@openai-curated` automatically. Installation alone does not
+authorize access to Google. Complete the one-time connection from Codex:
+
+1. In Terminal, run `codex`.
+2. At the Codex prompt, type `/apps`.
+3. Select Gmail, choose **Connect**, and approve Google access in the browser.
+4. Return to `/apps` and repeat for Google Calendar.
+5. Exit Codex with `/quit` after both apps show as connected.
+6. Run the `bridge.py doctor` command printed by setup. It verifies that both
+   apps are enabled and accessible to Codex.
+
+OpenAI owns the OAuth client, so users do not create a Google Cloud project,
+client ID, or client secret. The wizard reports unconnected apps as pending
+during installation; a normal later doctor run reports them as a problem until
+the user completes the steps above.
 
 Optional proactive awareness is deliberately separate and read-only:
 
@@ -148,10 +162,10 @@ codex plugin remove gmail@openai-curated
 codex plugin remove google-calendar@openai-curated
 ```
 
-Disconnecting either app in ChatGPT **Settings > Apps** revokes its OpenAI-side
-access. Revoke the Gmail app password and reset a calendar's private iCal URL
-from Google Account/Calendar settings if either local read-only credential may
-have been exposed.
+Disconnecting either app from the OpenAI account's Apps settings revokes its
+OpenAI-side access. Revoke the Gmail app password and reset a calendar's private
+iCal URL from Google Account/Calendar settings if either local read-only
+credential may have been exposed.
 
 ### Updating safely
 

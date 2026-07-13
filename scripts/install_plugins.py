@@ -107,7 +107,8 @@ def main() -> None:
         )
     if args.with_google_apps:
         print("- Gmail and Google Calendar curated plugins were installed.")
-        print("- Connect both Google apps from ChatGPT Settings > Apps using the same account as Codex.")
+        print("- Google authorization is still required once; plugin installation does not grant mailbox access.")
+        print("- Run `codex`, enter `/apps`, then connect Gmail and Google Calendar in the browser flow.")
         print("- No custom Google Cloud project, client ID, or client secret is required.")
         print(
             "- Check setup with: "

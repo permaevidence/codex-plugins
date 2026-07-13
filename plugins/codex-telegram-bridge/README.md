@@ -103,6 +103,8 @@ python3 /absolute/path/to/repo/scripts/setup.py
 
 It validates credentials and model availability, can install the official Gmail and Google Calendar plugins without a custom Google Cloud project, optionally configures read-only IMAP and iCal background awareness, installs a permanent versioned runtime, writes this bridge config, requires the OpenAI key for voice transcription, installs a per-user macOS launchd or Linux systemd service, guides pairing, and runs `bridge.py doctor`.
 
+When Google integration is selected, setup installs both curated plugins automatically. Google authorization is a separate one-time step: run `codex`, enter `/apps`, connect Gmail and Google Calendar through the browser prompts, exit with `/quit`, and rerun `bridge.py doctor`. The doctor requires both apps to be enabled and accessible; it does not treat installation alone as a successful connection. Gmail IMAP notifications and private-iCal calendar context are optional background features and are not required for the official apps.
+
 Manual setup:
 
 1. Create a Telegram bot with BotFather and copy the bot token.

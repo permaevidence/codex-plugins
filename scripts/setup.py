@@ -249,7 +249,7 @@ def main() -> int:
         print(f"- Telegram cfg: {TELEGRAM_CONFIG}")
         print(f"- AGENTS.md:    {agents_md_path}")
         if google_setup["enabled"]:
-            print("- Google apps:  connect Gmail and Google Calendar in ChatGPT Settings > Apps")
+            print("- Google apps:  installed; one-time authorization through Codex /apps is still required")
 
         if start_bridge:
             run([sys.executable, str(bridge_cli), "install-service"])
@@ -264,6 +264,8 @@ def main() -> int:
             doctor_command.append("--allow-unpaired")
         if not start_bridge:
             doctor_command.append("--allow-stopped")
+        if google_setup["enabled"]:
+            doctor_command.append("--allow-google-unconnected")
         run(doctor_command)
         prune_old_versions(active=installed_root.resolve())
     except BaseException:
@@ -274,12 +276,21 @@ def main() -> int:
 
     print()
     print("Next:")
-    print("1. Send a Telegram DM to your bot.")
-    print("2. If the bot replies with a pairing code, approve it locally:")
-    print(f"   python3 '{installed_root}/plugins/codex-telegram-bridge/scripts/access.py' pair <code>")
-    print("3. Send /newsession in Telegram after pairing so Codex starts fresh with the new plugin setup.")
+    next_step = 1
     if google_setup["enabled"]:
-        print("4. In ChatGPT Settings > Apps, connect Gmail and Google Calendar to the same account used by Codex.")
+        print_google_connection_steps(start=next_step)
+        next_step += 5
+        print(
+            f"{next_step}. Verify that both apps say connected and accessible: "
+            f"python3 '{bridge_cli}' doctor"
+        )
+        next_step += 1
+    print(f"{next_step}. Send a Telegram DM to your bot.")
+    next_step += 1
+    print(f"{next_step}. If the bot replies with a pairing code, approve it locally:")
+    print(f"   python3 '{installed_root}/plugins/codex-telegram-bridge/scripts/access.py' pair <code>")
+    next_step += 1
+    print(f"{next_step}. Send /newsession in Telegram only after the preceding setup steps are complete.")
     return 0
 
 
@@ -506,6 +517,11 @@ def resolve_pair_now(value: str | None) -> bool:
 def resolve_google_setup(args: argparse.Namespace) -> dict[str, object]:
     existing_config = load_json(TELEGRAM_CONFIG)
     existing_sources = read_calendar_sources()
+    print()
+    print("Google integration")
+    print("- Setup can install OpenAI's official Gmail and Google Calendar plugins automatically.")
+    print("- You will authorize your Google account afterward from Codex with /apps.")
+    print("- No Google Cloud project, client ID, or client secret is needed.")
     if args.google_integration:
         enabled = args.google_integration == "yes"
     else:
@@ -524,11 +540,15 @@ def resolve_google_setup(args: argparse.Namespace) -> dict[str, object]:
     if not enabled:
         return result
 
+    print()
+    print("The next two choices are optional background features.")
+    print("They are not required for the official Gmail and Calendar apps.")
+
     if args.email_notifications:
         email_enabled = args.email_notifications == "yes"
     else:
         email_enabled = prompt_yes_no(
-            "Enable proactive unread-email notices through read-only Gmail IMAP?",
+            "Optional: send proactive unread-email notices through read-only Gmail IMAP?",
             default=bool(existing_config.get("enable_email_notifications", False)),
         )
     result["email_enabled"] = email_enabled
@@ -552,7 +572,7 @@ def resolve_google_setup(args: argparse.Namespace) -> dict[str, object]:
         calendar_enabled = args.calendar_context == "yes"
     else:
         calendar_enabled = prompt_yes_no(
-            "Include upcoming events through private read-only Google Calendar iCal feeds?",
+            "Optional: include upcoming events through private read-only Google Calendar iCal feeds?",
             default=bool(existing_sources),
         )
     result["calendar_enabled"] = calendar_enabled
@@ -586,6 +606,14 @@ def resolve_google_setup(args: argparse.Namespace) -> dict[str, object]:
                     break
         result["calendar_sources"] = sources
     return result
+
+
+def print_google_connection_steps(*, start: int = 1) -> None:
+    print(f"{start}. In Terminal, run: codex")
+    print(f"{start + 1}. At the Codex prompt, type: /apps")
+    print(f"{start + 2}. Select Gmail, choose Connect, and approve Google access in the browser.")
+    print(f"{start + 3}. Return to /apps and repeat the same connection for Google Calendar.")
+    print(f"{start + 4}. Exit Codex with /quit after both apps show as connected.")
 
 
 def read_calendar_sources() -> list[dict[str, str]]:

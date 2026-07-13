@@ -89,6 +89,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not fail when the user service and bridge are intentionally not started.",
     )
+    doctor_parser.add_argument(
+        "--allow-google-unconnected",
+        action="store_true",
+        help="Treat unconnected official Google apps as pending during first-time setup.",
+    )
     subparsers.add_parser("install-service", help="Install and start the macOS launchd or Linux systemd user service.")
     subparsers.add_parser("uninstall-service", help="Stop and remove the platform user service.")
 
@@ -581,8 +586,14 @@ def show_logs(lines: int, follow: bool) -> int:
     return subprocess.call(command)
 
 
-def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
+def doctor(
+    *,
+    allow_unpaired: bool = False,
+    allow_stopped: bool = False,
+    allow_google_unconnected: bool = False,
+) -> int:
     checks: list[tuple[str, bool, str]] = []
+    pending: list[tuple[str, str]] = []
 
     codex = shutil.which("codex")
     checks.append(("codex CLI on PATH", bool(codex), codex or "missing"))
@@ -634,21 +645,15 @@ def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
         )
         apps = query_codex_apps(config.get("default_cwd"))
         for connector_id, label in (
-            (GMAIL_CONNECTOR_ID, "Gmail app available to Codex"),
-            (CALENDAR_CONNECTOR_ID, "Google Calendar app available to Codex"),
+            (GMAIL_CONNECTOR_ID, "Gmail app connected and available to Codex"),
+            (CALENDAR_CONNECTOR_ID, "Google Calendar app connected and available to Codex"),
         ):
             app = apps.get(connector_id, {})
-            available = bool(app) and bool(app.get("isEnabled"))
-            detail = (
-                f"{app.get('name')}; accessible={app.get('isAccessible')}; "
-                "connect in ChatGPT Settings > Apps if authentication is still needed"
-                if app
-                else "not returned by Codex app/list"
-            )
-            if app:
-                checks.append((label, available, detail))
+            connected, detail = google_app_connection_status(app)
+            if connected or not allow_google_unconnected:
+                checks.append((label, connected, detail))
             else:
-                print(f"[PENDING] {label}: {detail}; connect it in ChatGPT Settings > Apps")
+                pending.append((label, f"{detail}; run `codex`, enter `/apps`, and connect it"))
     checks.append(("Telegram config.json", bool(config), str(CONFIG_FILE) if config else "missing or invalid"))
     if config:
         default_cwd = Path(str(config.get("default_cwd") or "")).expanduser()
@@ -755,6 +760,8 @@ def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
         if not ok:
             failures += 1
         print(f"[{marker}] {label}: {detail}")
+    for label, detail in pending:
+        print(f"[PENDING] {label}: {detail}")
 
     print()
     if failures:
@@ -764,10 +771,15 @@ def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
         print(f"- Install plugins: python3 {REPO_ROOT}/scripts/install_plugins.py")
         print(f"- Configure Telegram: edit {CONFIG_FILE} and {ENV_FILE}")
         print(f"- Start bridge: python3 {SCRIPT_DIR}/bridge.py start")
+        if google_apps_enabled:
+            print("- Connect Google apps: run `codex`, enter `/apps`, then connect Gmail and Google Calendar.")
         print("- After plugin or hook changes, start a new Codex thread or send /newsession.")
         return 1
 
-    print("Doctor checks passed.")
+    if pending:
+        print("Doctor checks passed; the clearly marked first-time connection steps remain pending.")
+    else:
+        print("Doctor checks passed.")
     return 0
 
 
@@ -776,6 +788,15 @@ def plugin_line(plugin_list: str, name: str) -> str:
         if line.strip().startswith(f"{name}@"):
             return " ".join(line.split())
     return ""
+
+
+def google_app_connection_status(app: dict) -> tuple[bool, str]:
+    if not app:
+        return False, "not returned by Codex app/list"
+    enabled = bool(app.get("isEnabled"))
+    accessible = bool(app.get("isAccessible"))
+    name = str(app.get("name") or "Google app")
+    return enabled and accessible, f"{name}; enabled={enabled}; accessible={accessible}"
 
 
 def run_text(command: list[str]) -> str:
@@ -1169,7 +1190,11 @@ def main() -> int:
     if command == "logs":
         return show_logs(args.lines, args.follow)
     if command == "doctor":
-        return doctor(allow_unpaired=args.allow_unpaired, allow_stopped=args.allow_stopped)
+        return doctor(
+            allow_unpaired=args.allow_unpaired,
+            allow_stopped=args.allow_stopped,
+            allow_google_unconnected=args.allow_google_unconnected,
+        )
     if command == "install-service":
         return install_service()
     if command == "uninstall-service":
