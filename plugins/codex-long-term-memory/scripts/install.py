@@ -186,8 +186,11 @@ def ensure_python_dependencies() -> None:
     Keeping dependencies in state makes them survive atomic runtime switches and
     avoids modifying the user's system Python environment.
     """
-    marker = DEPENDENCY_DIR / "pypdf-6.14.2.dist-info" / "METADATA"
-    if marker.is_file():
+    markers = [
+        DEPENDENCY_DIR / "pypdf-6.14.2.dist-info" / "METADATA",
+        DEPENDENCY_DIR / "typing_extensions-4.16.0.dist-info" / "METADATA",
+    ]
+    if all(marker.is_file() for marker in markers):
         return
     DEPENDENCY_DIR.mkdir(parents=True, exist_ok=True)
     command = [
@@ -215,7 +218,7 @@ def ensure_python_dependencies() -> None:
             "Could not install the pinned PDF sampling helper. Check network access and Python pip, "
             f"then rerun setup. Reason: {exc}"
         ) from exc
-    if not marker.is_file():
+    if not all(marker.is_file() for marker in markers):
         raise SystemExit(f"PDF sampling dependency did not install correctly in {DEPENDENCY_DIR}")
 
 
