@@ -106,7 +106,9 @@ def _rewrite_mcp_paths(root: Path, *, installed_root: Path) -> None:
     space in "Application Support" is harmless here).
     """
     for manifest in root.glob("plugins/*/.mcp.json"):
-        plugin_dir = installed_root / "plugins" / manifest.parent.name
+        plugin_name = manifest.parent.name
+        staged_plugin_dir = manifest.parent
+        plugin_dir = installed_root / "plugins" / plugin_name
         data = json.loads(manifest.read_text(encoding="utf-8"))
         servers = data.get("mcpServers")
         if not isinstance(servers, dict):
@@ -117,13 +119,66 @@ def _rewrite_mcp_paths(root: Path, *, installed_root: Path) -> None:
             args = server.get("args")
             if isinstance(args, list):
                 server["args"] = [
-                    str(plugin_dir / arg[2:]) if isinstance(arg, str) and arg.startswith("./") else arg
+                    _rebase_plugin_mcp_path(
+                        arg,
+                        plugin_name=plugin_name,
+                        staged_plugin_dir=staged_plugin_dir,
+                        installed_plugin_dir=plugin_dir,
+                    )
                     for arg in args
                 ]
             command = server.get("command")
-            if isinstance(command, str) and command.startswith("./"):
-                server["command"] = str(plugin_dir / command[2:])
+            if isinstance(command, str):
+                server["command"] = _rebase_plugin_mcp_path(
+                    command,
+                    plugin_name=plugin_name,
+                    staged_plugin_dir=staged_plugin_dir,
+                    installed_plugin_dir=plugin_dir,
+                )
         manifest.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _rebase_plugin_mcp_path(
+    value: object,
+    *,
+    plugin_name: str,
+    staged_plugin_dir: Path,
+    installed_plugin_dir: Path,
+) -> object:
+    """Map plugin-local MCP paths into the runtime being installed.
+
+    A source checkout stores these paths as ``./scripts/...``. An installed
+    runtime stores absolute paths because Codex starts MCP servers from the
+    session cwd. When the setup wizard is rerun from that installed runtime,
+    copying the already-absolute manifest must not leave the new runtime
+    pointing at the previous version.
+
+    Only absolute paths with a ``plugins/<plugin-name>/...`` suffix whose
+    target exists in the staged plugin are rebased. Interpreter paths and
+    other external absolute arguments remain untouched.
+    """
+    if not isinstance(value, str):
+        return value
+
+    relative: Path | None = None
+    if value.startswith("./"):
+        relative = Path(value[2:])
+    else:
+        path = Path(value)
+        if not path.is_absolute():
+            return value
+        parts = path.parts
+        for index in range(len(parts) - 1):
+            if parts[index] != "plugins" or parts[index + 1] != plugin_name:
+                continue
+            candidate = Path(*parts[index + 2 :])
+            if candidate.parts and (staged_plugin_dir / candidate).exists():
+                relative = candidate
+                break
+
+    if relative is None:
+        return value
+    return str(installed_plugin_dir / relative)
 
 
 def _validate_runtime(root: Path) -> None:

@@ -558,6 +558,51 @@ class RuntimeInstallTests(unittest.TestCase):
             # A bare interpreter name resolves via PATH and must stay untouched.
             self.assertEqual(servers["telegram-actions"]["command"], "python3")
 
+    def test_runtime_install_rebases_mcp_path_from_previous_runtime(self) -> None:
+        # Rerunning setup from an installed runtime copies a manifest whose
+        # plugin-local MCP path is already absolute. It must be moved to the
+        # replacement runtime rather than retaining a dependency on the old
+        # version directory.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self.make_source(root)
+            script = source / "plugins/codex-telegram-bridge/scripts/telegram_actions_mcp.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# test server\n", encoding="utf-8")
+            previous = (
+                root
+                / "Application Support/PermaEvidenceCodex/versions/commit-old"
+                / "plugins/codex-telegram-bridge/scripts/telegram_actions_mcp.py"
+            )
+            external = root / "external/python3"
+            (source / "plugins/codex-telegram-bridge/.mcp.json").write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "telegram-actions": {
+                                "command": str(external),
+                                "args": ["-u", str(previous)],
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            app = root / "Application Support/PermaEvidenceCodex"
+            with mock.patch.object(runtime_install, "APP_SUPPORT_ROOT", app), mock.patch.object(
+                runtime_install, "VERSIONS_DIR", app / "versions"
+            ), mock.patch.object(runtime_install, "CURRENT_LINK", app / "current"):
+                current = runtime_install.install_runtime(source, cachebuster="local-reinstall")
+                installed_dir = current.resolve()
+
+            server = json.loads(
+                (current / "plugins/codex-telegram-bridge/.mcp.json").read_text(encoding="utf-8")
+            )["mcpServers"]["telegram-actions"]
+            expected = installed_dir / "plugins/codex-telegram-bridge/scripts/telegram_actions_mcp.py"
+            self.assertEqual(Path(server["args"][1]).resolve(), expected.resolve())
+            self.assertNotIn("commit-old", server["args"][1])
+            self.assertEqual(server["command"], str(external))
+
     def test_runtime_install_keeps_previous_version_until_health_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
