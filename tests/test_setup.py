@@ -308,6 +308,8 @@ class RuntimeInstallTests(unittest.TestCase):
                 runtime_install, "VERSIONS_DIR", app / "versions"
             ), mock.patch.object(runtime_install, "CURRENT_LINK", app / "current"), mock.patch.object(
                 runtime_install.Path, "home", return_value=home
+            ), mock.patch.object(
+                runtime_install, "platform_family", return_value="macos"
             ) as _home:
                 installed = [
                     runtime_install.install_runtime(source, cachebuster=name).resolve()
