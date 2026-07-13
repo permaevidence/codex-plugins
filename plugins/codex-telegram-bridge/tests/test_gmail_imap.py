@@ -7,7 +7,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lib.gmail_imap import GmailImapError, normalize_app_password, poll_unread_messages
+from lib.gmail_imap import (
+    IMAP_TIMEOUT_SECONDS,
+    GmailImapError,
+    normalize_app_password,
+    poll_unread_messages,
+)
 
 
 class FakeImap:
@@ -24,12 +29,14 @@ class FakeImap:
     }
     last_readonly = None
     last_fetch_query = None
+    last_timeout = None
     search_criteria = []
 
     def __init__(self, host, port, timeout):
         self.host = host
         self.port = port
         self.timeout = timeout
+        type(self).last_timeout = timeout
         self.readonly = False
 
     def login(self, address, password):
@@ -76,6 +83,7 @@ class GmailImapTests(unittest.TestCase):
                 b"Message-ID: <message-2@example.com>\r\n\r\n"
             )
         }
+        FakeImap.last_timeout = None
         FakeImap.search_criteria = []
 
     def test_app_password_whitespace_is_removed(self) -> None:
@@ -89,6 +97,13 @@ class GmailImapTests(unittest.TestCase):
         self.assertTrue(state["initialized"])
         self.assertEqual(state["last_uid"], 2)
         self.assertNotIn("ALL", FakeImap.search_criteria)
+
+    def test_default_socket_timeout_is_two_minutes(self) -> None:
+        poll_unread_messages(
+            "owner@gmail.com", "abcd efgh ijkl mnop", {}, client_factory=FakeImap
+        )
+        self.assertEqual(IMAP_TIMEOUT_SECONDS, 120)
+        self.assertEqual(FakeImap.last_timeout, 120)
 
     def test_new_unread_message_is_returned_without_marking_it_read(self) -> None:
         FakeImap.all_uids = [1, 2]

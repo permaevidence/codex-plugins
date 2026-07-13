@@ -59,6 +59,8 @@ from lib.telegram_common import (
 )
 
 EMAIL_CHECK_INTERVAL = 5 * 60
+EMAIL_FAILURE_RETRY_INTERVAL = 60
+EMAIL_FAILURES_BEFORE_ALERT = 2
 REMINDER_CHECK_INTERVAL = 60
 VERSION_CHECK_INTERVAL = 5 * 60
 HEALTH_CHECK_INTERVAL = 30
@@ -1619,7 +1621,9 @@ def maybe_start_email_loop(
         return
 
     def worker() -> None:
+        consecutive_failures = 0
         while True:
+            next_poll_delay = EMAIL_CHECK_INTERVAL
             try:
                 owner_chat_id = str(config.get("owner_chat_id"))
                 state = load_email_state()
@@ -1630,6 +1634,7 @@ def maybe_start_email_loop(
                     max_results=10,
                 )
                 save_email_state(next_state)
+                consecutive_failures = 0
                 set_component_health(
                     "email",
                     "ok",
@@ -1659,22 +1664,26 @@ def maybe_start_email_loop(
                         codex.inject_external_message(owner_chat_id, chat_map, content)
                         save_chat_map(chat_map)
             except GmailImapError as exc:
+                consecutive_failures += 1
+                next_poll_delay = EMAIL_FAILURE_RETRY_INTERVAL
                 set_component_health(
                     "email",
-                    "error",
+                    "error" if consecutive_failures >= EMAIL_FAILURES_BEFORE_ALERT else "warning",
                     category="imap",
                     detail=str(exc),
                 )
                 print(f"email loop failed: {exc}", file=sys.stderr)
             except Exception as exc:
+                consecutive_failures += 1
+                next_poll_delay = EMAIL_FAILURE_RETRY_INTERVAL
                 set_component_health(
                     "email",
-                    "error",
+                    "error" if consecutive_failures >= EMAIL_FAILURES_BEFORE_ALERT else "warning",
                     category="unexpected",
                     detail=f"{type(exc).__name__}: {exc}",
                 )
                 print(f"email loop failed: {exc}", file=sys.stderr)
-            time.sleep(EMAIL_CHECK_INTERVAL)
+            time.sleep(next_poll_delay)
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -2215,8 +2224,15 @@ def health_text(
     if not bridge_config.get("enable_email_notifications"):
         lines.append("ℹ️ Email notifications: disabled")
     elif email.get("status") == "error":
-        lines.append(f"❌ Email notifications: {email.get('detail') or 'Gmail IMAP polling failed'}")
-        lines.append(f"   The bridge keeps retrying. Repair only the affected setting by rerunning: {setup_repair_command()}")
+        email_detail = str(email.get("detail") or "Gmail IMAP polling failed")
+        lines.append(f"❌ Email notifications: {email_detail}")
+        if gmail_authentication_failure(email_detail):
+            lines.append(f"   Repair only the affected setting by rerunning: {setup_repair_command()}")
+        else:
+            lines.append("   The checkpoint is unchanged and the bridge retries once per minute while Gmail is unavailable.")
+    elif email.get("status") == "warning":
+        lines.append(f"⚠️ Email notifications: temporary IMAP failure — {email.get('detail') or 'retrying shortly'}")
+        lines.append("   The email checkpoint is unchanged; the bridge will retry in one minute.")
     elif email.get("status") == "ok":
         lines.append("✅ Email notifications: read-only Gmail IMAP polling works")
     else:
@@ -2313,9 +2329,9 @@ def _component_alert_transition(
     status = str(health.get("status") or "").strip().lower()
     detail = str(health.get("detail") or "").strip()
     if status in problem_statuses:
-        fingerprint = f"{status}|{detail}"
-        if notifications.get(fingerprint_key) == fingerprint:
+        if notifications.get(active_key):
             return []
+        fingerprint = f"{status}|{detail}"
         notifications[fingerprint_key] = fingerprint
         notifications[active_key] = True
         return [problem_message(status, detail)]
@@ -2341,14 +2357,7 @@ def google_background_alert_messages(
         enabled=bool(bridge_config.get("enable_email_notifications")),
         health=email_health,
         problem_statuses={"error"},
-        problem_message=lambda _status, detail: (
-            "Proactive Gmail notifications stopped working.\n"
-            f"Reason: {(detail or 'Gmail IMAP polling failed')[:500]}\n"
-            "The bridge will keep retrying and will not advance its email checkpoint. "
-            "Rerun setup, keep every working value, and replace only the Gmail address or app password if needed:\n"
-            f"{repair}\n"
-            "Use /health for the latest status."
-        ),
+        problem_message=lambda _status, detail: gmail_background_failure_message(detail, repair),
         recovery_message="Proactive Gmail notifications are working again. Any queued unread notices will continue draining normally.",
     )
 
@@ -2378,6 +2387,38 @@ def google_background_alert_messages(
         )
     )
     return messages
+
+
+def gmail_background_failure_message(detail: str, repair: str) -> str:
+    reason = str(detail or "Gmail IMAP polling failed")[:500]
+    authentication_failure = gmail_authentication_failure(reason)
+    if authentication_failure:
+        heading = "Proactive Gmail notifications need attention."
+        action = (
+            "Gmail rejected the saved credentials. Rerun setup, keep every working value, and replace only "
+            f"the Gmail address or app password:\n{repair}"
+        )
+    else:
+        heading = "Proactive Gmail notifications stopped working after two consecutive failures."
+        action = (
+            "This is usually a temporary network or Gmail service problem. The bridge will retry in one minute. "
+            "If it persists, check the computer's network and use /health; rerun setup only if /health reports "
+            "an authentication problem."
+        )
+    return (
+        f"{heading}\n"
+        f"Reason: {reason}\n"
+        "The email checkpoint has not advanced, so notices can catch up after recovery. "
+        f"{action}"
+    )
+
+
+def gmail_authentication_failure(detail: str) -> bool:
+    lowered = str(detail or "").lower()
+    return any(
+        marker in lowered
+        for marker in ("authentication", "login", "rejected", "app password", "credentials")
+    )
 
 
 def start_health_alert_loop(token: str, config: dict[str, Any]) -> None:

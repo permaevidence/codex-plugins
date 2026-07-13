@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 IMAP_HOST = "imap.gmail.com"
 IMAP_PORT = 993
+IMAP_TIMEOUT_SECONDS = 120
 HEADER_QUERY = "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])"
 
 
@@ -29,6 +30,7 @@ def poll_unread_messages(
     state: dict[str, Any] | None,
     *,
     max_results: int = 10,
+    timeout_seconds: float = IMAP_TIMEOUT_SECONDS,
     client_factory: Callable[..., Any] = imaplib.IMAP4_SSL,
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
     """Return newly arrived unread message headers without changing read state.
@@ -49,7 +51,7 @@ def poll_unread_messages(
     current = dict(state or {})
     client = None
     try:
-        client = client_factory(IMAP_HOST, IMAP_PORT, timeout=30)
+        client = client_factory(IMAP_HOST, IMAP_PORT, timeout=max(1.0, float(timeout_seconds)))
         status, _ = client.login(address, password)
         if status != "OK":
             raise GmailImapError("Gmail rejected the IMAP login.")

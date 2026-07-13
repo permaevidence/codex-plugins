@@ -174,16 +174,17 @@ Optional proactive awareness is deliberately separate and read-only:
   instances, and may use a recent permission-restricted cache during
   a temporary feed outage. All calendar writes go through the official app.
 
-IMAP and iCal failures are recorded in `/health`. The bridge sends the owner a
-single Telegram warning for each distinct failure and a recovery message when
-the integration works again. It continues retrying automatically; IMAP does
-not advance its checkpoint on failure, and calendar context uses its bounded
-last-good cache when possible. Every warning includes the installed
-`scripts/setup.py` command so a nontechnical user can rerun setup, keep all
-working values, and replace only the affected app password, iCal URL, Telegram
-token, or OpenAI API key. `/health` also checks whether the official Gmail and
-Google Calendar apps are connected and accessible, with `/apps` reconnection
-instructions when needed.
+IMAP and iCal failures are recorded in `/health`. Gmail IMAP operations have a
+two-minute socket timeout. A first transient Gmail failure is recorded as a
+warning; after two consecutive failures the bridge sends the owner one
+Telegram alert and retries every minute until recovery, then resumes its normal
+five-minute polling and sends a recovery message. IMAP does not advance its
+checkpoint on failure. Authentication alerts include the installed
+`scripts/setup.py` command, while network/time-out alerts avoid telling users
+to replace credentials that Gmail has not rejected. Calendar context uses its
+bounded last-good cache when possible. `/health` also checks whether the
+official Gmail and Google Calendar apps are connected and accessible, with
+`/apps` reconnection instructions when needed.
 
 The wizard stores app passwords and private feed URLs only in mode-`600` local
 state. They are never written to `AGENTS.md`, normal plugin configuration,

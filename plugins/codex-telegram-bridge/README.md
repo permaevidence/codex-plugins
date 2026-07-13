@@ -114,11 +114,15 @@ Every Telegram channel envelope keeps Telegram's original Unix `ts` and adds a r
 
 When Google integration is selected, setup installs both curated plugins automatically. Google authorization is a separate one-time step: run `codex`, enter `/apps`, connect Gmail and Google Calendar through the browser prompts, exit with `/quit`, and rerun `bridge.py doctor`. The doctor requires both apps to be enabled and accessible; it does not treat installation alone as a successful connection. Gmail IMAP notifications and private-iCal calendar context are optional background features and are not required for the official apps.
 
-When proactive Gmail IMAP or private-iCal access fails, the owner receives one
-Telegram warning with the reason and the installed setup command. The bridge
-continues retrying and sends a recovery notice when access returns. `/health`
-shows the current IMAP/iCal state and checks whether the official Gmail and
-Google Calendar apps remain connected and accessible through Codex.
+Gmail IMAP operations use a two-minute socket timeout. The first transient
+failure appears as a warning in `/health`; after two consecutive failures the
+owner receives one Telegram alert, the bridge retries every minute without
+advancing the email checkpoint, and a recovery notice is sent when access
+returns. Credential-repair instructions are shown only for authentication
+failures, not ordinary timeouts. Private-iCal failures retain their existing
+cached-data warning and recovery behavior. `/health` also checks whether the
+official Gmail and Google Calendar apps remain connected and accessible through
+Codex.
 
 Manual setup:
 

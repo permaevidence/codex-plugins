@@ -904,7 +904,7 @@ class HealthVisibilityTests(unittest.TestCase):
         )
 
         self.assertEqual(len(first), 2)
-        self.assertIn("will not advance its email checkpoint", first[0])
+        self.assertIn("email checkpoint has not advanced", first[0])
         self.assertIn("cached data", first[1])
         self.assertIn("setup.py", first[0])
         self.assertEqual(second, [])
@@ -912,6 +912,109 @@ class HealthVisibilityTests(unittest.TestCase):
         self.assertIn("working again", recovered[0])
         self.assertIn("working again", recovered[1])
         self.assertEqual(repeated_recovery, [])
+
+    def test_email_polling_waits_one_minute_after_failures_and_alerts_after_second(self):
+        bridge = load_bridge_module()
+        statuses = []
+        delays = []
+        outcomes = [
+            bridge.GmailImapError("Could not reach Gmail IMAP: timeout"),
+            bridge.GmailImapError("Could not reach Gmail IMAP: timeout"),
+            ([], {"initialized": True, "last_uid": 7}),
+        ]
+
+        class StopEmailLoop(Exception):
+            pass
+
+        class ImmediateThread:
+            def __init__(self, *, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                try:
+                    self.target()
+                except StopEmailLoop:
+                    pass
+
+        def poll(*_args, **_kwargs):
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        def sleep(delay):
+            delays.append(delay)
+            if len(delays) == 3:
+                raise StopEmailLoop()
+
+        def record_health(component, status, **kwargs):
+            statuses.append((component, status, kwargs.get("detail")))
+            return True
+
+        with mock.patch.object(bridge, "poll_unread_messages", side_effect=poll), mock.patch.object(
+            bridge, "load_email_state", return_value={}
+        ), mock.patch.object(bridge, "save_email_state"), mock.patch.object(
+            bridge, "set_component_health", side_effect=record_health
+        ), mock.patch.object(bridge.time, "sleep", side_effect=sleep), mock.patch.object(
+            bridge.threading, "Thread", ImmediateThread
+        ):
+            bridge.maybe_start_email_loop(
+                {
+                    "enable_email_notifications": True,
+                    "owner_chat_id": "123",
+                    "gmail_imap_email": "owner@gmail.com",
+                    "gmail_imap_app_password": "app-password",
+                },
+                mock.Mock(),
+                {},
+                mock.Mock(),
+            )
+
+        self.assertEqual([status for _component, status, _detail in statuses], ["warning", "error", "ok"])
+        self.assertEqual(delays, [60, 60, 300])
+
+    def test_timeout_alert_does_not_tell_user_to_replace_credentials(self):
+        bridge = load_bridge_module()
+        message = bridge.gmail_background_failure_message(
+            "Could not reach Gmail IMAP: timeout: The read operation timed out",
+            "python3 /runtime/scripts/setup.py",
+        )
+        self.assertIn("after two consecutive failures", message)
+        self.assertIn("retry in one minute", message)
+        self.assertNotIn("replace only", message)
+
+    def test_first_transient_email_failure_does_not_alert(self):
+        bridge = load_bridge_module()
+        notifications = {}
+        messages = bridge.google_background_alert_messages(
+            notifications,
+            {"enable_email_notifications": True},
+            {"enable_calendar": False},
+            {"status": "warning", "detail": "read timed out"},
+            {},
+        )
+        self.assertEqual(messages, [])
+        self.assertNotIn("email_active", notifications)
+
+    def test_active_email_failure_does_not_spam_when_detail_changes(self):
+        bridge = load_bridge_module()
+        notifications = {}
+        first = bridge.google_background_alert_messages(
+            notifications,
+            {"enable_email_notifications": True},
+            {"enable_calendar": False},
+            {"status": "error", "detail": "read timed out"},
+            {},
+        )
+        changed = bridge.google_background_alert_messages(
+            notifications,
+            {"enable_email_notifications": True},
+            {"enable_calendar": False},
+            {"status": "error", "detail": "network unreachable"},
+            {},
+        )
+        self.assertEqual(len(first), 1)
+        self.assertEqual(changed, [])
 
     def test_disabling_background_feature_clears_active_alert_without_false_recovery(self):
         bridge = load_bridge_module()
