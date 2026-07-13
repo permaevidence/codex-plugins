@@ -82,9 +82,19 @@ rerun, the wizard finds the existing installation and defaults to keeping every
 working value. Saved secrets are never displayed: choose **Yes** to keep one,
 or **No** to enter its replacement. Unchanged pairing, allowlists, conversation
 history, memory archives, hooks, model selection, permissions, Google settings,
-and other configuration remain in place. New credentials are validated before
-activation, the final doctor verifies the complete system, and setup restores
-its backup if anything fails.
+and other configuration remain in place.
+
+The wizard walks through seven numbered steps and shows a review screen before
+changing anything. Every credential is validated with a real request the
+moment you enter it, so a paste mistake is caught immediately and can be
+corrected on the spot; a masked confirmation (first and last characters only)
+is echoed after each hidden entry. The install phase shows one progress line
+per stage and writes the full command output to a `setup.log` next to the
+configuration backup. The final doctor verifies the complete system, and setup
+restores its backup if installation fails. Telegram pairing runs only after
+the installation is complete and verified: a pairing that times out or is
+declined never rolls anything back — setup finishes and prints the manual
+pairing steps instead.
 
 It asks for:
 

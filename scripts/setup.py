@@ -123,6 +123,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+TOTAL_STEPS = 7
+
+
 def main() -> int:
     args = parse_args()
     existing_telegram_config = load_json(TELEGRAM_CONFIG)
@@ -133,57 +136,138 @@ def main() -> int:
         or TELEGRAM_ENV.exists()
         or MEMORY_ENV.exists()
     )
-    print("Perma Evidence Codex plugin setup")
+    skip_checks = bool(args.skip_credential_checks)
+
+    print_header("Perma Evidence Codex plugin setup")
+    print("This wizard installs the long-term-memory and Telegram-bridge plugins,")
+    print("connects your accounts, and verifies everything end to end.")
+    print()
+    print(f"{TOTAL_STEPS} short steps. A first install takes about 10-15 minutes, and you only")
+    print("do it once. Have ready: a Telegram bot token from @BotFather and an")
+    print("OpenAI API key. Press Enter at any prompt to accept the suggested value")
+    print("shown in [brackets].")
     if existing_installation:
-        print("Existing configuration found. Press Enter to keep each working setting, or choose Replace when needed.")
-    print()
-    print("This wizard will:")
-    print("- install the local Codex plugins from this repo")
-    print("- configure long-term memory with AGENTS.md transport")
-    print("- require one OpenAI API key for memory summaries and voice transcription")
-    print("- configure the Telegram bridge using your BotFather token")
-    print("- optionally install official Gmail and Google Calendar plugins with OpenAI-managed OAuth")
-    print("- optionally configure read-only IMAP email notices and private iCal calendar context")
-    print("- default to broad autonomous Codex permissions for a dedicated remote-control computer")
-    print("- use your home folder as Codex's starting point unless you choose another folder")
-    print("- optionally start the bridge and run the doctor check")
-    print()
+        print()
+        print("An existing installation was found. Every working setting is kept unless")
+        print("you choose to replace it.")
+    if args.telegram_token or args.openai_api_key or args.gmail_app_password or args.calendar_ical_url:
+        print()
+        print("Warning: command-line secrets can be visible in shell history and process listings.")
 
     require_codex()
 
+    # ── Step 1 ──────────────────────────────────────────────────────
+    step_header(1, "Starting folder and time zone")
+    print("Codex sessions launched from Telegram begin in this folder, and the")
+    print("AGENTS.md memory file lives there. With full computer access (chosen in")
+    print("step 4) it is a starting point, not a boundary.")
+    print()
     project_dir = resolve_project_dir(
         args.project_dir,
         str(existing_telegram_config.get("default_cwd") or ""),
     )
     agents_md_path = project_dir / "AGENTS.md"
+    print()
+    print("The time zone keeps every clock in agreement: prompt timestamps, memory,")
+    print("Telegram message times, and calendar headings.")
+    timezone_name = resolve_timezone_name(
+        args.timezone,
+        str(existing_memory_config.get("timezone") or existing_telegram_config.get("timezone") or ""),
+    )
+
+    # ── Step 2 ──────────────────────────────────────────────────────
+    step_header(2, "Telegram bot")
+    print("The token @BotFather sent you when you created your bot. It is checked")
+    print("with Telegram the moment you enter it, so a paste mistake is caught")
+    print("right here instead of at the end.")
+    print()
     existing_telegram_token = read_env_value(TELEGRAM_ENV, "TELEGRAM_BOT_TOKEN")
+
+    def telegram_checker(token: str) -> None:
+        if ":" not in token and not prompt_yes_no(
+            "That does not look like a normal BotFather token. Use it anyway?", default=False
+        ):
+            raise CredentialCheckError("Token discarded.")
+        if not skip_checks:
+            validate_telegram_token(token)
+
     telegram_token = resolve_secret(
         supplied=args.telegram_token,
         existing=existing_telegram_token,
-        label="Telegram bot token from BotFather",
+        label="Telegram bot token",
         required_message="A Telegram bot token is required.",
+        validator=telegram_checker,
     )
-    if ":" not in telegram_token:
-        if not prompt_yes_no("That token does not look like a normal BotFather token. Continue anyway?", default=False):
-            raise SystemExit("Setup cancelled.")
+    telegram_kept = bool(existing_telegram_token) and telegram_token == existing_telegram_token
+    if telegram_kept:
+        print("Keeping the existing token; the final health check verifies it.")
 
+    # ── Step 3 ──────────────────────────────────────────────────────
+    step_header(3, "OpenAI API key")
+    print("Used for two things: writing memory summaries and transcribing Telegram")
+    print("voice messages. The key needs active API billing (platform.openai.com);")
+    print("a ChatGPT subscription alone does not include API access. The key is")
+    print("checked immediately with a real, fraction-of-a-cent request.")
+    print()
     memory_openai_key = read_env_value(MEMORY_ENV, "OPENAI_API_KEY")
     telegram_openai_key = read_env_value(TELEGRAM_ENV, "OPENAI_API_KEY")
     existing_openai_key = memory_openai_key or telegram_openai_key
+
+    def openai_checker(key: str) -> None:
+        if not key.startswith("sk-") and not prompt_yes_no(
+            "That key does not start with 'sk-'. Use it anyway?", default=False
+        ):
+            raise CredentialCheckError("Key discarded.")
+        if not skip_checks:
+            validate_openai_key(key)
+
     openai_key = resolve_secret(
         supplied=args.openai_api_key,
         existing=existing_openai_key,
         label="OpenAI API key",
         required_message="An OpenAI API key is required for memory summaries and voice transcription.",
+        validator=openai_checker,
     )
-    if not openai_key.startswith("sk-"):
-        if not prompt_yes_no("That OpenAI key does not start with 'sk-'. Continue anyway?", default=False):
-            raise SystemExit("Setup cancelled.")
+    openai_kept = bool(existing_openai_key) and openai_key == existing_openai_key
+    if openai_kept:
+        print("Keeping the existing key; the final health check verifies memory and transcription.")
 
-    timezone_name = resolve_timezone_name(
-        args.timezone,
-        str(existing_memory_config.get("timezone") or existing_telegram_config.get("timezone") or ""),
+    # ── Step 4 ──────────────────────────────────────────────────────
+    step_header(4, "Codex permissions")
+    sandbox_mode = args.sandbox_mode or choose_sandbox_mode(
+        str(existing_telegram_config.get("sandbox_mode") or ""),
+        project_dir=project_dir,
     )
+    print()
+    network_access = resolve_network_access(
+        args.network_access,
+        sandbox_mode,
+        existing_telegram_config.get("network_access"),
+    )
+
+    # ── Step 5 ──────────────────────────────────────────────────────
+    step_header(5, "Google integration (optional)")
+    google_setup = resolve_google_setup(args, timezone_name=timezone_name, skip_checks=skip_checks)
+
+    # ── Step 6 ──────────────────────────────────────────────────────
+    step_header(6, "Bridge service and pairing")
+    print("The bridge is the small background service that connects Telegram to")
+    print("Codex. It starts at login and restarts itself after a crash.")
+    print()
+    start_bridge = resolve_start_bridge(args.start_bridge)
+    already_paired = existing_allowed_chat()
+    if already_paired:
+        print("Telegram pairing: already approved — nothing to redo.")
+        pair_now = False
+    else:
+        print()
+        print("Pairing links your personal Telegram account to the bot so that only")
+        print("you can talk to it. It is a 30-second step at the end of setup, and it")
+        print("can always be done later.")
+        pair_now = start_bridge and resolve_pair_now(args.pair_now)
+
+    print()
+    print("Reading the Codex model catalog...")
     model, effort = resolve_model_selection(
         args.model,
         args.effort,
@@ -191,67 +275,58 @@ def main() -> int:
         str(existing_telegram_config.get("effort") or "") or None,
     )
 
-    sandbox_mode = args.sandbox_mode or choose_sandbox_mode(
-        str(existing_telegram_config.get("sandbox_mode") or "")
-    )
-    network_access = resolve_network_access(
-        args.network_access,
-        sandbox_mode,
-        existing_telegram_config.get("network_access"),
-    )
-    start_bridge = resolve_start_bridge(args.start_bridge)
-    already_paired = existing_allowed_chat()
-    pair_now = start_bridge and not already_paired and resolve_pair_now(args.pair_now)
-    google_setup = resolve_google_setup(args)
+    # ── Step 7 ──────────────────────────────────────────────────────
+    step_header(7, "Review")
 
-    print()
-    print("Setup summary")
-    print(f"- installer source: {REPO_ROOT}")
-    print(f"- permanent runtime: {CURRENT_RUNTIME_LINK}")
-    print(f"- Telegram/Codex starting folder: {project_dir}")
-    print(f"- access scope: whole {platform_display_name()} as your local user when dangerFullAccess is selected")
-    print(f"- AGENTS.md memory target: {agents_md_path}")
-    print(f"- local time zone: {timezone_name}")
-    print(f"- Telegram token: {'set' if telegram_token else 'missing'}")
-    print(f"- OpenAI API key: {'set' if openai_key else 'missing'}")
-    print(f"- sandbox: {sandbox_mode}")
-    print(f"- network access for Codex sessions: {network_access}")
-    print(f"- start bridge after setup: {start_bridge}")
-    print(f"- guide Telegram pairing now: {pair_now}")
-    print(f"- official Gmail/Calendar plugins: {google_setup['enabled']}")
-    print(f"- proactive Gmail IMAP notifications: {google_setup['email_enabled']}")
-    print(f"- private iCal calendar context: {google_setup['calendar_enabled']}")
-    print("- memory hooks: trust this plugin's four registered hooks")
+    def secret_status(kept: bool) -> str:
+        if kept:
+            return "kept — re-verified by the final health check"
+        return "provided (checks skipped)" if skip_checks else "verified just now"
+
+    access_line = (
+        "the whole computer, as your local user  (dangerFullAccess)"
+        if sandbox_mode == "dangerFullAccess"
+        else f"only {display_path(project_dir)}  (workspaceWrite)"
+    )
+    review_rows = [
+        ("Starting folder", f"{display_path(project_dir)}  (AGENTS.md memory lives here)"),
+        ("Time zone", timezone_name),
+        ("Telegram bot token", secret_status(telegram_kept)),
+        ("OpenAI API key", secret_status(openai_kept)),
+        ("Codex may control", access_line),
+        ("Internet access", "yes" if network_access else "no"),
+        ("Model", f"{model}  (reasoning effort: {effort})"),
+        ("Gmail/Calendar apps", "install now, authorize later via /apps" if google_setup["enabled"] else "no"),
+        ("Email notices", "on — IMAP " + secret_status(bool(google_setup.get("email_kept"))) if google_setup["email_enabled"] else "off"),
+        ("Calendar context", f"{len(list(google_setup['calendar_sources']))} private feed(s)" if google_setup["calendar_enabled"] else "off"),
+        ("Bridge service", ("start after setup" if start_bridge else "do not start") + ("; pair via this wizard" if pair_now else "")),
+        ("Install location", unresolved_display_path(CURRENT_RUNTIME_LINK.parent)),
+        ("Memory hooks", "this plugin's four hooks will be verified and trusted"),
+    ]
+    label_width = max(len(label) for label, _ in review_rows) + 2
+    for label, value in review_rows:
+        print(f"  {label.ljust(label_width)}{value}")
     print()
     if not prompt_yes_no("Proceed with these changes?", default=True):
-        raise SystemExit("Setup cancelled.")
+        raise SystemExit("Setup cancelled. Nothing was changed.")
 
-    if args.telegram_token or args.openai_api_key or args.gmail_app_password or args.calendar_ical_url:
-        print("Warning: command-line secrets can be visible in shell history and process listings.")
-
-    if not args.skip_credential_checks:
-        telegram_changed = not existing_telegram_token or telegram_token != existing_telegram_token
-        openai_changed = (
-            not existing_openai_key
-            or openai_key != existing_openai_key
-            or (memory_openai_key and telegram_openai_key and memory_openai_key != telegram_openai_key)
-        )
-        if telegram_changed:
-            validate_telegram_token(telegram_token)
-        else:
-            print("Keeping the existing Telegram bot token; the final doctor check will verify it.")
-        if openai_changed:
-            validate_openai_key(openai_key)
-        else:
-            print("Keeping the existing OpenAI API key; the final doctor check will verify memory and transcription.")
-        validate_google_background_access(google_setup, timezone_name)
-
+    # ── Install ─────────────────────────────────────────────────────
+    print_header("Installing")
     backup_dir = create_setup_backup(agents_md_path)
-    print(f"Configuration backup: {backup_dir}")
+    log_path = backup_dir / "setup.log"
+    print(f"  Backup of the current configuration: {display_path(backup_dir)}")
+    print(f"  Detailed log of every command:       {display_path(log_path)}")
+    print()
     previous_runtime = CURRENT_RUNTIME_LINK.resolve() if CURRENT_RUNTIME_LINK.exists() else None
     try:
-        validate_source_runtime(REPO_ROOT)
-        installed_root = install_runtime(REPO_ROOT)
+        python_stage(
+            "Checking the plugin code (built-in test suites)",
+            lambda: validate_source_runtime(REPO_ROOT, log_path=log_path),
+        )
+        installed_root = python_stage(
+            "Installing the permanent runtime",
+            lambda: install_runtime(REPO_ROOT),
+        )
         install_plugins = installed_root / "scripts" / "install_plugins.py"
         memory_installer = installed_root / "plugins" / "codex-long-term-memory" / "scripts" / "install.py"
         memory_agents_updater = installed_root / "plugins" / "codex-long-term-memory" / "scripts" / "update_agents_injection.py"
@@ -260,54 +335,52 @@ def main() -> int:
         install_command = [sys.executable, str(install_plugins), "--replace-marketplace"]
         if google_setup["enabled"]:
             install_command.append("--with-google-apps")
-        run(install_command)
-        run([sys.executable, str(memory_installer)])
+        run_stage("Registering the Codex plugins", install_command, log_path=log_path)
+        run_stage("Installing the memory hooks", [sys.executable, str(memory_installer)], log_path=log_path)
 
-        configure_memory(
-            openai_key=openai_key,
-            agents_md_path=agents_md_path,
-            timezone_name=timezone_name,
-            calendar_enabled=bool(google_setup["calendar_enabled"]),
-            calendar_sources=list(google_setup["calendar_sources"]),
+        def write_configuration() -> None:
+            configure_memory(
+                openai_key=openai_key,
+                agents_md_path=agents_md_path,
+                timezone_name=timezone_name,
+                calendar_enabled=bool(google_setup["calendar_enabled"]),
+                calendar_sources=list(google_setup["calendar_sources"]),
+            )
+            configure_telegram(
+                telegram_token=telegram_token,
+                openai_key=openai_key,
+                project_dir=project_dir,
+                model=model,
+                effort=effort,
+                sandbox_mode=sandbox_mode,
+                network_access=network_access,
+                timezone_name=timezone_name,
+                google_apps_enabled=bool(google_setup["enabled"]),
+                email_notifications_enabled=bool(google_setup["email_enabled"]),
+                gmail_email=str(google_setup["gmail_email"]),
+                gmail_app_password=str(google_setup["gmail_app_password"]),
+            )
+            write_local_capabilities_block(agents_md_path)
+
+        python_stage("Writing the configuration files", write_configuration)
+        python_stage("Verifying and trusting the four memory hooks", lambda: trust_memory_hooks(project_dir))
+        run_stage(
+            "Refreshing the AGENTS.md memory block",
+            [sys.executable, str(memory_agents_updater), "--cwd", str(project_dir)],
+            log_path=log_path,
         )
-        configure_telegram(
-            telegram_token=telegram_token,
-            openai_key=openai_key,
-            project_dir=project_dir,
-            model=model,
-            effort=effort,
-            sandbox_mode=sandbox_mode,
-            network_access=network_access,
-            timezone_name=timezone_name,
-            google_apps_enabled=bool(google_setup["enabled"]),
-            email_notifications_enabled=bool(google_setup["email_enabled"]),
-            gmail_email=str(google_setup["gmail_email"]),
-            gmail_app_password=str(google_setup["gmail_app_password"]),
-        )
-        write_local_capabilities_block(agents_md_path)
-        trust_memory_hooks(project_dir)
-        run([sys.executable, str(memory_agents_updater), "--cwd", str(project_dir)])
-
-        print()
-        print("Configuration written.")
-        print(f"- memory env:   {MEMORY_ENV}")
-        print(f"- memory config:{MEMORY_CONFIG}")
-        print(f"- Telegram env: {TELEGRAM_ENV}")
-        print(f"- Telegram cfg: {TELEGRAM_CONFIG}")
-        print(f"- AGENTS.md:    {agents_md_path}")
-        if google_setup["enabled"]:
-            print("- Google apps:  installed; one-time authorization through Codex /apps is still required")
-
         if start_bridge:
-            run([sys.executable, str(bridge_cli), "install-service"])
+            run_stage(
+                "Installing and starting the bridge service",
+                [sys.executable, str(bridge_cli), "install-service"],
+                log_path=log_path,
+            )
 
-        paired = False
-        if pair_now:
-            paired = guided_pairing(installed_root)
-
-        print()
+        print_header("Health check")
+        print("Running the doctor: it executes every hook, checks the live Telegram and")
+        print("OpenAI APIs, and verifies the bridge.")
         doctor_command = [sys.executable, str(bridge_cli), "doctor"]
-        if not paired and not existing_allowed_chat():
+        if not existing_allowed_chat():
             doctor_command.append("--allow-unpaired")
         if not start_bridge:
             doctor_command.append("--allow-stopped")
@@ -316,11 +389,27 @@ def main() -> int:
         run(doctor_command)
         prune_old_versions(active=installed_root.resolve())
     except BaseException:
+        print()
+        print("Setup failed. Restoring the previous configuration and runtime...")
         restore_setup_backup(backup_dir, agents_md_path)
         restore_runtime_link(previous_runtime)
         reactivate_previous_runtime(previous_runtime)
+        print("Restore complete — nothing from this run is active.")
         raise
 
+    # Pairing runs AFTER the install is complete and verified, so a slow or
+    # declined pairing can never undo a healthy installation.
+    paired = already_paired
+    if pair_now:
+        print_header("Telegram pairing")
+        paired = guided_pairing(installed_root)
+
+    print_header("Setup complete")
+    print("Where things live:")
+    print(f"  memory settings   {display_path(MEMORY_DIR)}")
+    print(f"  bridge settings   {display_path(TELEGRAM_DIR)}")
+    print(f"  AGENTS.md         {display_path(agents_md_path)}")
+    print(f"  runtime           {display_path(installed_root)}")
     print()
     print("Next:")
     next_step = 1
@@ -332,17 +421,97 @@ def main() -> int:
             f"python3 '{bridge_cli}' doctor"
         )
         next_step += 1
-    print(f"{next_step}. Send a Telegram DM to your bot.")
-    next_step += 1
-    print(f"{next_step}. If the bot replies with a pairing code, approve it locally:")
-    print(f"   python3 '{installed_root}/plugins/codex-telegram-bridge/scripts/access.py' pair <code>")
-    next_step += 1
-    print(f"{next_step}. Send /newsession in Telegram only after the preceding setup steps are complete.")
+    if not paired:
+        print(f"{next_step}. Send a Telegram DM to your bot.")
+        next_step += 1
+        print(f"{next_step}. If the bot replies with a pairing code, approve it locally:")
+        print(f"   python3 '{installed_root}/plugins/codex-telegram-bridge/scripts/access.py' pair <code>")
+        next_step += 1
+    print(f"{next_step}. Send /newsession in Telegram once the steps above are complete.")
     print()
     print("To change a credential or repair an integration later, rerun:")
-    print(f'python3 "{installed_root}/scripts/setup.py"')
-    print("The wizard will keep every saved working value by default.")
+    print(f'  python3 "{installed_root}/scripts/setup.py"')
+    print("The wizard keeps every saved working value by default.")
     return 0
+
+
+class CredentialCheckError(Exception):
+    """A credential or feed failed validation; the user may retry interactively."""
+
+
+RULE_WIDTH = 64
+
+
+def print_header(title: str) -> None:
+    print()
+    print("━" * RULE_WIDTH)
+    print(f"  {title}")
+    print("━" * RULE_WIDTH)
+
+
+def step_header(number: int, title: str) -> None:
+    print()
+    print("─" * RULE_WIDTH)
+    print(f"  Step {number} of {TOTAL_STEPS} · {title}")
+    print("─" * RULE_WIDTH)
+
+
+def mask_secret(value: str) -> str:
+    value = value.strip()
+    if len(value) > 12:
+        return f"{value[:5]}…{value[-4:]} ({len(value)} characters)"
+    if len(value) > 4:
+        return f"{value[:2]}… ({len(value)} characters)"
+    return f"({len(value)} characters)"
+
+
+def python_stage(label: str, action):
+    """Run a Python step behind a single friendly progress line."""
+    print(f"  • {label} ...", end="", flush=True)
+    started = time.monotonic()
+    try:
+        result = action()
+    except SystemExit:
+        print(" FAILED")
+        raise
+    except Exception as exc:
+        print(" FAILED")
+        raise SystemExit(f"{label} failed: {exc}") from exc
+    print(f" ok ({time.monotonic() - started:.0f}s)")
+    return result
+
+
+def run_stage(label: str, command: list[str], *, log_path: Path) -> None:
+    """Run a subprocess quietly: one progress line, full output in the log."""
+    print(f"  • {label} ...", end="", flush=True)
+    started = time.monotonic()
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write(f"\n===== {label}\n$ {' '.join(command)}\n")
+        log.flush()
+        stage_offset = log.tell()
+        completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False)
+    if completed.returncode == 0:
+        print(f" ok ({time.monotonic() - started:.0f}s)")
+        return
+    print(" FAILED")
+    print()
+    print(f"The step '{label}' failed (exit code {completed.returncode}). Its output:")
+    tail_log(log_path, offset=stage_offset)
+    print(f"Full log: {log_path}")
+    raise SystemExit(completed.returncode)
+
+
+def tail_log(log_path: Path, lines: int = 25, offset: int = 0) -> None:
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(offset)
+            content = handle.read().splitlines()
+    except OSError:
+        return
+    if len(content) > lines:
+        print(f"    [... {len(content) - lines} earlier lines in the log ...]")
+    for line in content[-lines:]:
+        print(f"    {line}")
 
 
 def require_codex() -> None:
@@ -431,20 +600,22 @@ def codex_effective_model_and_effort() -> tuple[str | None, str | None]:
 
 
 def validate_telegram_token(token: str) -> None:
-    print("Validating Telegram bot token...")
+    print("  Checking the token with Telegram ...", end="", flush=True)
     request = urllib.request.Request(f"https://api.telegram.org/bot{token}/getMe")
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"Telegram rejected the bot token or could not be reached: {exc}") from exc
+        print(" failed")
+        raise CredentialCheckError(f"Telegram rejected the bot token or could not be reached: {exc}") from exc
     if not payload.get("ok") or not (payload.get("result") or {}).get("id"):
-        raise SystemExit("Telegram did not recognize that bot token.")
-    print(f"Telegram bot verified: @{(payload.get('result') or {}).get('username', 'unknown')}")
+        print(" failed")
+        raise CredentialCheckError("Telegram did not recognize that bot token.")
+    print(f" ok — bot @{(payload.get('result') or {}).get('username', 'unknown')}")
 
 
 def validate_openai_key(key: str) -> None:
-    print("Validating OpenAI API key...")
+    print("  Checking the key with OpenAI (summary + transcription) ...", end="", flush=True)
     try:
         response_request = urllib.request.Request(
             "https://api.openai.com/v1/responses",
@@ -477,11 +648,12 @@ def validate_openai_key(key: str) -> None:
             if not 200 <= response.status < 300:
                 raise RuntimeError(f"Transcription API returned HTTP {response.status}")
     except Exception as exc:
-        raise SystemExit(
-            "OpenAI rejected a real summary or transcription request. An API key with active API billing is required; a ChatGPT subscription alone is not an API key. "
+        print(" failed")
+        raise CredentialCheckError(
+            "OpenAI rejected a real summary or transcription request. The key needs active API billing; a ChatGPT subscription alone is not an API key. "
             f"Details: {exc}"
         ) from exc
-    print("OpenAI API key, billing, memory model, and transcription access verified.")
+    print(" ok — billing, memory model, and transcription all work")
 
 
 def openai_transcription_probe_body() -> tuple[bytes, str]:
@@ -509,7 +681,7 @@ def resolve_project_dir(value: str | None, existing: str = "") -> Path:
     default = existing.strip() or str(Path.home())
     while True:
         raw = value or prompt(
-            "Codex starting folder (press Enter to keep the shown folder; not a permission limit in autonomous mode)",
+            "Starting folder",
             default=default,
         )
         path = Path(raw).expanduser().resolve()
@@ -570,28 +742,59 @@ def resolve_timezone_name(requested: str | None, existing: str = "") -> str:
             value = None
 
 
-def resolve_secret(*, supplied: str | None, existing: str, label: str, required_message: str) -> str:
+def resolve_secret(
+    *,
+    supplied: str | None,
+    existing: str,
+    label: str,
+    required_message: str,
+    validator=None,
+) -> str:
     if supplied:
-        return supplied.strip()
+        value = supplied.strip()
+        if validator is not None:
+            try:
+                validator(value)
+            except CredentialCheckError as exc:
+                raise SystemExit(f"{label}: {exc}") from exc
+        return value
     if existing:
-        print(f"{label}: configured (the saved value is hidden).")
+        print(f"{label}: already configured (the saved value is hidden).")
         if prompt_yes_no(f"Keep the existing {label}? Choose No to replace it", default=True):
             return existing
         print(f"Enter the replacement {label}. The existing value remains active unless setup completes successfully.")
     while True:
-        value = getpass.getpass(f"{label}: ").strip()
-        if value:
-            return value
-        print(required_message)
+        value = getpass.getpass(f"{label} (typing stays hidden — paste it and press Enter): ").strip()
+        if not value:
+            print(required_message)
+            continue
+        print(f"  Received: {mask_secret(value)}")
+        if validator is not None:
+            try:
+                validator(value)
+            except CredentialCheckError as exc:
+                print(f"  ✗ {exc}")
+                print("  Let's try that again (Ctrl+C aborts setup).")
+                continue
+        return value
 
 
-def choose_sandbox_mode(existing: str = "") -> str:
-    print("Choose Telegram-launched Codex permissions:")
-    print("1. dangerFullAccess (recommended for a dedicated remote-control machine): broad local filesystem access")
-    print("2. workspaceWrite: narrower mode; can edit only the chosen starting folder")
+def choose_sandbox_mode(existing: str = "", project_dir: Path | None = None) -> str:
+    folder = display_path(project_dir) if project_dir else "the chosen starting folder"
+    if folder == "~":
+        folder = "your home folder"
+    print("How much of this computer may Telegram-launched Codex sessions control?")
+    print()
+    print("  1. The whole computer  (recommended for a dedicated machine)")
+    print("     Codex can read and change anything your user account can.")
+    print("     Stored in the configuration as: dangerFullAccess")
+    print("  2. Only the starting folder")
+    print(f"     Codex can modify files only inside {folder}.")
+    print("     Stored in the configuration as: workspaceWrite")
+    print()
     default = "2" if existing == "workspaceWrite" else "1"
     while True:
-        choice = prompt("Sandbox mode", default=default)
+        choice = prompt("Your choice (1 or 2)", default=default)
         if choice in {"1", "dangerFullAccess", "dangerfullaccess"}:
             return "dangerFullAccess"
         if choice in {"2", "workspaceWrite", "workspacewrite"}:
@@ -603,7 +806,10 @@ def resolve_network_access(value: str | None, sandbox_mode: str, existing: objec
     if value:
         return value == "yes"
     default = bool(existing) if isinstance(existing, bool) else sandbox_mode == "dangerFullAccess"
-    return prompt_yes_no("Allow network access for Telegram-launched Codex sessions?", default=default)
+    return prompt_yes_no(
+        "May Codex sessions use the internet (web lookups, installs, deployments)?",
+        default=default,
+    )
 
 
 def resolve_start_bridge(value: str | None) -> bool:
@@ -618,14 +824,19 @@ def resolve_pair_now(value: str | None) -> bool:
     return prompt_yes_no("Complete Telegram pairing inside this wizard?", default=True)
 
 
-def resolve_google_setup(args: argparse.Namespace) -> dict[str, object]:
+def resolve_google_setup(
+    args: argparse.Namespace,
+    *,
+    timezone_name: str = "",
+    skip_checks: bool = False,
+) -> dict[str, object]:
     existing_config = load_json(TELEGRAM_CONFIG)
     existing_sources = read_calendar_sources()
-    print()
-    print("Google integration")
-    print("- Setup can install OpenAI's official Gmail and Google Calendar plugins automatically.")
-    print("- You will authorize your Google account afterward from Codex with /apps.")
+    print("Codex can use OpenAI's official Gmail and Google Calendar plugins.")
+    print("- Setup installs them automatically; you authorize your Google account")
+    print("  afterward from inside Codex with /apps.")
     print("- No Google Cloud project, client ID, or client secret is needed.")
+    print()
     if args.google_integration:
         enabled = args.google_integration == "yes"
     else:
@@ -636,6 +847,7 @@ def resolve_google_setup(args: argparse.Namespace) -> dict[str, object]:
     result: dict[str, object] = {
         "enabled": enabled,
         "email_enabled": False,
+        "email_kept": False,
         "gmail_email": "",
         "gmail_app_password": "",
         "calendar_enabled": False,
@@ -647,6 +859,7 @@ def resolve_google_setup(args: argparse.Namespace) -> dict[str, object]:
     print()
     print("The next two choices are optional background features.")
     print("They are not required for the official Gmail and Calendar apps.")
+    print()
 
     if args.email_notifications:
         email_enabled = args.email_notifications == "yes"
@@ -658,19 +871,40 @@ def resolve_google_setup(args: argparse.Namespace) -> dict[str, object]:
     result["email_enabled"] = email_enabled
     if email_enabled:
         print()
-        print("Gmail IMAP setup requires Google 2-Step Verification and a 16-character app password.")
-        print("Create one at: https://myaccount.google.com/apppasswords")
+        print("Gmail IMAP needs Google 2-Step Verification and a 16-character app")
+        print("password. Create one at: https://myaccount.google.com/apppasswords")
+        print("Both values are checked with Gmail the moment you enter them.")
         existing_email = read_env_value(TELEGRAM_ENV, "GMAIL_IMAP_EMAIL")
-        gmail_email = args.gmail_email or prompt("Gmail address for notifications", default=existing_email)
         existing_password = read_env_value(TELEGRAM_ENV, "GMAIL_IMAP_APP_PASSWORD")
-        gmail_password = resolve_secret(
-            supplied=args.gmail_app_password,
-            existing=existing_password,
-            label="Gmail app password",
-            required_message="A Gmail app password is required for proactive notifications.",
-        )
-        result["gmail_email"] = gmail_email.strip()
-        result["gmail_app_password"] = "".join(gmail_password.split())
+        while True:
+            gmail_email = (args.gmail_email or prompt("Gmail address for notifications", default=existing_email)).strip()
+            gmail_password = "".join(
+                resolve_secret(
+                    supplied=args.gmail_app_password,
+                    existing=existing_password,
+                    label="Gmail app password",
+                    required_message="A Gmail app password is required for proactive notifications.",
+                ).split()
+            )
+            kept = bool(existing_password) and gmail_password == existing_password and gmail_email == existing_email
+            if kept:
+                print("Keeping the existing Gmail IMAP settings; the final health check verifies them.")
+                result["email_kept"] = True
+                break
+            if skip_checks:
+                break
+            try:
+                probe_gmail_imap(gmail_email, gmail_password)
+                break
+            except CredentialCheckError as exc:
+                if args.gmail_email or args.gmail_app_password:
+                    raise SystemExit(f"Gmail IMAP validation failed: {exc}") from exc
+                print(f"  ✗ {exc}")
+                print("  Let's try the Gmail address and app password again.")
+                existing_email, existing_password = gmail_email, ""
+        result["gmail_email"] = gmail_email
+        result["gmail_app_password"] = gmail_password
+        print()
 
     if args.calendar_context:
         calendar_enabled = args.calendar_context == "yes"
@@ -687,6 +921,11 @@ def resolve_google_setup(args: argparse.Namespace) -> dict[str, object]:
                 for index, url in enumerate(args.calendar_ical_url, start=1)
                 if url.strip()
             ]
+            if not skip_checks:
+                try:
+                    probe_calendar_sources(sources, timezone_name)
+                except CredentialCheckError as exc:
+                    raise SystemExit(f"Calendar feed validation failed: {exc}") from exc
         elif existing_sources and prompt_yes_no(
             f"Reuse the {len(existing_sources)} private calendar feed(s) already configured?",
             default=True,
@@ -694,17 +933,26 @@ def resolve_google_setup(args: argparse.Namespace) -> dict[str, object]:
             sources = existing_sources
         else:
             print()
-            print("In Google Calendar: Settings > Settings for my calendars > select a calendar")
-            print("> Integrate calendar > Secret address in iCal format.")
+            print("Find the URL in Google Calendar: Settings > Settings for my calendars")
+            print("> select a calendar > Integrate calendar > Secret address in iCal format.")
+            print("Each feed is checked the moment you enter it.")
             sources = []
             while True:
-                url = getpass.getpass("Private iCal URL (hidden while typing): ").strip()
+                url = getpass.getpass("Private iCal URL (typing stays hidden — paste it and press Enter): ").strip()
                 if not url:
                     if sources:
                         break
                     print("At least one private iCal URL is required, or disable calendar context.")
                     continue
+                print(f"  Received: {mask_secret(url)}")
                 name = prompt("Calendar name", default="Primary" if not sources else f"Calendar {len(sources) + 1}")
+                if not skip_checks:
+                    try:
+                        probe_calendar_sources([{"name": name, "url": url}], timezone_name)
+                    except CredentialCheckError as exc:
+                        print(f"  ✗ {exc}")
+                        print("  Let's try that URL again.")
+                        continue
                 sources.append({"name": name, "url": url})
                 if not prompt_yes_no("Add another calendar feed?", default=False):
                     break
@@ -733,49 +981,50 @@ def read_calendar_sources() -> list[dict[str, str]]:
     ]
 
 
-def validate_google_background_access(google_setup: dict[str, object], timezone_name: str = "") -> None:
-    if not google_setup.get("enabled"):
-        return
-    if google_setup.get("email_enabled"):
-        module = load_python_helper(
-            "permaevidence_gmail_imap_setup",
-            REPO_ROOT / "plugins/codex-telegram-bridge/lib/gmail_imap.py",
+def probe_gmail_imap(email: str, app_password: str) -> None:
+    module = load_python_helper(
+        "permaevidence_gmail_imap_setup",
+        REPO_ROOT / "plugins/codex-telegram-bridge/lib/gmail_imap.py",
+    )
+    print("  Checking read-only Gmail IMAP access ...", end="", flush=True)
+    ok, detail = module.probe_imap(email, app_password)
+    if not ok:
+        print(" failed")
+        raise CredentialCheckError(str(detail))
+    print(" ok — read-only access confirmed")
+
+
+def probe_calendar_sources(sources: list[dict[str, str]], timezone_name: str = "") -> None:
+    module = load_python_helper(
+        "permaevidence_ical_setup",
+        REPO_ROOT / "plugins/codex-long-term-memory/lib/ical_calendar.py",
+    )
+    print("  Checking the private calendar feed(s) ...", end="", flush=True)
+    with tempfile.TemporaryDirectory(prefix="permaevidence-calendar-check-") as tmp:
+        source_path = Path(tmp) / "sources.json"
+        cache_path = Path(tmp) / "cache.json"
+        atomic_write_text(
+            source_path,
+            json.dumps({"sources": sources}, indent=2) + "\n",
+            mode=0o600,
         )
-        print("Validating read-only Gmail IMAP access...")
-        ok, detail = module.probe_imap(
-            str(google_setup.get("gmail_email") or ""),
-            str(google_setup.get("gmail_app_password") or ""),
+        display_timezone = ZoneInfo(timezone_name) if timezone_name else datetime.now().astimezone().tzinfo
+        start = datetime.now(timezone.utc).astimezone(display_timezone).replace(
+            hour=0, minute=0, second=0, microsecond=0
         )
-        if not ok:
-            raise SystemExit(f"Gmail IMAP validation failed: {detail}")
-        print("Gmail IMAP verified in read-only mode.")
-    if google_setup.get("calendar_enabled"):
-        module = load_python_helper(
-            "permaevidence_ical_setup",
-            REPO_ROOT / "plugins/codex-long-term-memory/lib/ical_calendar.py",
+        _, report = module.fetch_calendar_events(
+            source_path,
+            cache_path,
+            start,
+            start + timedelta(days=30),
         )
-        print("Validating private Google Calendar iCal feed(s)...")
-        with tempfile.TemporaryDirectory(prefix="permaevidence-calendar-check-") as tmp:
-            source_path = Path(tmp) / "sources.json"
-            cache_path = Path(tmp) / "cache.json"
-            atomic_write_text(
-                source_path,
-                json.dumps({"sources": google_setup.get("calendar_sources") or []}, indent=2) + "\n",
-                mode=0o600,
-            )
-            display_timezone = ZoneInfo(timezone_name) if timezone_name else datetime.now().astimezone().tzinfo
-            start = datetime.now(timezone.utc).astimezone(display_timezone).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
-            _, report = module.fetch_calendar_events(
-                source_path,
-                cache_path,
-                start,
-                start + timedelta(days=30),
-            )
-        if report.get("status") not in {"ok", "warning"}:
-            raise SystemExit("The private Google Calendar feed could not be validated.")
-        print(f"Google Calendar verified: {report.get('sources')} private feed(s).")
+    if report.get("status") not in {"ok", "warning"}:
+        print(" failed")
+        raise CredentialCheckError(
+            "The feed could not be read. Check that it is the calendar's "
+            "'Secret address in iCal format' URL, not the public address."
+        )
+    print(f" ok — {report.get('sources')} feed(s) readable")
 
 
 def load_python_helper(name: str, path: Path):
@@ -794,11 +1043,14 @@ def existing_allowed_chat() -> bool:
 
 
 def guided_pairing(installed_root: Path) -> bool:
+    """Guide the first Telegram pairing. Never fatal: the installation is already
+    complete and verified, so a slow or declined pairing only means pairing
+    happens later with access.py."""
     if existing_allowed_chat():
         print("Telegram already has an approved chat.")
         return True
-    print()
-    print("Open Telegram now, find your new bot, and send it any message.")
+    print("Open Telegram now, find your new bot, and send it any message")
+    print("(for example: ciao).")
     input("Press Enter here after you have sent the message: ")
     access_path = TELEGRAM_DIR / "access.json"
     deadline = time.time() + 120
@@ -810,14 +1062,26 @@ def guided_pairing(installed_root: Path) -> bool:
             sender = str((entry or {}).get("senderId") or "unknown")
             print(f"Pairing request received from Telegram user {sender} (code {code}).")
             if not prompt_yes_no("Approve this Telegram user?", default=False):
-                raise SystemExit("Pairing was not approved. Setup stopped without granting Telegram access.")
+                print()
+                print("Not approved. The installation stays in place, and nobody can talk")
+                print("to the bot until a pairing is approved.")
+                print_manual_pairing_hint(installed_root)
+                return False
             access_script = installed_root / "plugins/codex-telegram-bridge/scripts/access.py"
             run([sys.executable, str(access_script), "pair", str(code)])
             return True
         time.sleep(1)
-    raise SystemExit(
-        "No pairing request arrived within two minutes. Confirm that you messaged the correct bot, then rerun setup or use the access.py pair command shown in the documentation."
-    )
+    print()
+    print("No pairing request arrived within two minutes. The installation is")
+    print("complete and unaffected — pair whenever you are ready:")
+    print_manual_pairing_hint(installed_root)
+    return False
+
+
+def print_manual_pairing_hint(installed_root: Path) -> None:
+    print("  1. Send any message to your bot in Telegram.")
+    print("  2. Approve the pairing code it shows:")
+    print(f"     python3 '{installed_root}/plugins/codex-telegram-bridge/scripts/access.py' pair <code>")
 
 
 def configure_memory(
@@ -936,7 +1200,17 @@ def reactivate_previous_runtime(previous: Path | None) -> None:
         subprocess.run(command, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def validate_source_runtime(root: Path) -> None:
+def validate_source_runtime(root: Path, log_path: Path | None = None) -> None:
+    def execute(command: list[str], **kwargs) -> subprocess.CompletedProcess:
+        if log_path is None:
+            return subprocess.run(command, cwd=str(root), check=False, **kwargs)
+        with open(log_path, "a", encoding="utf-8") as log:
+            log.write(f"\n$ {' '.join(command)}\n")
+            log.flush()
+            return subprocess.run(
+                command, cwd=str(root), check=False, stdout=log, stderr=subprocess.STDOUT, **kwargs
+            )
+
     commands = [
         [sys.executable, "-m", "compileall", "-q", "plugins", "scripts", "tests"],
         [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"],
@@ -962,7 +1236,7 @@ def validate_source_runtime(root: Path) -> None:
                 "--requirement",
                 str(requirements),
             ]
-            completed = subprocess.run(dependency_command, cwd=str(root), check=False, timeout=180)
+            completed = execute(dependency_command, timeout=180)
             if completed.returncode != 0:
                 raise RuntimeError(
                     "Runtime validation could not install pinned dependencies: "
@@ -974,7 +1248,7 @@ def validate_source_runtime(root: Path) -> None:
             )
 
         for command in commands:
-            completed = subprocess.run(command, cwd=str(root), check=False, env=environment)
+            completed = execute(command, env=environment)
             if completed.returncode != 0:
                 raise RuntimeError(f"Runtime validation failed: {' '.join(command)}")
 
@@ -1007,7 +1281,6 @@ def trust_memory_hooks(cwd: Path) -> None:
     if untrusted:
         names = ", ".join(str(hook.get("eventName") or "unknown") for hook in untrusted)
         raise SystemExit(f"Memory hooks were registered but are not enabled and trusted: {names}")
-    print("Memory hooks verified and trusted.")
 
 
 def query_memory_hooks(cwd: Path) -> list[dict]:
@@ -1326,6 +1599,17 @@ def run(command: list[str], *, check: bool = True) -> int:
     if check and completed.returncode != 0:
         raise SystemExit(completed.returncode)
     return completed.returncode
+
+
+def unresolved_display_path(path: Path) -> str:
+    """Shorten the home prefix without resolving symlinks (keeps stable link paths)."""
+    text = str(path)
+    home = str(Path.home())
+    if text == home:
+        return "~"
+    if text.startswith(home + os.sep):
+        return "~" + text[len(home):]
+    return text
 
 
 def display_path(path: Path) -> str:
