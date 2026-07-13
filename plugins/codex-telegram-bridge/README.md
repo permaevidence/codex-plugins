@@ -120,7 +120,10 @@ owner receives one Telegram alert, the bridge retries every minute without
 advancing the email checkpoint, and a recovery notice is sent when access
 returns. Credential-repair instructions are shown only for authentication
 failures, not ordinary timeouts. Private-iCal failures retain their existing
-cached-data warning and recovery behavior. `/health` also checks whether the
+cached-data warning and recovery behavior. Calendar snapshots refresh every
+five minutes, failed refreshes retry after one minute, and a feed failure with
+no usable cache leaves an explicit unavailable section in `AGENTS.md` instead
+of removing the section. `/health` also checks whether the
 official Gmail and Google Calendar apps remain connected and accessible through
 Codex.
 

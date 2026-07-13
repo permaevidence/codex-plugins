@@ -182,7 +182,10 @@ five-minute polling and sends a recovery message. IMAP does not advance its
 checkpoint on failure. Authentication alerts include the installed
 `scripts/setup.py` command, while network/time-out alerts avoid telling users
 to replace credentials that Gmail has not rejected. Calendar context uses its
-bounded last-good cache when possible. `/health` also checks whether the
+bounded last-good cache when possible. The bridge refreshes the calendar
+snapshot every five minutes, retries failed refreshes after one minute, and
+keeps an explicit unavailable-calendar section in `AGENTS.md` when no usable
+cache exists instead of silently removing the calendar block. `/health` also checks whether the
 official Gmail and Google Calendar apps are connected and accessible, with
 `/apps` reconnection instructions when needed.
 

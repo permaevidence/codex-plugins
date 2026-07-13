@@ -69,6 +69,47 @@ class CompactionDetectionTests(unittest.TestCase):
         )
         self.assertEqual(rendered, "2026-07-13 05:53 EDT")
 
+    def test_zero_event_calendar_still_renders_calendar_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(
+            common, "CALENDAR_HEALTH_FILE", Path(tmpdir) / "calendar-health.json"
+        ), mock.patch.object(
+            common,
+            "fetch_calendar_events",
+            return_value=([], {"status": "ok", "sources": 1, "stale_sources": 0, "failures": []}),
+        ):
+            section = common.fetch_calendar_section(display_timezone=timezone.utc)
+
+        self.assertIn("=== CALENDAR (next 30 days) ===", section)
+        self.assertIn("No events today.", section)
+
+    def test_failed_first_calendar_fetch_keeps_explicit_agents_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            agents_path = root / "AGENTS.md"
+            config = {
+                **common.DEFAULT_CONFIG,
+                "enable_user_facts": False,
+                "enable_calendar": True,
+                "timezone": "America/New_York",
+            }
+            with mock.patch.object(common, "CALENDAR_HEALTH_FILE", root / "calendar-health.json"), mock.patch.object(
+                common, "AGENTS_INJECTION_LOCK_FILE", root / "agents.lock"
+            ), mock.patch.object(
+                common, "INJECTED_CONTEXT_FILE", root / "injected-context.md"
+            ), mock.patch.object(
+                common, "read_history", return_value=[]
+            ), mock.patch.object(
+                common, "fetch_calendar_events", side_effect=common.CalendarFeedError("temporary timeout")
+            ):
+                common.write_agents_memory_injection(agents_path, config)
+
+            text = agents_path.read_text(encoding="utf-8")
+            health = json.loads((root / "calendar-health.json").read_text(encoding="utf-8"))
+
+        self.assertIn("=== CALENDAR (next 30 days) ===", text)
+        self.assertIn("temporarily unavailable", text)
+        self.assertEqual(health["status"], "error")
+
     def test_history_append_schedules_background_maintenance_without_compacting_inline(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(
             common, "HISTORY_FILE", Path(tmpdir) / "history.jsonl"

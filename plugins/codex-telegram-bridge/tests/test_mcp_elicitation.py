@@ -913,6 +913,56 @@ class HealthVisibilityTests(unittest.TestCase):
         self.assertIn("working again", recovered[1])
         self.assertEqual(repeated_recovery, [])
 
+    def test_calendar_refresh_loop_retries_failure_then_returns_to_normal_interval(self):
+        bridge = load_bridge_module()
+
+        class StopLoop(Exception):
+            pass
+
+        class ImmediateThread:
+            def __init__(self, *, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                try:
+                    self.target()
+                except StopLoop:
+                    pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            memory_dir = Path(tmpdir)
+            bridge.save_json(memory_dir / "config.json", {"enable_calendar": True})
+            delays = []
+
+            def fake_sleep(delay):
+                delays.append(delay)
+                if len(delays) > 1:
+                    raise StopLoop()
+
+            with mock.patch.object(bridge, "MEMORY_STATE_DIR", memory_dir), mock.patch.object(
+                bridge.threading, "Thread", ImmediateThread
+            ), mock.patch.object(
+                bridge.time, "sleep", side_effect=fake_sleep
+            ), mock.patch.object(
+                bridge,
+                "update_long_term_memory_agents_file",
+                return_value={"status": "ok", "detail": "fresh feed"},
+            ) as update_agents:
+                bridge.maybe_start_calendar_refresh_loop(
+                    {"default_cwd": str(Path.home())},
+                    {"status": "error", "detail": "temporary timeout"},
+                )
+
+        self.assertEqual(
+            delays,
+            [bridge.CALENDAR_FAILURE_RETRY_INTERVAL, bridge.CALENDAR_REFRESH_INTERVAL],
+        )
+        self.assertEqual(
+            bridge.calendar_refresh_delay({"status": "warning"}),
+            bridge.CALENDAR_FAILURE_RETRY_INTERVAL,
+        )
+        update_agents.assert_called_once()
+
     def test_email_polling_waits_one_minute_after_failures_and_alerts_after_second(self):
         bridge = load_bridge_module()
         statuses = []

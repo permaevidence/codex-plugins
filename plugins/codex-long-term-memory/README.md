@@ -58,7 +58,10 @@ writes `calendar_sources.json` with mode `600`. This does not require a Google
 Cloud project or OAuth client. The URLs are bearer secrets: never put them in
 `AGENTS.md`, logs, chat, or git. The parser expands Google-style `RRULE`,
 `RDATE`, `EXDATE`, and `RECURRENCE-ID` changes and uses a bounded seven-day
-last-good cache during temporary outages. It is read-only; use the official
+last-good cache during temporary outages. If neither the live feed nor cache
+is usable, `AGENTS.md` retains an explicit temporarily-unavailable calendar
+section rather than silently dropping calendar context. The Telegram bridge
+refreshes this snapshot periodically and retries failed refreshes. It is read-only; use the official
 Google Calendar Codex plugin for fresh detail lookup and every event mutation.
 
 After installation, inspect hook trust in Codex or through the app-server `hooks/list` method. Codex tracks hook hashes locally; newly added hooks may need to be trusted before they run in normal sessions.

@@ -61,6 +61,8 @@ from lib.telegram_common import (
 EMAIL_CHECK_INTERVAL = 5 * 60
 EMAIL_FAILURE_RETRY_INTERVAL = 60
 EMAIL_FAILURES_BEFORE_ALERT = 2
+CALENDAR_REFRESH_INTERVAL = 5 * 60
+CALENDAR_FAILURE_RETRY_INTERVAL = 60
 REMINDER_CHECK_INTERVAL = 60
 VERSION_CHECK_INTERVAL = 5 * 60
 HEALTH_CHECK_INTERVAL = 30
@@ -1772,9 +1774,9 @@ def current_codex_version(codex_cmd: str) -> str | None:
     return output or None
 
 
-def update_long_term_memory_agents_file(config: dict[str, Any]) -> None:
+def update_long_term_memory_agents_file(config: dict[str, Any]) -> dict[str, Any]:
     if not LONG_TERM_MEMORY_AGENTS_SCRIPT.exists():
-        return
+        return {"status": "error", "detail": "The long-term-memory AGENTS.md updater is missing."}
     try:
         proc = subprocess.run(
             [
@@ -1790,11 +1792,40 @@ def update_long_term_memory_agents_file(config: dict[str, Any]) -> None:
         )
     except Exception as exc:
         print(f"long-term-memory AGENTS.md update failed: {exc}", file=sys.stderr)
-        return
+        return {"status": "error", "detail": f"{type(exc).__name__}: {exc}"}
 
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
         print(f"long-term-memory AGENTS.md update failed: {detail}", file=sys.stderr)
+        return {"status": "error", "detail": detail or "AGENTS.md updater failed."}
+
+    health = load_json(MEMORY_STATE_DIR / "calendar_health.json", {})
+    return health if isinstance(health, dict) else {}
+
+
+def calendar_refresh_delay(health: dict[str, Any]) -> int:
+    return (
+        CALENDAR_FAILURE_RETRY_INTERVAL
+        if str(health.get("status") or "").lower() in {"warning", "error"}
+        else CALENDAR_REFRESH_INTERVAL
+    )
+
+
+def maybe_start_calendar_refresh_loop(
+    config: dict[str, Any],
+    initial_health: dict[str, Any] | None = None,
+) -> None:
+    memory_config = load_json(MEMORY_STATE_DIR / "config.json", {})
+    if not isinstance(memory_config, dict) or not memory_config.get("enable_calendar"):
+        return
+
+    def worker() -> None:
+        health = initial_health if isinstance(initial_health, dict) else {}
+        while True:
+            time.sleep(calendar_refresh_delay(health))
+            health = update_long_term_memory_agents_file(config)
+
+    threading.Thread(target=worker, daemon=True, name="calendar-refresh").start()
 
 
 def get_bot_username(token: str) -> str:
@@ -2383,7 +2414,10 @@ def google_background_alert_messages(
             health=calendar_health,
             problem_statuses={"warning", "error"},
             problem_message=calendar_problem,
-            recovery_message="Private calendar context is working again and the next memory snapshot will use fresh events.",
+            recovery_message=(
+                "Private calendar context is working again. The AGENTS.md calendar snapshot has been refreshed; "
+                "new Codex sessions will use the fresh events."
+            ),
         )
     )
     return messages
@@ -2570,7 +2604,8 @@ def main() -> None:
                     }
                 )
 
-    update_long_term_memory_agents_file(config)
+    initial_calendar_health = update_long_term_memory_agents_file(config)
+    maybe_start_calendar_refresh_loop(config, initial_calendar_health)
     codex = CodexAppServerClient(config, send_callback)
     codex.start_recovery_loop()
     maybe_start_reminder_loop(config, codex, chat_map, chat_map_lock)

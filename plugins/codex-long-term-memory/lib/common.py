@@ -42,6 +42,7 @@ PENDING_DIR = STATE_DIR / "pending"
 COMPACTION_STATE_FILE = STATE_DIR / "compaction_scan_state.json"
 HISTORY_LOCK_FILE = STATE_DIR / "history.lock"
 FACTS_LOCK_FILE = STATE_DIR / "user_facts.lock"
+AGENTS_INJECTION_LOCK_FILE = STATE_DIR / "agents-injection.lock"
 MAINTENANCE_TASK_FILE = PENDING_DIR / "memory-maintenance.json"
 MAINTENANCE_PID_FILE = PENDING_DIR / "memory-maintenance.pid"
 MAINTENANCE_LOCK_FILE = PENDING_DIR / "memory-maintenance.lock"
@@ -2314,7 +2315,7 @@ def fetch_calendar_section(
                 "updated_at": local_now.isoformat(),
             },
         )
-        return ""
+        return format_calendar_unavailable_section(today_start)
     except Exception as exc:
         save_json(
             CALENDAR_HEALTH_FILE,
@@ -2324,10 +2325,17 @@ def fetch_calendar_section(
                 "updated_at": local_now.isoformat(),
             },
         )
-        return ""
+        return format_calendar_unavailable_section(today_start)
     if report.get("status") == "disabled":
-        CALENDAR_HEALTH_FILE.unlink(missing_ok=True)
-        return ""
+        save_json(
+            CALENDAR_HEALTH_FILE,
+            {
+                "status": "error",
+                "detail": "Calendar context is enabled, but no private iCal sources are configured.",
+                "updated_at": local_now.isoformat(),
+            },
+        )
+        return format_calendar_unavailable_section(today_start, configured=False)
     health_status = "warning" if report.get("status") == "warning" else "ok"
     failures = report.get("failures") or []
     detail = (
@@ -2410,6 +2418,29 @@ def fetch_calendar_section(
             parts.append(format_calendar_event_compact(event, start_dt, end_dt))
 
     return "\n".join(parts).strip()
+
+
+def format_calendar_unavailable_section(
+    today_start: datetime,
+    *,
+    configured: bool = True,
+) -> str:
+    if configured:
+        detail = (
+            "  Calendar context is temporarily unavailable. The bridge will retry "
+            "automatically; use /health for details."
+        )
+    else:
+        detail = "  No private calendar feed is configured. Rerun setup to add one."
+    return "\n".join(
+        [
+            "=== CALENDAR (next 30 days) ===",
+            "[Skip this section during compaction — it is re-injected automatically after compaction.]",
+            "",
+            f"## Today ({today_start.strftime('%A, %B %d')})",
+            detail,
+        ]
+    )
 
 
 def parse_calendar_dt(value: Any, fallback_timezone: Any | None = None) -> datetime | None:
@@ -2702,21 +2733,27 @@ def replace_marked_agents_block(text: str, block: str) -> str:
 
 def write_agents_memory_injection(agents_path: Path, config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = config or load_config()
-    payload = build_agents_memory_payload(config)
     agents_path = agents_path.expanduser()
     agents_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = agents_path.read_text(encoding="utf-8") if agents_path.exists() else ""
-    updated = replace_marked_agents_block(existing, payload)
+    with state_lock(AGENTS_INJECTION_LOCK_FILE):
+        payload = build_agents_memory_payload(config)
+        existing = agents_path.read_text(encoding="utf-8") if agents_path.exists() else ""
+        updated = replace_marked_agents_block(existing, payload)
 
-    temp_path = agents_path.with_name(f".{agents_path.name}.tmp")
-    temp_path.write_text(updated, encoding="utf-8")
-    if agents_path.exists():
-        shutil.copymode(agents_path, temp_path)
-    temp_path.replace(agents_path)
-    try:
-        INJECTED_CONTEXT_FILE.write_text(payload + "\n", encoding="utf-8")
-    except OSError:
-        pass
+        descriptor, raw_path = tempfile.mkstemp(prefix=f".{agents_path.name}.", dir=str(agents_path.parent))
+        temp_path = Path(raw_path)
+        try:
+            with open(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+                handle.write(updated)
+            if agents_path.exists():
+                shutil.copymode(agents_path, temp_path)
+            temp_path.replace(agents_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        try:
+            INJECTED_CONTEXT_FILE.write_text(payload + "\n", encoding="utf-8")
+        except OSError:
+            pass
 
     return {
         "path": str(agents_path),
