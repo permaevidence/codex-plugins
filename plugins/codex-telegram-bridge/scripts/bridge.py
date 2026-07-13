@@ -370,14 +370,8 @@ def systemd_quote(value: str) -> str:
 
 
 def systemd_path(value: str) -> str:
-    """Escape a path directive without leaving quote characters in its value."""
-    return (
-        value.replace("%", "%%")
-        .replace("\\", "\\x5c")
-        .replace(" ", "\\x20")
-        .replace("\t", "\\x09")
-        .replace("\n", "\\x0a")
-    )
+    """Escape systemd specifiers while preserving a path directive literally."""
+    return value.replace("%", "%%")
 
 
 def build_systemd_unit(*, bash: str, path: str) -> str:

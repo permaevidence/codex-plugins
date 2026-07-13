@@ -364,10 +364,11 @@ class SystemdServiceTests(unittest.TestCase):
             ["systemctl", "--user", "is-active", "--quiet", operator.SYSTEMD_SERVICE_NAME],
         )
 
-    def test_systemd_path_escapes_spaces_without_literal_quotes(self):
+    def test_systemd_path_preserves_spaces_and_escapes_specifiers(self):
         operator = load_operator_module()
-        escaped = operator.systemd_path("/home/alice/My Runtime")
-        self.assertEqual(escaped, "/home/alice/My\\x20Runtime")
+        escaped = operator.systemd_path("/home/alice/My Runtime/100% ready")
+        self.assertEqual(escaped, "/home/alice/My Runtime/100%% ready")
+        self.assertNotIn("\\x20", escaped)
         self.assertNotIn('"', escaped)
 
 

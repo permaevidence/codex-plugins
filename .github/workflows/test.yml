@@ -36,6 +36,12 @@ jobs:
           spec = importlib.util.spec_from_file_location("bridge_operator_ci", path)
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)
+          module.PLUGIN_ROOT = Path("/tmp/Perma Evidence Codex/plugin")
           print(module.build_systemd_unit(bash="/usr/bin/bash", path="/usr/local/bin:/usr/bin:/bin"))
           PY
+          grep -F 'WorkingDirectory=/tmp/Perma Evidence Codex/plugin' /tmp/permaevidence-codex-telegram-bridge.service
+          if grep -F '\x20' /tmp/permaevidence-codex-telegram-bridge.service; then
+            echo 'WorkingDirectory contains a literal systemd-style hex escape' >&2
+            exit 1
+          fi
           systemd-analyze verify /tmp/permaevidence-codex-telegram-bridge.service
