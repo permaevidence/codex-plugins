@@ -20,6 +20,7 @@ STATE_CONFIG = STATE_DIR / "config.json"
 DEFAULT_STATE_CONFIG = {
     "max_injection_chars": 300000,
     "include_timestamps": True,
+    "timezone": "",
     "enable_user_facts": True,
     "enable_calendar": True,
     "calendar_provider": "ical",

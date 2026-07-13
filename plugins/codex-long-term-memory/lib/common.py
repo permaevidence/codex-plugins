@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from .ical_calendar import CalendarFeedError, fetch_calendar_events
@@ -109,6 +110,7 @@ COMPACTION_SCAN_OVERLAP_BYTES = 4096
 DEFAULT_CONFIG = {
     "max_injection_chars": 300000,
     "include_timestamps": True,
+    "timezone": "",
     "enable_user_facts": True,
     "enable_calendar": True,
     "calendar_provider": "ical",
@@ -196,6 +198,25 @@ def load_config() -> dict[str, Any]:
         return merged
     except Exception:
         return dict(DEFAULT_CONFIG)
+
+
+def configured_timezone(config: dict[str, Any] | None = None) -> Any:
+    """Return the configured IANA timezone, falling back to the host timezone."""
+    config = config or {}
+    name = str(config.get("timezone") or "").strip()
+    if name:
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def format_current_time(config: dict[str, Any] | None = None, now: datetime | None = None) -> str:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.astimezone(configured_timezone(config)).strftime("%Y-%m-%d %H:%M %Z")
 
 
 def load_env_file() -> dict[str, str]:
@@ -667,6 +688,7 @@ def build_injected_context(entries: list[dict[str, Any]], config: dict[str, Any]
             days=int(config.get("calendar_days", 30)),
             timeout=int(config.get("calendar_timeout_seconds", 15)),
             max_stale_seconds=int(config.get("calendar_cache_max_stale_seconds", 604800)),
+            display_timezone=configured_timezone(config),
         )
         if calendar_text:
             parts.append(calendar_text)
@@ -701,12 +723,13 @@ def format_entries(entries: list[dict[str, Any]], config: dict[str, Any]) -> str
 
     max_chars = int(config.get("max_injection_chars", DEFAULT_CONFIG["max_injection_chars"]))
     include_timestamps = bool(config.get("include_timestamps", True))
+    display_timezone = configured_timezone(config)
 
     selected: list[dict[str, Any]] = []
     total_chars = 0
 
     for entry in reversed(entries):
-        rendered = render_entry(entry, include_timestamps)
+        rendered = render_entry(entry, include_timestamps, display_timezone)
         if not rendered:
             continue
         entry_chars = len(rendered) + 2
@@ -733,7 +756,7 @@ def format_entries(entries: list[dict[str, Any]], config: dict[str, Any]) -> str
         message = group["message"]
         files = group.get("files", [])
         timestamp = message.get("timestamp", "")
-        date_str = format_date(timestamp)
+        date_str = format_date(timestamp, display_timezone)
         if date_str and date_str != current_date:
             if current_date is not None:
                 lines.append("")
@@ -746,7 +769,7 @@ def format_entries(entries: list[dict[str, Any]], config: dict[str, Any]) -> str
             current_thread = thread_id
             lines.append(f"[thread: {str(thread_id)[:8]}]")
 
-        rendered = render_entry(message, include_timestamps)
+        rendered = render_entry(message, include_timestamps, display_timezone)
         if rendered:
             lines.append(rendered)
             for file_entry in files:
@@ -758,7 +781,7 @@ def format_entries(entries: list[dict[str, Any]], config: dict[str, Any]) -> str
     return "\n".join(lines).strip()
 
 
-def render_entry(entry: dict[str, Any], include_timestamps: bool) -> str:
+def render_entry(entry: dict[str, Any], include_timestamps: bool, display_timezone: Any | None = None) -> str:
     role = (entry.get("role") or "unknown").lower()
 
     if role == "summary":
@@ -786,7 +809,7 @@ def render_entry(entry: dict[str, Any], include_timestamps: bool) -> str:
     if include_timestamps:
         timestamp = entry.get("timestamp")
         if timestamp:
-            prefix = f"[{format_timestamp(timestamp)}] "
+            prefix = f"[{format_timestamp(timestamp, display_timezone)}] "
 
     return f"{prefix}{role.upper()}: {content}"
 
@@ -1949,9 +1972,11 @@ def fetch_calendar_section(
     days: int = 30,
     timeout: int = 15,
     max_stale_seconds: int = 7 * 24 * 60 * 60,
+    display_timezone: Any | None = None,
 ) -> str:
     now = datetime.now(timezone.utc)
-    local_now = now.astimezone()
+    display_timezone = display_timezone or configured_timezone()
+    local_now = now.astimezone(display_timezone)
     today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     window_end = today_start + timedelta(days=max(1, days))
     try:
@@ -2011,8 +2036,8 @@ def fetch_calendar_section(
     for event in events:
         if not isinstance(event, dict):
             continue
-        start_dt = parse_calendar_dt(event.get("start"))
-        end_dt = parse_calendar_dt(event.get("end"))
+        start_dt = parse_calendar_dt(event.get("start"), display_timezone)
+        end_dt = parse_calendar_dt(event.get("end"), display_timezone)
         if start_dt is None:
             continue
         if start_dt.tzinfo is None:
@@ -2020,8 +2045,8 @@ def fetch_calendar_section(
         if end_dt is not None and end_dt.tzinfo is None:
             end_dt = end_dt.replace(tzinfo=timezone.utc)
 
-        local_start = start_dt.astimezone()
-        item = (event, local_start, end_dt.astimezone() if end_dt else None)
+        local_start = start_dt.astimezone(display_timezone)
+        item = (event, local_start, end_dt.astimezone(display_timezone) if end_dt else None)
         if local_start < today_end:
             today_events.append(item)
         elif local_start < week_end:
@@ -2071,7 +2096,7 @@ def fetch_calendar_section(
     return "\n".join(parts).strip()
 
 
-def parse_calendar_dt(value: Any) -> datetime | None:
+def parse_calendar_dt(value: Any, fallback_timezone: Any | None = None) -> datetime | None:
     if isinstance(value, dict):
         text = value.get("dateTime") or value.get("date")
     else:
@@ -2081,7 +2106,7 @@ def parse_calendar_dt(value: Any) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if len(text) == 10 and parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+            parsed = parsed.replace(tzinfo=fallback_timezone or configured_timezone())
         return parsed
     except Exception:
         return None
@@ -2137,17 +2162,20 @@ def format_calendar_event_compact(event: dict[str, Any], start_dt: datetime, end
     return f"  {format_calendar_event_range(event, start_dt, end_dt)} — {event.get('summary', 'Untitled')}"
 
 
-def format_date(value: str) -> str:
+def format_date(value: str, display_timezone: Any | None = None) -> str:
     try:
-        return datetime.fromisoformat(value).strftime("%Y-%m-%d")
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(display_timezone or configured_timezone())
+        return parsed.strftime("%Y-%m-%d")
     except Exception:
         return ""
 
 
-def format_timestamp(value: str) -> str:
+def format_timestamp(value: str, display_timezone: Any | None = None) -> str:
     try:
         dt = datetime.fromisoformat(value)
-        return dt.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+        return dt.astimezone(display_timezone or configured_timezone()).strftime("%Y-%m-%d %H:%M %Z")
     except Exception:
         return value
 
@@ -2321,9 +2349,17 @@ def configured_agents_md_path(config: dict[str, Any], cwd: str | None = None) ->
     return default_agents_md_path(cwd)
 
 
-def build_agents_memory_payload(config: dict[str, Any] | None = None) -> str:
+def build_agents_memory_payload(
+    config: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> str:
     config = config or load_config()
-    parts = [build_compaction_policy()]
+    snapshot = format_current_time(config, now)
+    parts = [
+        f"[Memory snapshot: {snapshot}. Each prompt's [now: ...] marker gives the current time.]",
+        "",
+        build_compaction_policy(),
+    ]
     context = build_injected_context(read_history(), config)
     if context:
         parts.extend(["", context])

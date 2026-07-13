@@ -23,6 +23,7 @@ import uuid
 import wave
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -660,6 +661,15 @@ def doctor(
         default_cwd = Path(str(config.get("default_cwd") or "")).expanduser()
         checks.append(("default_cwd exists", default_cwd.is_dir(), str(default_cwd) if str(default_cwd) else "not set"))
         checks.append(("sandbox mode set", bool(config.get("sandbox_mode")), str(config.get("sandbox_mode") or "not set")))
+        telegram_timezone = str(config.get("timezone") or "").strip()
+        try:
+            ZoneInfo(telegram_timezone)
+            timezone_ok = True
+            timezone_detail = telegram_timezone
+        except (ZoneInfoNotFoundError, ValueError):
+            timezone_ok = False
+            timezone_detail = telegram_timezone or "missing"
+        checks.append(("Telegram timezone configured", timezone_ok, timezone_detail))
 
     env_values = load_env_keys(ENV_FILE)
     checks.append(("Telegram .env", ENV_FILE.exists(), str(ENV_FILE) if ENV_FILE.exists() else "missing"))
@@ -701,6 +711,14 @@ def doctor(
     openai_ok, openai_detail = smoke_test_openai_api()
     checks.append(("OpenAI API reachable", openai_ok, openai_detail))
     if memory_config:
+        memory_timezone = str(memory_config.get("timezone") or "").strip()
+        checks.append(
+            (
+                "memory and Telegram timezones agree",
+                bool(memory_timezone) and memory_timezone == str(config.get("timezone") or "").strip(),
+                f"memory={memory_timezone or 'missing'}; Telegram={str(config.get('timezone') or '').strip() or 'missing'}",
+            )
+        )
         transport = str(memory_config.get("injection_transport") or "")
         checks.append(("memory transport configured", bool(transport), transport or "not set"))
         if transport == "agents_md":
@@ -997,7 +1015,12 @@ def smoke_test_calendar_feeds(config: dict) -> tuple[bool, str]:
             return False, f"could not load {helper_path}"
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        start = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        timezone_name = str(config.get("timezone") or "").strip()
+        try:
+            display_timezone = ZoneInfo(timezone_name) if timezone_name else datetime.now().astimezone().tzinfo
+        except (ZoneInfoNotFoundError, ValueError):
+            return False, f"invalid configured timezone: {timezone_name}"
+        start = datetime.now().astimezone(display_timezone).replace(hour=0, minute=0, second=0, microsecond=0)
         _, report = module.fetch_calendar_events(
             CALENDAR_SOURCES_FILE,
             CALENDAR_CACHE_FILE,

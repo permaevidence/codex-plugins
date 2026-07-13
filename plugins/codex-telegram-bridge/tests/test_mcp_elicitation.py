@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 from pathlib import Path
 
@@ -71,6 +72,35 @@ class McpElicitationTests(unittest.TestCase):
             client.sent,
             [{"jsonrpc": "2.0", "id": 7, "result": {"action": "accept"}}],
         )
+
+
+class TelegramTimeEnvelopeTests(unittest.TestCase):
+    def test_channel_envelope_includes_original_human_readable_sent_time(self):
+        bridge = load_bridge_module()
+        sent = datetime(2026, 7, 13, 9, 53, tzinfo=timezone.utc)
+        rendered = bridge.build_channel_message(
+            {
+                "chat": {"id": 123},
+                "from": {"id": 456},
+                "message_id": 789,
+                "date": int(sent.timestamp()),
+            },
+            "Hello",
+            {},
+            "America/New_York",
+        )
+        self.assertIn(f'ts="{int(sent.timestamp())}"', rendered)
+        self.assertIn('sent_at="2026-07-13 05:53 EDT"', rendered)
+
+    def test_invalid_timezone_falls_back_without_dropping_sent_at(self):
+        bridge = load_bridge_module()
+        rendered = bridge.build_channel_message(
+            {"chat": {"id": 1}, "from": {"id": 2}, "message_id": 3, "date": 1},
+            "Hello",
+            {},
+            "Not/A_Zone",
+        )
+        self.assertIn('sent_at="', rendered)
 
 
 class GoogleAppOnboardingTests(unittest.TestCase):

@@ -6,6 +6,7 @@ import shlex
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -39,6 +40,32 @@ STOP_SPEC.loader.exec_module(memory_stop)
 
 
 class CompactionDetectionTests(unittest.TestCase):
+    def test_agents_memory_payload_has_explicit_timezone_snapshot(self) -> None:
+        config = {
+            **common.DEFAULT_CONFIG,
+            "timezone": "America/New_York",
+            "enable_user_facts": False,
+            "enable_calendar": False,
+        }
+        with mock.patch.object(common, "read_history", return_value=[]):
+            payload = common.build_agents_memory_payload(
+                config,
+                now=datetime(2026, 7, 13, 9, 53, tzinfo=timezone.utc),
+            )
+        self.assertTrue(
+            payload.startswith(
+                "[Memory snapshot: 2026-07-13 05:53 EDT. "
+                "Each prompt's [now: ...] marker gives the current time.]"
+            )
+        )
+
+    def test_history_timestamp_uses_configured_timezone(self) -> None:
+        rendered = common.format_timestamp(
+            "2026-07-13T09:53:00+00:00",
+            common.configured_timezone({"timezone": "America/New_York"}),
+        )
+        self.assertEqual(rendered, "2026-07-13 05:53 EDT")
+
     def test_history_append_schedules_background_maintenance_without_compacting_inline(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(
             common, "HISTORY_FILE", Path(tmpdir) / "history.jsonl"

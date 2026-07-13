@@ -15,10 +15,11 @@ import time
 import traceback
 import urllib.request
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -1929,15 +1930,40 @@ def attachment_meta(kind: str, file_id: Any, size: Any, mime: Any, name: Any) ->
     return meta
 
 
-def build_channel_message(message: dict[str, Any], text: str, attachment: dict[str, Any]) -> str:
+def message_timezone(timezone_name: str = "") -> Any:
+    if timezone_name:
+        try:
+            return ZoneInfo(timezone_name)
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def format_telegram_sent_at(value: Any, timezone_name: str = "") -> str:
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).astimezone(
+            message_timezone(timezone_name)
+        ).strftime("%Y-%m-%d %H:%M %Z")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return ""
+
+
+def build_channel_message(
+    message: dict[str, Any],
+    text: str,
+    attachment: dict[str, Any],
+    timezone_name: str = "",
+) -> str:
     chat = message.get("chat") or {}
     sender = message.get("from") or {}
+    telegram_timestamp = message.get("date")
     attrs = {
         "source": "telegram",
         "chat_id": str(chat.get("id") or ""),
         "message_id": str(message.get("message_id") or ""),
         "user": str(sender.get("id") or ""),
-        "ts": str(message.get("date") or ""),
+        "ts": str(telegram_timestamp or ""),
+        "sent_at": format_telegram_sent_at(telegram_timestamp, timezone_name),
     }
     attrs.update({key: str(value) for key, value in attachment.items() if value not in (None, "")})
     attr_text = " ".join(f'{key}="{safe_attr(value)}"' for key, value in attrs.items() if value)
@@ -2569,7 +2595,12 @@ def main() -> None:
                     PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
 
-                text = build_channel_message(message, text, attachment)
+                text = build_channel_message(
+                    message,
+                    text,
+                    attachment,
+                    str(config.get("timezone") or ""),
+                )
 
                 send_chat_action(str(token), chat_id, "typing")
                 if message.get("message_id") is not None and access.get("ackReaction"):

@@ -74,6 +74,14 @@ class SetupWizardTests(unittest.TestCase):
             selected = setup_wizard.resolve_model_selection(None, None)
         self.assertEqual(selected, ("gpt-current", "high"))
 
+    def test_timezone_selection_accepts_iana_name_and_rejects_unknown_name(self) -> None:
+        self.assertEqual(
+            setup_wizard.resolve_timezone_name("America/New_York"),
+            "America/New_York",
+        )
+        with self.assertRaises(SystemExit):
+            setup_wizard.resolve_timezone_name("Not/A_Zone")
+
     def test_update_env_file_preserves_unknown_lines_and_updates_known_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".env"
@@ -121,11 +129,13 @@ class SetupWizardTests(unittest.TestCase):
                     effort="high",
                     sandbox_mode="dangerFullAccess",
                     network_access=True,
+                    timezone_name="America/New_York",
                 )
 
             config = setup_wizard.load_json(config_path)
             self.assertEqual(config["default_cwd"], str(project_dir))
             self.assertEqual(config["sandbox_mode"], "dangerFullAccess")
+            self.assertEqual(config["timezone"], "America/New_York")
             self.assertTrue(config["network_access"])
             self.assertEqual(config["writable_roots"], [])
 
@@ -213,6 +223,7 @@ class SetupWizardTests(unittest.TestCase):
                 setup_wizard.configure_memory(
                     openai_key="sk-test",
                     agents_md_path=agents,
+                    timezone_name="America/New_York",
                     calendar_enabled=True,
                     calendar_sources=[
                         {
@@ -229,6 +240,7 @@ class SetupWizardTests(unittest.TestCase):
                     effort="high",
                     sandbox_mode="dangerFullAccess",
                     network_access=True,
+                    timezone_name="America/New_York",
                     google_apps_enabled=True,
                     email_notifications_enabled=True,
                     gmail_email="owner@gmail.com",
@@ -238,8 +250,10 @@ class SetupWizardTests(unittest.TestCase):
             memory_config = setup_wizard.load_json(memory_dir / "config.json")
             telegram_config = setup_wizard.load_json(telegram_dir / "config.json")
             self.assertEqual(memory_config["calendar_provider"], "ical")
+            self.assertEqual(memory_config["timezone"], "America/New_York")
             self.assertTrue(memory_config["enable_calendar"])
             self.assertTrue(telegram_config["enable_google_apps"])
+            self.assertEqual(telegram_config["timezone"], "America/New_York")
             self.assertTrue(telegram_config["enable_email_notifications"])
             self.assertNotIn("private/basic.ics", json.dumps(memory_config))
             self.assertNotIn("GMAIL_IMAP_APP_PASSWORD", json.dumps(telegram_config))

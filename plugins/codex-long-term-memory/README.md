@@ -85,6 +85,7 @@ Default config:
 {
   "max_injection_chars": 300000,
   "include_timestamps": true,
+  "timezone": "",
   "enable_user_facts": true,
   "enable_calendar": true,
   "calendar_provider": "ical",
@@ -119,6 +120,8 @@ Default config:
   "agents_project_doc_max_bytes": 524288
 }
 ```
+
+`timezone` accepts an IANA name such as `America/New_York`, `Europe/Rome`, or `UTC`. The setup wizard detects and stores it automatically. An empty value preserves backward compatibility by using the computer's local timezone. The setting controls per-prompt `[now: ...]` markers, memory-snapshot and history timestamps, and calendar headings.
 
 When an OpenAI API key is configured, the plugin uses the Responses API with `gpt-5.6-luna` and `reasoning.effort = "high"` for model-backed summaries, file descriptions, and richer user-fact extraction by default. The repo-level setup wizard treats this key as required because memory quality is poor without model-backed summaries.
 
@@ -184,7 +187,7 @@ For a project-specific setup, use that project's `AGENTS.md` and make the Telegr
 }
 ```
 
-When the Telegram bridge starts, and again when `/newsession` is received, it runs `scripts/update_agents_injection.py`. That helper rewrites only the marked long-term-memory block appended to the target `AGENTS.md`, updates `~/.codex/long-term-memory/injected_context.md`, and raises top-level `project_doc_max_bytes` in `~/.codex/config.toml` high enough for Codex to embed the whole file.
+When the Telegram bridge starts, and again when `/newsession` is received, it runs `scripts/update_agents_injection.py`. That helper rewrites only the marked long-term-memory block appended to the target `AGENTS.md`, adds an explicit generation timestamp identifying it as a snapshot, updates `~/.codex/long-term-memory/injected_context.md`, and raises top-level `project_doc_max_bytes` in `~/.codex/config.toml` high enough for Codex to embed the whole file.
 
 You can also refresh the block manually:
 

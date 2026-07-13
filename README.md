@@ -82,6 +82,7 @@ It asks for:
 - the starting folder for Telegram-launched Codex sessions; this is not a permission boundary in autonomous mode
 - the Telegram bot token from BotFather
 - the OpenAI API key, required for memory summaries and voice transcription
+- the user's IANA timezone, detected from the computer by default, so every clock and calendar heading agrees
 - the Codex sandbox level for Telegram sessions, defaulting to broad autonomous access
 - whether to start the bridge immediately
 - preserves an existing Telegram model selection, or inherits Codex's effective model and effort on the first setup
@@ -99,6 +100,7 @@ Then it:
 - writes `~/.codex/long-term-memory/.env`
 - writes `~/.codex/telegram-bridge/.env`
 - writes `~/.codex/telegram-bridge/config.json`
+- injects a fresh `[now: ...]` marker on every prompt and preserves each Telegram message's original time as both Unix `ts` and readable `sent_at`
 - optionally starts the bridge
 - runs `bridge.py doctor`
 - functionally executes all four hooks, initializes the bundled MCP server, checks the live Telegram/OpenAI APIs, and verifies the bridge's app-server child

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import json
 import sys
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -12,6 +11,7 @@ from lib.common import (
     build_injected_context,
     consume_compaction_reinjection,
     first_present,
+    format_current_time,
     load_config,
     load_hook_input,
     memory_maintenance_alert_context,
@@ -35,7 +35,7 @@ def main() -> None:
     if isinstance(prompt, str):
         append_history_entry("user", prompt, payload)
 
-    now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    now = format_current_time(config)
     context_parts = [f"[now: {now}]"]
     maintenance_alert = memory_maintenance_alert_context()
     if maintenance_alert:

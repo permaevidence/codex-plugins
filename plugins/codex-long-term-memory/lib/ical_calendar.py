@@ -169,6 +169,7 @@ def parse_ical_events(
 ) -> list[dict[str, Any]]:
     if window_start.tzinfo is None or window_end.tzinfo is None:
         raise CalendarFeedError("Calendar expansion requires timezone-aware window bounds.")
+    local_timezone = window_start.tzinfo
     components = _event_components(text)
     grouped: dict[str, list[dict[str, list[tuple[dict[str, str], str]]]]] = {}
     for index, component in enumerate(components):
@@ -178,7 +179,7 @@ def parse_ical_events(
     expanded: list[dict[str, Any]] = []
     for uid, group in grouped.items():
         try:
-            expanded.extend(_expand_event_group(uid, group, window_start, window_end))
+            expanded.extend(_expand_event_group(uid, group, window_start, window_end, local_timezone))
         except Exception as exc:
             if warnings is not None:
                 warnings.append(f"skipped event UID {uid}: {type(exc).__name__}: {exc}")
@@ -192,30 +193,36 @@ def _expand_event_group(
     group: list[dict[str, list[tuple[dict[str, str], str]]]],
     window_start: datetime,
     window_end: datetime,
+    local_timezone: Any,
 ) -> list[dict[str, Any]]:
     expanded: list[dict[str, Any]] = []
     masters = [item for item in group if not _has(item, "RECURRENCE-ID")]
     overrides = [item for item in group if _has(item, "RECURRENCE-ID")]
     override_map: dict[str, dict[str, list[tuple[dict[str, str], str]]]] = {}
     for override in overrides:
-        recurrence_id, _ = _date_property(override, "RECURRENCE-ID")
-        override_map[_instance_key(recurrence_id)] = override
+        recurrence_id, _ = _date_property(override, "RECURRENCE-ID", local_timezone)
+        override_map[_instance_key(recurrence_id, local_timezone)] = override
 
     matched_overrides: set[str] = set()
     for master in masters:
         if _first_text(master, "STATUS").upper() == "CANCELLED":
             continue
-        start, all_day = _date_property(master, "DTSTART")
-        end = _event_end(master, start, all_day)
+        start, all_day = _date_property(master, "DTSTART", local_timezone)
+        end = _event_end(master, start, all_day, local_timezone=local_timezone)
         duration = end - start
         occurrences = [start]
         if _has(master, "RRULE"):
             occurrences = _rrule_occurrences(start, _first_text(master, "RRULE"), window_end)
-        occurrences.extend(_date_list_properties(master, "RDATE"))
-        exclusions = {_instance_key(value) for value in _date_list_properties(master, "EXDATE")}
-        unique_occurrences = sorted({_instance_key(value): value for value in occurrences}.values())
+        occurrences.extend(_date_list_properties(master, "RDATE", local_timezone))
+        exclusions = {
+            _instance_key(value, local_timezone)
+            for value in _date_list_properties(master, "EXDATE", local_timezone)
+        }
+        unique_occurrences = sorted(
+            {_instance_key(value, local_timezone): value for value in occurrences}.values()
+        )
         for occurrence in unique_occurrences:
-            key = _instance_key(occurrence)
+            key = _instance_key(occurrence, local_timezone)
             if key in exclusions:
                 continue
             override = override_map.get(key)
@@ -223,8 +230,14 @@ def _expand_event_group(
                 matched_overrides.add(key)
                 if _first_text(override, "STATUS").upper() == "CANCELLED":
                     continue
-                instance_start, instance_all_day = _date_property(override, "DTSTART")
-                instance_end = _event_end(override, instance_start, instance_all_day, default_duration=duration)
+                instance_start, instance_all_day = _date_property(override, "DTSTART", local_timezone)
+                instance_end = _event_end(
+                    override,
+                    instance_start,
+                    instance_all_day,
+                    default_duration=duration,
+                    local_timezone=local_timezone,
+                )
                 event = _render_event(uid, override, instance_start, instance_end, instance_all_day)
             else:
                 event = _render_event(uid, master, occurrence, occurrence + duration, all_day)
@@ -234,8 +247,8 @@ def _expand_event_group(
     for key, override in override_map.items():
         if key in matched_overrides or _first_text(override, "STATUS").upper() == "CANCELLED":
             continue
-        start, all_day = _date_property(override, "DTSTART")
-        end = _event_end(override, start, all_day)
+        start, all_day = _date_property(override, "DTSTART", local_timezone)
+        end = _event_end(override, start, all_day, local_timezone=local_timezone)
         event = _render_event(uid, override, start, end, all_day)
         if _overlaps(event, window_start, window_end):
             expanded.append(event)
@@ -294,35 +307,42 @@ def _first_text(component: dict[str, list[tuple[dict[str, str], str]]], name: st
 def _date_property(
     component: dict[str, list[tuple[dict[str, str], str]]],
     name: str,
+    local_timezone: Any,
 ) -> tuple[datetime, bool]:
     values = component.get(name) or []
     if not values:
         raise CalendarFeedError(f"VEVENT is missing {name}.")
-    return _parse_ical_datetime(values[0][1], values[0][0])
+    return _parse_ical_datetime(values[0][1], values[0][0], local_timezone)
 
 
 def _date_list_properties(
     component: dict[str, list[tuple[dict[str, str], str]]],
     name: str,
+    local_timezone: Any,
 ) -> list[datetime]:
     results: list[datetime] = []
     for params, raw in component.get(name) or []:
         for value in raw.split(","):
             first = value.split("/", 1)[0]
-            parsed, _ = _parse_ical_datetime(first, params)
+            parsed, _ = _parse_ical_datetime(first, params, local_timezone)
             results.append(parsed)
     return results
 
 
-def _parse_ical_datetime(value: str, params: dict[str, str] | None = None) -> tuple[datetime, bool]:
+def _parse_ical_datetime(
+    value: str,
+    params: dict[str, str] | None = None,
+    local_timezone: Any | None = None,
+) -> tuple[datetime, bool]:
     params = params or {}
+    local_timezone = local_timezone or _local_timezone()
     raw = value.strip()
     is_date = params.get("VALUE", "").upper() == "DATE" or bool(re.fullmatch(r"\d{8}", raw))
     if is_date:
         parsed_date = datetime.strptime(raw[:8], "%Y%m%d").date()
-        return datetime.combine(parsed_date, dt_time.min, tzinfo=_local_timezone()), True
+        return datetime.combine(parsed_date, dt_time.min, tzinfo=local_timezone), True
     tzid = params.get("TZID", "")
-    tz = _timezone_for(tzid) if tzid else _local_timezone()
+    tz = _timezone_for(tzid, local_timezone) if tzid else local_timezone
     if raw.endswith("Z"):
         tz = timezone.utc
         raw = raw[:-1]
@@ -335,7 +355,7 @@ def _parse_ical_datetime(value: str, params: dict[str, str] | None = None) -> tu
     raise CalendarFeedError(f"Unsupported iCalendar date value: {value[:80]}")
 
 
-def _timezone_for(tzid: str) -> Any:
+def _timezone_for(tzid: str, fallback_timezone: Any | None = None) -> Any:
     cleaned = tzid.strip().lstrip("/")
     aliases = {
         "US/Eastern": "America/New_York",
@@ -346,8 +366,8 @@ def _timezone_for(tzid: str) -> Any:
     cleaned = aliases.get(cleaned, cleaned)
     try:
         return ZoneInfo(cleaned)
-    except ZoneInfoNotFoundError:
-        return _local_timezone()
+    except (ZoneInfoNotFoundError, ValueError):
+        return fallback_timezone or _local_timezone()
 
 
 def _local_timezone() -> Any:
@@ -355,7 +375,7 @@ def _local_timezone() -> Any:
     if tz_name:
         try:
             return ZoneInfo(tz_name)
-        except ZoneInfoNotFoundError:
+        except (ZoneInfoNotFoundError, ValueError):
             pass
     return datetime.now().astimezone().tzinfo or timezone.utc
 
@@ -366,9 +386,10 @@ def _event_end(
     all_day: bool,
     *,
     default_duration: timedelta | None = None,
+    local_timezone: Any | None = None,
 ) -> datetime:
     if _has(component, "DTEND"):
-        return _date_property(component, "DTEND")[0]
+        return _date_property(component, "DTEND", local_timezone or _local_timezone())[0]
     duration_text = _first_text(component, "DURATION")
     if duration_text:
         return start + _parse_duration(duration_text)
@@ -619,9 +640,9 @@ def _event_sort_key(event: dict[str, Any]) -> str:
     return str(start.get("dateTime") or start.get("date") or "")
 
 
-def _instance_key(value: datetime) -> str:
+def _instance_key(value: datetime, fallback_timezone: Any | None = None) -> str:
     if value.tzinfo is None:
-        value = value.replace(tzinfo=_local_timezone())
+        value = value.replace(tzinfo=fallback_timezone or _local_timezone())
     return value.astimezone(timezone.utc).isoformat()
 
 

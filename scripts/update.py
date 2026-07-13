@@ -192,6 +192,16 @@ def configure_runtime(root: Path) -> None:
         print("Disabled legacy email polling until Gmail IMAP is configured through setup.py.")
 
     memory_config = setup.load_json(setup.MEMORY_CONFIG)
+    timezone_name = str(config.get("timezone") or memory_config.get("timezone") or "").strip()
+    if not timezone_name:
+        timezone_name = setup.detect_system_timezone()
+    if config.get("timezone") != timezone_name:
+        config["timezone"] = timezone_name
+        setup.write_json(setup.TELEGRAM_CONFIG, config)
+    if memory_config.get("timezone") != timezone_name:
+        memory_config["timezone"] = timezone_name
+        setup.write_json(setup.MEMORY_CONFIG, memory_config)
+    print(f"Using {timezone_name} for prompt, Telegram, memory, and calendar timestamps.")
     if memory_config.get("enable_calendar") and not setup.CALENDAR_SOURCES.is_file():
         memory_config["enable_calendar"] = False
         memory_config["calendar_provider"] = "ical"

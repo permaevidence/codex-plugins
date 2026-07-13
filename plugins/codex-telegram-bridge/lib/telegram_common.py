@@ -39,6 +39,7 @@ DEFAULT_CONFIG = {
     "default_cwd": str(Path.home()),
     "model": None,
     "effort": None,
+    "timezone": "",
     "approval_policy": "never",
     "personality": "friendly",
     "sandbox_mode": "dangerFullAccess",

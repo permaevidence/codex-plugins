@@ -91,6 +91,19 @@ class IcalCalendarTests(unittest.TestCase):
         self.assertTrue(holiday["all_day"])
         self.assertEqual(holiday["start"], {"date": "2026-07-20"})
 
+    def test_floating_event_uses_requested_calendar_timezone(self) -> None:
+        text = """BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:floating@example.com
+DTSTART:20260720T090000
+DTEND:20260720T100000
+SUMMARY:Floating appointment
+END:VEVENT
+END:VCALENDAR
+"""
+        events = parse_ical_events(text, self.start, self.end)
+        self.assertEqual(events[0]["start"]["dateTime"], "2026-07-20T09:00:00-04:00")
+
     def test_monthly_last_weekday_bysetpos(self) -> None:
         text = """BEGIN:VCALENDAR
 BEGIN:VEVENT
