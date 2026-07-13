@@ -129,6 +129,39 @@ class CompactionDetectionTests(unittest.TestCase):
             self.assertEqual(originals, {"incoming.pdf", "report.pdf"})
             self.assertNotIn(".env", originals)
             self.assertEqual(memory_stop.extract_last_assistant_message(str(rollout)), "Done")
+
+    def test_model_file_description_sends_non_image_as_data_url(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_call(instructions: str, content: list[dict[str, object]], config: dict[str, object]) -> str:
+            captured["content"] = content
+            return "A Word document used in the conversation."
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "example.docx"
+            path.write_bytes(b"PK\x03\x04test-docx")
+            with mock.patch.object(common, "call_openai_responses", side_effect=fake_call):
+                result = common.describe_file_entry(
+                    path,
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    config={
+                        **common.DEFAULT_CONFIG,
+                        "enable_model_file_descriptions": True,
+                        "openai_api_key": "sk-test",
+                    },
+                )
+
+        self.assertEqual(result, "A Word document used in the conversation.")
+        file_block = next(
+            block for block in captured["content"] if block.get("type") == "input_file"  # type: ignore[union-attr]
+        )
+        self.assertEqual(file_block["filename"], "example.docx")
+        self.assertTrue(
+            str(file_block["file_data"]).startswith(
+                "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,"
+            )
+        )
+
     def test_default_memory_model_is_luna_high(self) -> None:
         self.assertEqual(common.DEFAULT_CONFIG["openai_model"], "gpt-5.6-luna")
         self.assertEqual(common.DEFAULT_CONFIG["openai_reasoning_effort"], "high")

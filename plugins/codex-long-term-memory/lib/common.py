@@ -1554,11 +1554,12 @@ def describe_file_entry(
             }
         )
     else:
+        data_uri = f"data:{media_type};base64,{base64.b64encode(raw).decode('ascii')}"
         content.append(
             {
                 "type": "input_file",
                 "filename": path.name,
-                "file_data": base64.b64encode(raw).decode("ascii"),
+                "file_data": data_uri,
             }
         )
 
