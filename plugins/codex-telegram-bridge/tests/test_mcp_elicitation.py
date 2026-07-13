@@ -364,6 +364,12 @@ class SystemdServiceTests(unittest.TestCase):
             ["systemctl", "--user", "is-active", "--quiet", operator.SYSTEMD_SERVICE_NAME],
         )
 
+    def test_systemd_path_escapes_spaces_without_literal_quotes(self):
+        operator = load_operator_module()
+        escaped = operator.systemd_path("/home/alice/My Runtime")
+        self.assertEqual(escaped, "/home/alice/My\\x20Runtime")
+        self.assertNotIn('"', escaped)
+
 
 class BotCommandMenuTests(unittest.TestCase):
     def test_bot_commands_are_reflected_in_help_text(self):

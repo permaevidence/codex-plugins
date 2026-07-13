@@ -369,6 +369,17 @@ def systemd_quote(value: str) -> str:
     return f'"{escaped}"'
 
 
+def systemd_path(value: str) -> str:
+    """Escape a path directive without leaving quote characters in its value."""
+    return (
+        value.replace("%", "%%")
+        .replace("\\", "\\x5c")
+        .replace(" ", "\\x20")
+        .replace("\t", "\\x09")
+        .replace("\n", "\\x0a")
+    )
+
+
 def build_systemd_unit(*, bash: str, path: str) -> str:
     return "\n".join(
         [
@@ -378,7 +389,7 @@ def build_systemd_unit(*, bash: str, path: str) -> str:
             "[Service]",
             "Type=simple",
             f"ExecStart={systemd_quote(bash)} {systemd_quote(str(START_SCRIPT))}",
-            f"WorkingDirectory={systemd_quote(str(PLUGIN_ROOT))}",
+            f"WorkingDirectory={systemd_path(str(PLUGIN_ROOT))}",
             f"Environment={systemd_quote(f'HOME={Path.home()}')}",
             f"Environment={systemd_quote(f'PATH={path}')}",
             "Restart=always",
