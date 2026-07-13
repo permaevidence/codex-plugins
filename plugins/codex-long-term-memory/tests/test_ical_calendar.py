@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -112,6 +112,34 @@ END:VCALENDAR
             ["2026-01-30", "2026-02-27", "2026-03-31"],
         )
 
+    def test_bad_events_are_skipped_without_dropping_valid_events(self) -> None:
+        text = """BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:good
+DTSTART;TZID=America/New_York:20260720T090000
+DTEND;TZID=America/New_York:20260720T100000
+SUMMARY:Valid meeting
+END:VEVENT
+BEGIN:VEVENT
+UID:unsupported
+DTSTART;TZID=America/New_York:20260720T110000
+RRULE:FREQ=HOURLY;COUNT=2
+SUMMARY:Unsupported recurrence
+END:VEVENT
+BEGIN:VEVENT
+UID:impossible
+DTSTART;TZID=America/New_York:20260201T120000
+RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30
+SUMMARY:Impossible recurrence
+END:VEVENT
+END:VCALENDAR
+"""
+        warnings: list[str] = []
+        events = parse_ical_events(text, self.start, self.end, warnings=warnings)
+        self.assertEqual([event["uid"] for event in events], ["good"])
+        self.assertTrue(any("UID unsupported" in warning for warning in warnings))
+        self.assertTrue(any("UID impossible" in warning for warning in warnings))
+
     def test_only_private_google_https_urls_are_accepted(self) -> None:
         validate_calendar_url("https://calendar.google.com/calendar/ical/example/private-token/basic.ics")
         with self.assertRaises(CalendarFeedError):
@@ -161,6 +189,62 @@ END:VCALENDAR
             self.assertEqual(report["status"], "warning")
             self.assertEqual(report["stale_sources"], 1)
             self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+
+    def test_not_modified_revalidation_refreshes_cache_freshness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sources = root / "sources.json"
+            cache = root / "cache.json"
+            sources.write_text(
+                json.dumps(
+                    {
+                        "sources": [
+                            {
+                                "name": "Primary",
+                                "url": "https://calendar.google.com/calendar/ical/example/private-token/basic.ics",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            initial = datetime(2026, 7, 1, tzinfo=timezone.utc)
+            fetch_calendar_events(
+                sources,
+                cache,
+                self.start,
+                self.end,
+                opener=lambda request, timeout: FakeResponse(RECURRING_ICS),
+                now=initial,
+            )
+
+            revalidated = initial.replace(day=7)
+            events, report = fetch_calendar_events(
+                sources,
+                cache,
+                self.start,
+                self.end,
+                opener=lambda request, timeout: (_ for _ in ()).throw(
+                    HTTPError(request.full_url, 304, "Not Modified", {}, None)
+                ),
+                now=revalidated,
+            )
+            self.assertTrue(events)
+            self.assertEqual(report["status"], "ok")
+            cached = json.loads(cache.read_text(encoding="utf-8"))
+            record = next(iter(cached["sources"].values()))
+            self.assertEqual(record["fetched_at"], revalidated.isoformat())
+
+            events, report = fetch_calendar_events(
+                sources,
+                cache,
+                self.start,
+                self.end,
+                opener=lambda request, timeout: (_ for _ in ()).throw(URLError("offline")),
+                now=initial.replace(day=9),
+            )
+            self.assertTrue(events)
+            self.assertEqual(report["status"], "warning")
 
 
 if __name__ == "__main__":

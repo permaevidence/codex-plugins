@@ -97,6 +97,32 @@ class GoogleAppOnboardingTests(unittest.TestCase):
         self.assertFalse(connected)
         self.assertIn("not returned by Codex app/list", detail)
 
+    def test_google_apps_are_discovered_when_connector_ids_change(self):
+        operator = load_operator_module()
+        apps = {
+            "connector_new_mail": {
+                "id": "connector_new_mail",
+                "name": "Gmail",
+                "isEnabled": True,
+                "isAccessible": True,
+            },
+            "connector_new_calendar": {
+                "id": "connector_new_calendar",
+                "displayName": "Google Calendar",
+                "isEnabled": True,
+                "isAccessible": True,
+            },
+        }
+
+        self.assertEqual(
+            operator.find_google_app(apps, "gmail")["id"],
+            "connector_new_mail",
+        )
+        self.assertEqual(
+            operator.find_google_app(apps, "calendar")["id"],
+            "connector_new_calendar",
+        )
+
 
 class AppServerResilienceTests(unittest.TestCase):
     def test_real_app_server_exit_terminates_bridge_for_supervisor_restart(self):

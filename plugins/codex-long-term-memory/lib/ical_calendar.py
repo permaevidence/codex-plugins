@@ -120,6 +120,8 @@ def fetch_calendar_events(
         except HTTPError as exc:
             if exc.code == 304 and cached.get("ics"):
                 text = str(cached["ics"])
+                cached["fetched_at"] = now.isoformat()
+                cache_sources[key] = cached
             else:
                 text, stale = _cached_feed_or_raise(cached, now, max_stale_seconds, exc)
         except Exception as exc:
@@ -130,10 +132,17 @@ def fetch_calendar_events(
                 continue
 
         try:
-            events = parse_ical_events(text, window_start, window_end)
+            event_warnings: list[str] = []
+            events = parse_ical_events(
+                text,
+                window_start,
+                window_end,
+                warnings=event_warnings,
+            )
             for event in events:
                 event["calendar"] = source["name"]
             all_events.extend(events)
+            failures.extend(f"{source['name']}: {warning}" for warning in event_warnings)
             if stale:
                 stale_sources += 1
         except Exception as exc:
@@ -155,6 +164,8 @@ def parse_ical_events(
     text: str,
     window_start: datetime,
     window_end: datetime,
+    *,
+    warnings: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     if window_start.tzinfo is None or window_end.tzinfo is None:
         raise CalendarFeedError("Calendar expansion requires timezone-aware window bounds.")
@@ -166,53 +177,69 @@ def parse_ical_events(
 
     expanded: list[dict[str, Any]] = []
     for uid, group in grouped.items():
-        masters = [item for item in group if not _has(item, "RECURRENCE-ID")]
-        overrides = [item for item in group if _has(item, "RECURRENCE-ID")]
-        override_map: dict[str, dict[str, list[tuple[dict[str, str], str]]]] = {}
-        for override in overrides:
-            recurrence_id, _ = _date_property(override, "RECURRENCE-ID")
-            override_map[_instance_key(recurrence_id)] = override
+        try:
+            expanded.extend(_expand_event_group(uid, group, window_start, window_end))
+        except Exception as exc:
+            if warnings is not None:
+                warnings.append(f"skipped event UID {uid}: {type(exc).__name__}: {exc}")
 
-        matched_overrides: set[str] = set()
-        for master in masters:
-            if _first_text(master, "STATUS").upper() == "CANCELLED":
+    expanded.sort(key=_event_sort_key)
+    return expanded
+
+
+def _expand_event_group(
+    uid: str,
+    group: list[dict[str, list[tuple[dict[str, str], str]]]],
+    window_start: datetime,
+    window_end: datetime,
+) -> list[dict[str, Any]]:
+    expanded: list[dict[str, Any]] = []
+    masters = [item for item in group if not _has(item, "RECURRENCE-ID")]
+    overrides = [item for item in group if _has(item, "RECURRENCE-ID")]
+    override_map: dict[str, dict[str, list[tuple[dict[str, str], str]]]] = {}
+    for override in overrides:
+        recurrence_id, _ = _date_property(override, "RECURRENCE-ID")
+        override_map[_instance_key(recurrence_id)] = override
+
+    matched_overrides: set[str] = set()
+    for master in masters:
+        if _first_text(master, "STATUS").upper() == "CANCELLED":
+            continue
+        start, all_day = _date_property(master, "DTSTART")
+        end = _event_end(master, start, all_day)
+        duration = end - start
+        occurrences = [start]
+        if _has(master, "RRULE"):
+            occurrences = _rrule_occurrences(start, _first_text(master, "RRULE"), window_end)
+        occurrences.extend(_date_list_properties(master, "RDATE"))
+        exclusions = {_instance_key(value) for value in _date_list_properties(master, "EXDATE")}
+        unique_occurrences = sorted({_instance_key(value): value for value in occurrences}.values())
+        for occurrence in unique_occurrences:
+            key = _instance_key(occurrence)
+            if key in exclusions:
                 continue
-            start, all_day = _date_property(master, "DTSTART")
-            end = _event_end(master, start, all_day)
-            duration = end - start
-            occurrences = [start]
-            if _has(master, "RRULE"):
-                occurrences = _rrule_occurrences(start, _first_text(master, "RRULE"), window_end)
-            occurrences.extend(_date_list_properties(master, "RDATE"))
-            exclusions = {_instance_key(value) for value in _date_list_properties(master, "EXDATE")}
-            unique_occurrences = sorted({_instance_key(value): value for value in occurrences}.values())
-            for occurrence in unique_occurrences:
-                key = _instance_key(occurrence)
-                if key in exclusions:
+            override = override_map.get(key)
+            if override is not None:
+                matched_overrides.add(key)
+                if _first_text(override, "STATUS").upper() == "CANCELLED":
                     continue
-                override = override_map.get(key)
-                if override is not None:
-                    matched_overrides.add(key)
-                    if _first_text(override, "STATUS").upper() == "CANCELLED":
-                        continue
-                    instance_start, instance_all_day = _date_property(override, "DTSTART")
-                    instance_end = _event_end(override, instance_start, instance_all_day, default_duration=duration)
-                    event = _render_event(uid, override, instance_start, instance_end, instance_all_day)
-                else:
-                    event = _render_event(uid, master, occurrence, occurrence + duration, all_day)
-                if _overlaps(event, window_start, window_end):
-                    expanded.append(event)
-
-        for key, override in override_map.items():
-            if key in matched_overrides or _first_text(override, "STATUS").upper() == "CANCELLED":
-                continue
-            start, all_day = _date_property(override, "DTSTART")
-            end = _event_end(override, start, all_day)
-            event = _render_event(uid, override, start, end, all_day)
+                instance_start, instance_all_day = _date_property(override, "DTSTART")
+                instance_end = _event_end(override, instance_start, instance_all_day, default_duration=duration)
+                event = _render_event(uid, override, instance_start, instance_end, instance_all_day)
+            else:
+                event = _render_event(uid, master, occurrence, occurrence + duration, all_day)
             if _overlaps(event, window_start, window_end):
                 expanded.append(event)
 
-    expanded.sort(key=_event_sort_key)
+    for key, override in override_map.items():
+        if key in matched_overrides or _first_text(override, "STATUS").upper() == "CANCELLED":
+            continue
+        start, all_day = _date_property(override, "DTSTART")
+        end = _event_end(override, start, all_day)
+        event = _render_event(uid, override, start, end, all_day)
+        if _overlaps(event, window_start, window_end):
+            expanded.append(event)
+
     return expanded
 
 

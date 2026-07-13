@@ -58,8 +58,8 @@ def poll_unread_messages(
             raise GmailImapError("Gmail would not open INBOX in read-only mode.")
 
         uid_validity = _response_number(client.response("UIDVALIDITY"))
-        all_uids = _search_uids(client, "ALL")
-        newest_uid = max(all_uids, default=0)
+        uid_next = _response_number(client.response("UIDNEXT"))
+        newest_uid = uid_next - 1 if uid_next > 0 else max(_search_uids(client, "ALL"), default=0)
         prior_validity = int(current.get("uid_validity") or 0)
         initialized = bool(current.get("initialized"))
 
@@ -72,8 +72,12 @@ def poll_unread_messages(
             }
 
         last_uid = int(current.get("last_uid") or 0)
-        unseen_uids = [uid for uid in _search_uids(client, "UNSEEN") if uid > last_uid]
-        candidates = unseen_uids[-max(1, int(max_results)) :]
+        unseen_uids = sorted(
+            uid
+            for uid in _search_uids(client, f"UID {max(1, last_uid + 1)}:* UNSEEN")
+            if uid > last_uid
+        )
+        candidates = unseen_uids[: max(1, int(max_results))]
         notified = {
             str(value)
             for value in current.get("notified_message_ids", [])
@@ -99,10 +103,13 @@ def poll_unread_messages(
                 }
             )
 
+        backlog_remaining = len(unseen_uids) > len(candidates)
+        highest_processed = max(candidates, default=last_uid)
+        next_last_uid = highest_processed if backlog_remaining else max(highest_processed, newest_uid)
         return messages, {
             "initialized": True,
             "uid_validity": uid_validity,
-            "last_uid": max(last_uid, newest_uid),
+            "last_uid": max(last_uid, next_last_uid),
             "notified_message_ids": sorted(notified)[-200:],
         }
     except GmailImapError:

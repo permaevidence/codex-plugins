@@ -24,6 +24,7 @@ class FakeImap:
     }
     last_readonly = None
     last_fetch_query = None
+    search_criteria = []
 
     def __init__(self, host, port, timeout):
         self.host = host
@@ -42,11 +43,14 @@ class FakeImap:
         return "OK", [b"2"]
 
     def response(self, name):
+        if name == "UIDNEXT":
+            return name, [str(max(self.all_uids, default=0) + 1).encode()]
         return name, [str(self.uid_validity).encode()]
 
     def uid(self, command, *args):
         if command == "search":
             criterion = args[-1]
+            type(self).search_criteria.append(criterion)
             values = self.all_uids if criterion == "ALL" else self.unseen_uids
             return "OK", [" ".join(str(value) for value in values).encode()]
         if command == "fetch":
@@ -60,6 +64,20 @@ class FakeImap:
 
 
 class GmailImapTests(unittest.TestCase):
+    def setUp(self) -> None:
+        FakeImap.all_uids = [1, 2]
+        FakeImap.unseen_uids = [2]
+        FakeImap.uid_validity = 55
+        FakeImap.headers = {
+            2: (
+                b"From: Alice Example <alice@example.com>\r\n"
+                b"Subject: Project update\r\n"
+                b"Date: Mon, 13 Jul 2026 09:00:00 -0400\r\n"
+                b"Message-ID: <message-2@example.com>\r\n\r\n"
+            )
+        }
+        FakeImap.search_criteria = []
+
     def test_app_password_whitespace_is_removed(self) -> None:
         self.assertEqual(normalize_app_password("abcd efgh ijkl mnop"), "abcdefghijklmnop")
 
@@ -70,6 +88,7 @@ class GmailImapTests(unittest.TestCase):
         self.assertEqual(messages, [])
         self.assertTrue(state["initialized"])
         self.assertEqual(state["last_uid"], 2)
+        self.assertNotIn("ALL", FakeImap.search_criteria)
 
     def test_new_unread_message_is_returned_without_marking_it_read(self) -> None:
         FakeImap.all_uids = [1, 2]
@@ -86,6 +105,40 @@ class GmailImapTests(unittest.TestCase):
         self.assertIn("<message-2@example.com>", state["notified_message_ids"])
         self.assertTrue(FakeImap.last_readonly)
         self.assertIn("BODY.PEEK[HEADER.FIELDS", FakeImap.last_fetch_query)
+        self.assertIn("UID 2:* UNSEEN", FakeImap.search_criteria)
+
+    def test_large_unread_burst_is_drained_without_skipping_messages(self) -> None:
+        FakeImap.all_uids = list(range(1, 17))
+        FakeImap.unseen_uids = list(range(2, 17))
+        FakeImap.headers = {
+            uid: (
+                f"From: Sender {uid} <sender{uid}@example.com>\r\n"
+                f"Subject: Message {uid}\r\n"
+                f"Message-ID: <message-{uid}@example.com>\r\n\r\n"
+            ).encode()
+            for uid in FakeImap.unseen_uids
+        }
+        state = {"initialized": True, "uid_validity": 55, "last_uid": 1}
+
+        first, state = poll_unread_messages(
+            "owner@gmail.com",
+            "abcdefghijklmnop",
+            state,
+            max_results=10,
+            client_factory=FakeImap,
+        )
+        second, state = poll_unread_messages(
+            "owner@gmail.com",
+            "abcdefghijklmnop",
+            state,
+            max_results=10,
+            client_factory=FakeImap,
+        )
+
+        self.assertEqual([int(message["uid"]) for message in first], list(range(2, 12)))
+        self.assertEqual([int(message["uid"]) for message in second], list(range(12, 17)))
+        self.assertEqual(state["last_uid"], 16)
+        self.assertNotIn("ALL", FakeImap.search_criteria)
 
     def test_uidvalidity_change_resets_baseline_safely(self) -> None:
         messages, state = poll_unread_messages(

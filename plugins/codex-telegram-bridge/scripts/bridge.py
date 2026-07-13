@@ -10,6 +10,7 @@ import json
 import os
 import plistlib
 import pwd
+import re
 import select
 import shlex
 import shutil
@@ -644,11 +645,11 @@ def doctor(
             )
         )
         apps = query_codex_apps(config.get("default_cwd"))
-        for connector_id, label in (
-            (GMAIL_CONNECTOR_ID, "Gmail app connected and available to Codex"),
-            (CALENDAR_CONNECTOR_ID, "Google Calendar app connected and available to Codex"),
+        for app_kind, label in (
+            ("gmail", "Gmail app connected and available to Codex"),
+            ("calendar", "Google Calendar app connected and available to Codex"),
         ):
-            app = apps.get(connector_id, {})
+            app = find_google_app(apps, app_kind)
             connected, detail = google_app_connection_status(app)
             if connected or not allow_google_unconnected:
                 checks.append((label, connected, detail))
@@ -799,6 +800,39 @@ def google_app_connection_status(app: dict) -> tuple[bool, str]:
     return enabled and accessible, f"{name}; enabled={enabled}; accessible={accessible}"
 
 
+def find_google_app(apps: dict[str, dict], kind: str) -> dict:
+    """Find an official Google app without depending solely on a connector ID."""
+
+    normalized_kind = str(kind or "").strip().lower()
+    known_id = {
+        "gmail": GMAIL_CONNECTOR_ID,
+        "calendar": CALENDAR_CONNECTOR_ID,
+    }.get(normalized_kind, "")
+    if known_id and apps.get(known_id):
+        return apps[known_id]
+
+    for app in apps.values():
+        if not isinstance(app, dict):
+            continue
+        identity = " ".join(
+            str(app.get(field) or "")
+            for field in (
+                "id",
+                "name",
+                "title",
+                "displayName",
+                "slug",
+                "pluginName",
+            )
+        ).lower()
+        compact = re.sub(r"[^a-z0-9]+", "", identity)
+        if normalized_kind == "gmail" and "gmail" in compact:
+            return app
+        if normalized_kind == "calendar" and "googlecalendar" in compact:
+            return app
+    return {}
+
+
 def run_text(command: list[str]) -> str:
     try:
         proc = subprocess.run(command, capture_output=True, text=True, check=False, timeout=20)
@@ -878,7 +912,6 @@ def query_codex_apps(cwd: str | None) -> dict[str, dict]:
     except Exception:
         return {}
     assert process.stdin is not None and process.stdout is not None
-    expected = {GMAIL_CONNECTOR_ID, CALENDAR_CONNECTOR_ID}
     found: dict[str, dict] = {}
     try:
         process.stdin.write(
@@ -918,10 +951,9 @@ def query_codex_apps(cwd: str | None) -> dict[str, dict]:
                 break
             result = reply.get("result") or {}
             for app in result.get("data", []):
-                if isinstance(app, dict) and str(app.get("id") or "") in expected:
-                    found[str(app["id"])] = app
-            if expected.issubset(found):
-                break
+                app_id = str(app.get("id") or "") if isinstance(app, dict) else ""
+                if app_id:
+                    found[app_id] = app
             cursor = str(result.get("nextCursor") or "") or None
             if not cursor:
                 break
