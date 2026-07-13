@@ -1,6 +1,6 @@
 {
   "name": "codex-telegram-bridge",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Telegram bridge for Codex backed by codex app-server.",
   "author": {
     "name": "Perma Evidence",
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Codex Telegram Bridge",
     "shortDescription": "Run Codex through Telegram using the local app-server.",
-    "longDescription": "Maps Telegram chats to Codex app-server threads, supports unattended approvals, voice transcription, reminders, email injection, inbound photo/document downloads, Telegram action tools with attachment download/send support, and local access-control helpers.",
+    "longDescription": "Maps Telegram chats to Codex app-server threads, supports unattended approvals, voice transcription, reminders, read-only Gmail IMAP notices, official Google app workflows, inbound photo/document downloads, Telegram action tools with attachment download/send support, and local access-control helpers.",
     "developerName": "Perma Evidence",
     "category": "Integrations",
     "capabilities": [

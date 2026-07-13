@@ -34,6 +34,7 @@ from lib.telegram_api import (
     set_message_reaction,
     telegram_request,
 )
+from lib.gmail_imap import GmailImapError, poll_unread_messages
 from lib.telegram_common import (
     CONFIG_FILE,
     INBOX_DIR,
@@ -82,7 +83,7 @@ BOT_COMMANDS = [
     {"command": "start", "description": "Show the welcome/help message"},
     {"command": "help", "description": "Show available commands"},
     {"command": "status", "description": "Show current Codex status"},
-    {"command": "health", "description": "Check Codex, memory, and transcription health"},
+    {"command": "health", "description": "Check Codex, memory, Google, and transcription health"},
     {"command": "model", "description": "Choose Codex model and thinking effort"},
     {"command": "resume", "description": "Retry a parked interrupted task"},
     {"command": "retrymemory", "description": "Retry parked memory maintenance"},
@@ -1585,7 +1586,15 @@ def maybe_start_email_loop(
         return
     if not config.get("owner_chat_id"):
         return
-    if shutil_which("gws") is None:
+    email_address = str(config.get("gmail_imap_email") or "").strip()
+    app_password = str(config.get("gmail_imap_app_password") or "").strip()
+    if not email_address or not app_password:
+        set_component_health(
+            "email",
+            "error",
+            category="configuration",
+            detail="Proactive email notifications are enabled, but Gmail IMAP credentials are missing.",
+        )
         return
 
     def worker() -> None:
@@ -1593,57 +1602,56 @@ def maybe_start_email_loop(
             try:
                 owner_chat_id = str(config.get("owner_chat_id"))
                 state = load_email_state()
-                notified_ids = set(state.get("notified_ids", []))
-                since = int(time.time() - EMAIL_CHECK_INTERVAL)
-                proc = subprocess.run(
-                    [
-                        "gws",
-                        "gmail",
-                        "+triage",
-                        "--max",
-                        "10",
-                        "--query",
-                        f"is:unread after:{since}",
-                        "--format",
-                        "json",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=90,
+                fresh, next_state = poll_unread_messages(
+                    email_address,
+                    app_password,
+                    state,
+                    max_results=10,
                 )
-                if proc.returncode == 0 and proc.stdout.strip():
-                    data = json.loads(proc.stdout)
-                    messages = data.get("messages") or []
-                    fresh = []
-                    for message in messages:
-                        message_id = str(message.get("id") or message.get("threadId") or "")
-                        if message_id and message_id in notified_ids:
-                            continue
-                        fresh.append(message)
+                save_email_state(next_state)
+                set_component_health(
+                    "email",
+                    "ok",
+                    detail="The most recent read-only Gmail IMAP poll succeeded.",
+                )
+                if fresh:
+                    lines = []
+                    for message in fresh:
+                        message_id = str(message.get("message_id") or "")
+                        parts = []
                         if message_id:
-                            notified_ids.add(message_id)
-                    if fresh:
-                        lines = []
-                        for message in fresh:
-                            message_id = str(message.get("id") or message.get("threadId") or "")
-                            sender = message.get("from", "?")
-                            subject = message.get("subject", "(no subject)")
-                            date = message.get("date", "")
-                            parts = []
-                            if message_id:
-                                parts.append(f"ID: {message_id}")
-                            parts.extend([f"From: {sender}", f"Subject: {subject}", f"Date: {date}"])
-                            lines.append("\n".join(parts))
-                        content = (
-                            "[SYSTEM EVENT source=\"email\"] New unread email(s):\n\n"
-                            + "\n\n".join(lines)
+                            parts.append(f"Message-ID: {message_id}")
+                            parts.append(f"Gmail search: rfc822msgid:{message_id}")
+                        parts.extend(
+                            [
+                                f"From: {message.get('from', '?')}",
+                                f"Subject: {message.get('subject', '(no subject)')}",
+                                f"Date: {message.get('date', '')}",
+                            ]
                         )
-                        with chat_map_lock:
-                            codex.inject_external_message(owner_chat_id, chat_map, content)
-                            save_chat_map(chat_map)
-                        save_email_state({"notified_ids": sorted(notified_ids)[-100:]})
+                        lines.append("\n".join(parts))
+                    content = (
+                        "[SYSTEM EVENT source=\"email\"] New unread email(s):\n\n"
+                        + "\n\n".join(lines)
+                    )
+                    with chat_map_lock:
+                        codex.inject_external_message(owner_chat_id, chat_map, content)
+                        save_chat_map(chat_map)
+            except GmailImapError as exc:
+                set_component_health(
+                    "email",
+                    "error",
+                    category="imap",
+                    detail=str(exc),
+                )
+                print(f"email loop failed: {exc}", file=sys.stderr)
             except Exception as exc:
+                set_component_health(
+                    "email",
+                    "error",
+                    category="unexpected",
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
                 print(f"email loop failed: {exc}", file=sys.stderr)
             time.sleep(EMAIL_CHECK_INTERVAL)
 
@@ -2064,6 +2072,8 @@ def _pid_file_alive(path: Path) -> bool:
 
 def compact_health_summary() -> str:
     problems: list[str] = []
+    bridge_config = load_json(CONFIG_FILE, {})
+    memory_config = load_json(MEMORY_STATE_DIR / "config.json", {})
     memory = memory_health_snapshot()
     if memory["alert"]:
         problems.append("memory summaries parked; use /retrymemory")
@@ -2075,11 +2085,23 @@ def compact_health_summary() -> str:
     codex_health = component_health("codex")
     if codex_health.get("status") == "error":
         problems.append("Codex needs attention")
+    email_health = component_health("email")
+    if bridge_config.get("enable_email_notifications") and email_health.get("status") == "error":
+        problems.append("email polling unavailable")
+    calendar_health = load_json(MEMORY_STATE_DIR / "calendar_health.json", {})
+    if (
+        memory_config.get("enable_calendar")
+        and isinstance(calendar_health, dict)
+        and calendar_health.get("status") == "error"
+    ):
+        problems.append("calendar feed unavailable")
     return "Health: OK" if not problems else f"Health: ATTENTION — {'; '.join(problems)}. Use /health."
 
 
 def health_text() -> str:
     lines = ["System health", "", "✅ Bridge: running", "✅ Codex app-server: connected"]
+    bridge_config = load_json(CONFIG_FILE, {})
+    memory_config = load_json(MEMORY_STATE_DIR / "config.json", {})
     codex_health = component_health("codex")
     if codex_health.get("status") == "error":
         lines[-1] = f"❌ Codex: {codex_health.get('detail') or 'the last turn failed'}"
@@ -2109,6 +2131,28 @@ def health_text() -> str:
         lines.append("✅ Voice transcription: working")
     else:
         lines.append("✅ Voice transcription: configured (not tested since this runtime started)")
+
+    email = component_health("email")
+    if not bridge_config.get("enable_email_notifications"):
+        lines.append("ℹ️ Email notifications: disabled")
+    elif email.get("status") == "error":
+        lines.append(f"❌ Email notifications: {email.get('detail') or 'Gmail IMAP polling failed'}")
+    elif email.get("status") == "ok":
+        lines.append("✅ Email notifications: read-only Gmail IMAP polling works")
+    else:
+        lines.append("ℹ️ Email notifications: not enabled or not tested")
+
+    calendar_health = load_json(MEMORY_STATE_DIR / "calendar_health.json", {})
+    if not memory_config.get("enable_calendar"):
+        lines.append("ℹ️ Calendar context: disabled")
+    elif isinstance(calendar_health, dict) and calendar_health.get("status") == "error":
+        lines.append(f"❌ Calendar context: {calendar_health.get('detail') or 'private iCal retrieval failed'}")
+    elif isinstance(calendar_health, dict) and calendar_health.get("status") == "warning":
+        lines.append(f"⚠️ Calendar context: {calendar_health.get('detail') or 'using a cached calendar feed'}")
+    elif isinstance(calendar_health, dict) and calendar_health.get("status") == "ok":
+        lines.append("✅ Calendar context: private iCal retrieval works")
+    else:
+        lines.append("ℹ️ Calendar context: not enabled or not tested")
 
     update_state = load_json(UPDATE_STATE_FILE, {})
     if isinstance(update_state, dict) and update_state.get("status") == "failed":

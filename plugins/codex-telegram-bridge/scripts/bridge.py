@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import io
 import json
 import os
@@ -19,6 +20,7 @@ import time
 import urllib.request
 import uuid
 import wave
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -28,6 +30,9 @@ REPO_ROOT = PLUGIN_ROOT.parents[1]
 ROOT_SCRIPTS = REPO_ROOT / "scripts"
 if str(ROOT_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(ROOT_SCRIPTS))
+if str(PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_ROOT))
+from lib.gmail_imap import probe_imap
 from platform_support import (
     LAUNCHD_LABEL,
     SYSTEMD_SERVICE_NAME,
@@ -57,6 +62,10 @@ RUNTIME_STATE_FILE = STATE_DIR / "runtime_state.json"
 MEMORY_CONFIG_FILE = Path.home() / ".codex" / "long-term-memory" / "config.json"
 MEMORY_ENV_FILE = Path.home() / ".codex" / "long-term-memory" / ".env"
 MEMORY_ALERT_FILE = Path.home() / ".codex" / "long-term-memory" / "pending" / "memory-maintenance.stuck.json"
+CALENDAR_SOURCES_FILE = Path.home() / ".codex" / "long-term-memory" / "calendar_sources.json"
+CALENDAR_CACHE_FILE = Path.home() / ".codex" / "long-term-memory" / "calendar_cache.json"
+GMAIL_CONNECTOR_ID = "connector_2128aebfecb84f64a069897515042a44"
+CALENDAR_CONNECTOR_ID = "connector_947e0d954944416db111db556030eea6"
 
 
 def parse_args() -> argparse.Namespace:
@@ -590,6 +599,7 @@ def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
             plugin_line(plugin_list, "codex-long-term-memory") or "not visible",
         )
     )
+
     checks.append(
         (
             "telegram bridge plugin installed",
@@ -604,6 +614,41 @@ def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
     checks.append(("telegram-actions MCP initializes", mcp_ok, mcp_detail))
 
     config = load_json(CONFIG_FILE)
+    google_apps_enabled = bool(config.get("enable_google_apps")) if isinstance(config, dict) else False
+    if google_apps_enabled:
+        gmail_line = plugin_line(plugin_list, "gmail")
+        calendar_line = plugin_line(plugin_list, "google-calendar")
+        checks.append(
+            (
+                "official Gmail plugin installed",
+                bool(gmail_line) and "not installed" not in gmail_line,
+                gmail_line or "not visible",
+            )
+        )
+        checks.append(
+            (
+                "official Google Calendar plugin installed",
+                bool(calendar_line) and "not installed" not in calendar_line,
+                calendar_line or "not visible",
+            )
+        )
+        apps = query_codex_apps(config.get("default_cwd"))
+        for connector_id, label in (
+            (GMAIL_CONNECTOR_ID, "Gmail app available to Codex"),
+            (CALENDAR_CONNECTOR_ID, "Google Calendar app available to Codex"),
+        ):
+            app = apps.get(connector_id, {})
+            available = bool(app) and bool(app.get("isEnabled"))
+            detail = (
+                f"{app.get('name')}; accessible={app.get('isAccessible')}; "
+                "connect in ChatGPT Settings > Apps if authentication is still needed"
+                if app
+                else "not returned by Codex app/list"
+            )
+            if app:
+                checks.append((label, available, detail))
+            else:
+                print(f"[PENDING] {label}: {detail}; connect it in ChatGPT Settings > Apps")
     checks.append(("Telegram config.json", bool(config), str(CONFIG_FILE) if config else "missing or invalid"))
     if config:
         default_cwd = Path(str(config.get("default_cwd") or "")).expanduser()
@@ -614,6 +659,13 @@ def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
     checks.append(("Telegram .env", ENV_FILE.exists(), str(ENV_FILE) if ENV_FILE.exists() else "missing"))
     checks.append(("TELEGRAM_BOT_TOKEN set", "TELEGRAM_BOT_TOKEN" in env_values, "set" if "TELEGRAM_BOT_TOKEN" in env_values else "missing"))
     checks.append(("Telegram OPENAI_API_KEY set", "OPENAI_API_KEY" in env_values, "set" if "OPENAI_API_KEY" in env_values else "missing; voice transcription will not work"))
+    if config.get("enable_email_notifications"):
+        gmail_email = _env_value(ENV_FILE, "GMAIL_IMAP_EMAIL")
+        gmail_password = _env_value(ENV_FILE, "GMAIL_IMAP_APP_PASSWORD")
+        checks.append(("Gmail IMAP email set", bool(gmail_email), "set" if gmail_email else "missing"))
+        checks.append(("Gmail IMAP app password set", bool(gmail_password), "set" if gmail_password else "missing"))
+        imap_ok, imap_detail = probe_imap(gmail_email, gmail_password)
+        checks.append(("Gmail read-only IMAP access", imap_ok, imap_detail))
     telegram_ok, telegram_detail = smoke_test_telegram_api()
     checks.append(("Telegram bot API reachable", telegram_ok, telegram_detail))
 
@@ -649,6 +701,16 @@ def doctor(*, allow_unpaired: bool = False, allow_stopped: bool = False) -> int:
             agents_raw = str(memory_config.get("agents_md_path") or "").strip()
             agents_path = Path(agents_raw).expanduser() if agents_raw else None
             checks.append(("AGENTS.md memory target set", bool(agents_path and agents_path.is_file()), str(agents_path) if agents_path else "missing"))
+        if memory_config.get("enable_calendar"):
+            checks.append(
+                (
+                    "private calendar source configuration",
+                    CALENDAR_SOURCES_FILE.is_file(),
+                    str(CALENDAR_SOURCES_FILE) if CALENDAR_SOURCES_FILE.is_file() else "missing",
+                )
+            )
+            calendar_ok, calendar_detail = smoke_test_calendar_feeds(memory_config)
+            checks.append(("private iCal calendar retrieval", calendar_ok, calendar_detail))
 
     hook_records = query_memory_hooks(config.get("default_cwd") if config else None)
     expected_hooks = {"sessionStart", "userPromptSubmit", "preCompact", "stop"}
@@ -776,6 +838,126 @@ def query_memory_hooks(cwd: str | None) -> list[dict]:
         except subprocess.TimeoutExpired:
             process.kill()
     return []
+
+
+def query_codex_apps(cwd: str | None) -> dict[str, dict]:
+    codex = shutil.which("codex")
+    working_dir = Path(str(cwd or Path.home())).expanduser()
+    if not codex or not working_dir.is_dir():
+        return {}
+    try:
+        process = subprocess.Popen(
+            [codex, "app-server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            cwd=str(working_dir),
+        )
+    except Exception:
+        return {}
+    assert process.stdin is not None and process.stdout is not None
+    expected = {GMAIL_CONNECTOR_ID, CALENDAR_CONNECTOR_ID}
+    found: dict[str, dict] = {}
+    try:
+        process.stdin.write(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "clientInfo": {
+                            "name": "permaevidence_doctor",
+                            "title": "Perma Evidence Doctor",
+                            "version": "1",
+                        }
+                    },
+                }
+            )
+            + "\n"
+        )
+        process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "initialized", "params": {}}) + "\n")
+        process.stdin.flush()
+        cursor: str | None = None
+        for page in range(6):
+            request_id = 100 + page
+            params: dict[str, object] = {"limit": 200, "forceRefetch": page == 0}
+            if cursor:
+                params["cursor"] = cursor
+            process.stdin.write(
+                json.dumps(
+                    {"jsonrpc": "2.0", "id": request_id, "method": "app/list", "params": params}
+                )
+                + "\n"
+            )
+            process.stdin.flush()
+            reply = wait_for_app_server_reply(process, request_id, timeout=10)
+            if not reply or reply.get("error"):
+                break
+            result = reply.get("result") or {}
+            for app in result.get("data", []):
+                if isinstance(app, dict) and str(app.get("id") or "") in expected:
+                    found[str(app["id"])] = app
+            if expected.issubset(found):
+                break
+            cursor = str(result.get("nextCursor") or "") or None
+            if not cursor:
+                break
+        return found
+    except Exception:
+        return found
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+
+def wait_for_app_server_reply(process: subprocess.Popen, request_id: int, *, timeout: int) -> dict:
+    assert process.stdout is not None
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        ready, _, _ = select.select([process.stdout], [], [], 0.5)
+        if not ready:
+            if process.poll() is not None:
+                break
+            continue
+        line = process.stdout.readline()
+        if not line:
+            break
+        try:
+            reply = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if reply.get("id") == request_id:
+            return reply
+    return {}
+
+
+def smoke_test_calendar_feeds(config: dict) -> tuple[bool, str]:
+    helper_path = REPO_ROOT / "plugins/codex-long-term-memory/lib/ical_calendar.py"
+    try:
+        spec = importlib.util.spec_from_file_location("permaevidence_calendar_doctor", helper_path)
+        if spec is None or spec.loader is None:
+            return False, f"could not load {helper_path}"
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        start = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        _, report = module.fetch_calendar_events(
+            CALENDAR_SOURCES_FILE,
+            CALENDAR_CACHE_FILE,
+            start,
+            start + timedelta(days=max(1, int(config.get("calendar_days", 30)))),
+            timeout=int(config.get("calendar_timeout_seconds", 15)),
+            max_stale_seconds=int(config.get("calendar_cache_max_stale_seconds", 604800)),
+        )
+        status = str(report.get("status") or "")
+        detail = f"{report.get('sources', 0)} source(s); stale={report.get('stale_sources', 0)}"
+        return status in {"ok", "warning"}, detail
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
 
 
 def smoke_test_telegram_mcp() -> tuple[bool, str]:

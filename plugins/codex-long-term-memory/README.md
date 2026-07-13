@@ -11,7 +11,7 @@ This plugin ports the core idea of `Claude-Code-Long-Term-Memory` to Codex hooks
 - Writes large memory overlays into a marked `AGENTS.md` block for modern Codex releases that spill large hook output
 - Refreshes the marked `AGENTS.md` block from a real `PreCompact` hook before Codex compacts
 - Extracts durable user facts from earlier conversations
-- Optionally injects upcoming calendar items via `gws`
+- Optionally injects upcoming calendar items from private read-only Google Calendar iCal feeds
 - Compacts older history into archive-backed summaries with temporary, consolidated, and meta tiers
 - Uses the OpenAI Responses API for summaries, user-fact extraction, and file descriptions when configured
 - Keeps hook execution append-only and runs summaries, compaction, fact cleanup, file descriptions, and retries in one durable background maintenance worker
@@ -50,6 +50,17 @@ The installer:
 
 Restart Codex after installing.
 
+### Optional private-iCal calendar context
+
+The repo-level setup wizard is the recommended configuration path. It asks for
+each Google Calendar **Secret address in iCal format**, validates the feed, and
+writes `calendar_sources.json` with mode `600`. This does not require a Google
+Cloud project or OAuth client. The URLs are bearer secrets: never put them in
+`AGENTS.md`, logs, chat, or git. The parser expands Google-style `RRULE`,
+`RDATE`, `EXDATE`, and `RECURRENCE-ID` changes and uses a bounded seven-day
+last-good cache during temporary outages. It is read-only; use the official
+Google Calendar Codex plugin for fresh detail lookup and every event mutation.
+
 After installation, inspect hook trust in Codex or through the app-server `hooks/list` method. Codex tracks hook hashes locally; newly added hooks may need to be trusted before they run in normal sessions.
 
 ## Files
@@ -63,6 +74,9 @@ After installation, inspect hook trust in Codex or through the app-server `hooks
 - `~/.codex/long-term-memory/pending/`
 - `~/.codex/long-term-memory/compaction_scan_state.json`
 - `~/.codex/long-term-memory/config.json`
+- `~/.codex/long-term-memory/calendar_sources.json` (optional private iCal URLs; mode `600`)
+- `~/.codex/long-term-memory/calendar_cache.json` (optional last-good feed cache; mode `600`)
+- `~/.codex/long-term-memory/calendar_health.json`
 - `~/.codex/long-term-memory/.env`
 
 Default config:
@@ -73,6 +87,10 @@ Default config:
   "include_timestamps": true,
   "enable_user_facts": true,
   "enable_calendar": true,
+  "calendar_provider": "ical",
+  "calendar_days": 30,
+  "calendar_timeout_seconds": 15,
+  "calendar_cache_max_stale_seconds": 604800,
   "enable_attachment_capture": true,
   "compact_threshold_chars": 80000,
   "archive_chunk_chars": 40000,

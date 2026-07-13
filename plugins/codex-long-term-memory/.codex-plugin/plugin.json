@@ -1,6 +1,6 @@
 {
   "name": "codex-long-term-memory",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Cross-thread conversation memory for Codex using hooks, AGENTS.md transport, and model-backed summaries.",
   "author": {
     "name": "Perma Evidence",
@@ -19,7 +19,7 @@
   "interface": {
     "displayName": "Codex Long-Term Memory",
     "shortDescription": "Install and manage Codex hook-based conversation memory.",
-    "longDescription": "Adds Codex hooks that log prompts, replies, and file context into local history, compacts history hierarchically, refreshes summaries in the background when model calls fail, and injects cross-thread context through hooks or a marked AGENTS.md block.",
+    "longDescription": "Adds Codex hooks that log prompts, replies, and file context into local history, compacts history hierarchically, refreshes summaries in the background when model calls fail, injects cross-thread context through hooks or a marked AGENTS.md block, and can add read-only private-iCal calendar context.",
     "developerName": "Perma Evidence",
     "category": "Productivity",
     "capabilities": [

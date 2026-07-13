@@ -19,6 +19,11 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+try:
+    from .ical_calendar import CalendarFeedError, fetch_calendar_events
+except ImportError:  # Direct execution by maintenance/doctor helpers.
+    from ical_calendar import CalendarFeedError, fetch_calendar_events
+
 STATE_DIR = Path.home() / ".codex" / "long-term-memory"
 CONFIG_FILE = STATE_DIR / "config.json"
 ENV_FILE = STATE_DIR / ".env"
@@ -38,6 +43,9 @@ MAINTENANCE_PID_FILE = PENDING_DIR / "memory-maintenance.pid"
 MAINTENANCE_LOCK_FILE = PENDING_DIR / "memory-maintenance.lock"
 MAINTENANCE_ALERT_FILE = PENDING_DIR / "memory-maintenance.stuck.json"
 MEMORY_HEALTH_FILE = STATE_DIR / "health.json"
+CALENDAR_SOURCES_FILE = STATE_DIR / "calendar_sources.json"
+CALENDAR_CACHE_FILE = STATE_DIR / "calendar_cache.json"
+CALENDAR_HEALTH_FILE = STATE_DIR / "calendar_health.json"
 SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 CODEX_CONFIG_FILE = Path.home() / ".codex" / "config.toml"
 
@@ -103,6 +111,10 @@ DEFAULT_CONFIG = {
     "include_timestamps": True,
     "enable_user_facts": True,
     "enable_calendar": True,
+    "calendar_provider": "ical",
+    "calendar_days": 30,
+    "calendar_timeout_seconds": 15,
+    "calendar_cache_max_stale_seconds": 604800,
     "enable_attachment_capture": True,
     "compact_threshold_chars": 80000,
     "archive_chunk_chars": 40000,
@@ -651,7 +663,11 @@ def build_injected_context(entries: list[dict[str, Any]], config: dict[str, Any]
             parts.append("")
 
     if config.get("enable_calendar"):
-        calendar_text = fetch_calendar_section()
+        calendar_text = fetch_calendar_section(
+            days=int(config.get("calendar_days", 30)),
+            timeout=int(config.get("calendar_timeout_seconds", 15)),
+            max_stale_seconds=int(config.get("calendar_cache_max_stale_seconds", 604800)),
+        )
         if calendar_text:
             parts.append(calendar_text)
             parts.append("")
@@ -1929,37 +1945,62 @@ def run_memory_maintenance_worker() -> None:
                 pass
 
 
-def fetch_calendar_section(days: int = 30, timeout: int = 10) -> str:
-    if shutil.which("gws") is None:
-        return ""
-    try:
-        result = subprocess.run(
-            ["gws", "calendar", "+agenda", "--days", str(days), "--format", "json"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except Exception:
-        return ""
-
-    if result.returncode != 0 or not result.stdout.strip():
-        return ""
-
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return ""
-
-    if isinstance(payload, dict):
-        events = payload.get("events", [])
-    else:
-        events = payload
-    if not isinstance(events, list):
-        return ""
-
+def fetch_calendar_section(
+    days: int = 30,
+    timeout: int = 15,
+    max_stale_seconds: int = 7 * 24 * 60 * 60,
+) -> str:
     now = datetime.now(timezone.utc)
-    today_start = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    local_now = now.astimezone()
+    today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    window_end = today_start + timedelta(days=max(1, days))
+    try:
+        events, report = fetch_calendar_events(
+            CALENDAR_SOURCES_FILE,
+            CALENDAR_CACHE_FILE,
+            today_start,
+            window_end,
+            timeout=timeout,
+            max_stale_seconds=max_stale_seconds,
+            now=now,
+        )
+    except CalendarFeedError as exc:
+        save_json(
+            CALENDAR_HEALTH_FILE,
+            {
+                "status": "error",
+                "detail": str(exc)[:1000],
+                "updated_at": local_now.isoformat(),
+            },
+        )
+        return ""
+    except Exception as exc:
+        save_json(
+            CALENDAR_HEALTH_FILE,
+            {
+                "status": "error",
+                "detail": f"{type(exc).__name__}: {exc}"[:1000],
+                "updated_at": local_now.isoformat(),
+            },
+        )
+        return ""
+    if report.get("status") == "disabled":
+        CALENDAR_HEALTH_FILE.unlink(missing_ok=True)
+        return ""
+    health_status = "warning" if report.get("status") == "warning" else "ok"
+    failures = report.get("failures") or []
+    detail = (
+        f"Using cached data for {report.get('stale_sources')} calendar source(s)."
+        if report.get("stale_sources")
+        else f"Loaded {report.get('sources')} private iCal source(s)."
+    )
+    if failures:
+        detail += " " + "; ".join(str(value) for value in failures)[:700]
+    save_json(
+        CALENDAR_HEALTH_FILE,
+        {"status": health_status, "detail": detail, "updated_at": local_now.isoformat()},
+    )
+
     today_end = today_start + timedelta(days=1)
     week_end = today_start + timedelta(days=7)
 
@@ -2038,7 +2079,10 @@ def parse_calendar_dt(value: Any) -> datetime | None:
     if not isinstance(text, str) or not text:
         return None
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if len(text) == 10 and parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        return parsed
     except Exception:
         return None
 
@@ -2051,8 +2095,14 @@ def format_calendar_range(start_dt: datetime, end_dt: datetime | None) -> str:
     return f"{start_text}-{end_dt.strftime('%H:%M')} {zone_text}"
 
 
+def format_calendar_event_range(event: dict[str, Any], start_dt: datetime, end_dt: datetime | None) -> str:
+    if event.get("all_day"):
+        return "All day"
+    return format_calendar_range(start_dt, end_dt)
+
+
 def format_calendar_event_full(event: dict[str, Any], start_dt: datetime, end_dt: datetime | None) -> str:
-    lines = [f"  {format_calendar_range(start_dt, end_dt)} — {event.get('summary', 'Untitled')}"]
+    lines = [f"  {format_calendar_event_range(event, start_dt, end_dt)} — {event.get('summary', 'Untitled')}"]
     location = str(event.get("location") or "").strip()
     if location:
         lines.append(f"    Location: {location}")
@@ -2076,7 +2126,7 @@ def format_calendar_event_full(event: dict[str, Any], start_dt: datetime, end_dt
 
 
 def format_calendar_event_moderate(event: dict[str, Any], start_dt: datetime, end_dt: datetime | None) -> str:
-    line = f"  {format_calendar_range(start_dt, end_dt)} — {event.get('summary', 'Untitled')}"
+    line = f"  {format_calendar_event_range(event, start_dt, end_dt)} — {event.get('summary', 'Untitled')}"
     location = str(event.get("location") or "").strip()
     if location:
         line += f" ({location})"
@@ -2084,7 +2134,7 @@ def format_calendar_event_moderate(event: dict[str, Any], start_dt: datetime, en
 
 
 def format_calendar_event_compact(event: dict[str, Any], start_dt: datetime, end_dt: datetime | None) -> str:
-    return f"  {format_calendar_range(start_dt, end_dt)} — {event.get('summary', 'Untitled')}"
+    return f"  {format_calendar_event_range(event, start_dt, end_dt)} — {event.get('summary', 'Untitled')}"
 
 
 def format_date(value: str) -> str:

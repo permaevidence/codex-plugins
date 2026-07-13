@@ -168,11 +168,40 @@ def activate_runtime(source: Path, commit: str) -> Path:
 
 
 def configure_runtime(root: Path) -> None:
-    run([sys.executable, str(root / "scripts/install_plugins.py"), "--replace-marketplace"])
-    run([sys.executable, str(root / "plugins/codex-long-term-memory/scripts/install.py")])
     setup = import_module(root / "scripts/setup.py", "installed_setup")
     config = setup.load_json(setup.TELEGRAM_CONFIG)
+    install_command = [
+        sys.executable,
+        str(root / "scripts/install_plugins.py"),
+        "--replace-marketplace",
+    ]
+    if config.get("enable_google_apps"):
+        install_command.append("--with-google-apps")
+    run(install_command)
+    run([sys.executable, str(root / "plugins/codex-long-term-memory/scripts/install.py")])
+
+    # Older releases used an external Workspace CLI for both background
+    # integrations. Do not leave those toggles enabled unless replacement
+    # credentials were actually configured through the setup wizard.
+    env_email = setup.read_env_value(setup.TELEGRAM_ENV, "GMAIL_IMAP_EMAIL")
+    env_password = setup.read_env_value(setup.TELEGRAM_ENV, "GMAIL_IMAP_APP_PASSWORD")
+    if config.get("enable_email_notifications") and not (env_email and env_password):
+        config["enable_email_notifications"] = False
+        config["email_notification_provider"] = "imap"
+        setup.write_json(setup.TELEGRAM_CONFIG, config)
+        print("Disabled legacy email polling until Gmail IMAP is configured through setup.py.")
+
+    memory_config = setup.load_json(setup.MEMORY_CONFIG)
+    if memory_config.get("enable_calendar") and not setup.CALENDAR_SOURCES.is_file():
+        memory_config["enable_calendar"] = False
+        memory_config["calendar_provider"] = "ical"
+        setup.write_json(setup.MEMORY_CONFIG, memory_config)
+        print("Disabled legacy calendar injection until a private iCal feed is configured through setup.py.")
+
     cwd = Path(str(config.get("default_cwd") or Path.home())).expanduser()
+    agents_raw = str(memory_config.get("agents_md_path") or "").strip()
+    agents_path = Path(agents_raw).expanduser() if agents_raw else cwd / "AGENTS.md"
+    setup.write_local_capabilities_block(agents_path)
     setup.trust_memory_hooks(cwd)
     run([sys.executable, str(root / "plugins/codex-long-term-memory/scripts/update_agents_injection.py"), "--cwd", str(cwd)])
     bridge = root / "plugins/codex-telegram-bridge/scripts/bridge.py"

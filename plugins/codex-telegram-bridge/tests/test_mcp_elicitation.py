@@ -726,6 +726,46 @@ class HealthVisibilityTests(unittest.TestCase):
             self.assertIn("Raw conversation is still being saved", text)
             self.assertIn("Voice transcription: API key rejected", text)
 
+    def test_health_ignores_stale_google_errors_when_background_features_are_disabled(self):
+        bridge = load_bridge_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            telegram_config = root / "telegram-config.json"
+            memory_dir = root / "memory"
+            memory_dir.mkdir()
+            bridge.save_json(telegram_config, {"enable_email_notifications": False})
+            bridge.save_json(memory_dir / "config.json", {"enable_calendar": False})
+            bridge.save_json(
+                root / "telegram-health.json",
+                {"components": {"email": {"status": "error", "detail": "old IMAP error"}}},
+            )
+            bridge.save_json(
+                memory_dir / "calendar_health.json",
+                {"status": "error", "detail": "old calendar error"},
+            )
+            with mock.patch.object(bridge, "CONFIG_FILE", telegram_config), mock.patch.object(
+                bridge, "MEMORY_STATE_DIR", memory_dir
+            ), mock.patch.object(
+                bridge, "HEALTH_STATE_FILE", root / "telegram-health.json"
+            ), mock.patch.object(
+                bridge, "MEMORY_HEALTH_FILE", memory_dir / "health.json"
+            ), mock.patch.object(
+                bridge, "MEMORY_ALERT_FILE", memory_dir / "alert.json"
+            ), mock.patch.object(
+                bridge, "MEMORY_TASK_FILE", memory_dir / "task.json"
+            ), mock.patch.object(
+                bridge, "MEMORY_PID_FILE", memory_dir / "worker.pid"
+            ), mock.patch.object(
+                bridge, "UPDATE_STATE_FILE", root / "update.json"
+            ):
+                text = bridge.health_text()
+                compact = bridge.compact_health_summary()
+            self.assertIn("Email notifications: disabled", text)
+            self.assertIn("Calendar context: disabled", text)
+            self.assertNotIn("old IMAP error", text)
+            self.assertNotIn("old calendar error", text)
+            self.assertEqual(compact, "Health: OK")
+
     def test_non_usage_codex_failure_is_saved_and_parked(self):
         bridge = load_bridge_module()
         with tempfile.TemporaryDirectory() as tmpdir:

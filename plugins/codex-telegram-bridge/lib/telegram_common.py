@@ -49,7 +49,9 @@ DEFAULT_CONFIG = {
     "enable_voice_transcription": True,
     "send_queue_confirmation": False,
     "enable_reminders": True,
+    "enable_google_apps": False,
     "enable_email_notifications": False,
+    "email_notification_provider": "imap",
     "enable_turn_recovery": True,
     "turn_recovery_poll_seconds": 30,
     "turn_recovery_reset_buffer_seconds": 60,
@@ -141,6 +143,12 @@ def load_config() -> dict[str, Any]:
     merged["bot_token"] = bot_token
     merged["codex_cmd"] = os.environ.get("CODEX_CMD", merged["codex_cmd"])
     merged["openai_api_key"] = os.environ.get("OPENAI_API_KEY") or env.get("OPENAI_API_KEY") or merged.get("openai_api_key")
+    merged["gmail_imap_email"] = os.environ.get("GMAIL_IMAP_EMAIL") or env.get("GMAIL_IMAP_EMAIL") or ""
+    merged["gmail_imap_app_password"] = (
+        os.environ.get("GMAIL_IMAP_APP_PASSWORD")
+        or env.get("GMAIL_IMAP_APP_PASSWORD")
+        or ""
+    )
     return merged
 
 

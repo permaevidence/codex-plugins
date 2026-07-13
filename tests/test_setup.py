@@ -145,6 +145,8 @@ class SetupWizardTests(unittest.TestCase):
             self.assertIn("scheduled_reminders.json", second)
             self.assertIn("Whole-Computer Codex Control", second)
             self.assertIn("Communication Trust", second)
+            self.assertIn("official Gmail and Google Calendar Codex plugins", second)
+            self.assertNotIn("Google Workspace CLI", second)
 
     def test_linux_capabilities_block_uses_linux_language(self) -> None:
         with mock.patch.object(setup_wizard, "platform_family", return_value="linux"), mock.patch.object(
@@ -190,6 +192,62 @@ class SetupWizardTests(unittest.TestCase):
         self.assertIn(f"--{boundary}".encode(), body)
         self.assertIn(b"gpt-4o-transcribe", body)
         self.assertIn(b'filename="health.wav"', body)
+
+    def test_google_background_configuration_is_stored_securely(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            telegram_dir = root / "telegram"
+            agents = root / "AGENTS.md"
+            with mock.patch.object(setup_wizard, "MEMORY_DIR", memory_dir), mock.patch.object(
+                setup_wizard, "MEMORY_ENV", memory_dir / ".env"
+            ), mock.patch.object(
+                setup_wizard, "MEMORY_CONFIG", memory_dir / "config.json"
+            ), mock.patch.object(
+                setup_wizard, "CALENDAR_SOURCES", memory_dir / "calendar_sources.json"
+            ), mock.patch.object(
+                setup_wizard, "TELEGRAM_ENV", telegram_dir / ".env"
+            ), mock.patch.object(
+                setup_wizard, "TELEGRAM_CONFIG", telegram_dir / "config.json"
+            ):
+                setup_wizard.configure_memory(
+                    openai_key="sk-test",
+                    agents_md_path=agents,
+                    calendar_enabled=True,
+                    calendar_sources=[
+                        {
+                            "name": "Primary",
+                            "url": "https://calendar.google.com/calendar/ical/example/private/basic.ics",
+                        }
+                    ],
+                )
+                setup_wizard.configure_telegram(
+                    telegram_token="123:token",
+                    openai_key="sk-test",
+                    project_dir=root,
+                    model="gpt-current",
+                    effort="high",
+                    sandbox_mode="dangerFullAccess",
+                    network_access=True,
+                    google_apps_enabled=True,
+                    email_notifications_enabled=True,
+                    gmail_email="owner@gmail.com",
+                    gmail_app_password="abcd efgh ijkl mnop",
+                )
+
+            memory_config = setup_wizard.load_json(memory_dir / "config.json")
+            telegram_config = setup_wizard.load_json(telegram_dir / "config.json")
+            self.assertEqual(memory_config["calendar_provider"], "ical")
+            self.assertTrue(memory_config["enable_calendar"])
+            self.assertTrue(telegram_config["enable_google_apps"])
+            self.assertTrue(telegram_config["enable_email_notifications"])
+            self.assertNotIn("private/basic.ics", json.dumps(memory_config))
+            self.assertNotIn("GMAIL_IMAP_APP_PASSWORD", json.dumps(telegram_config))
+            self.assertEqual(
+                setup_wizard.read_env_value(telegram_dir / ".env", "GMAIL_IMAP_APP_PASSWORD"),
+                "abcdefghijklmnop",
+            )
+            self.assertEqual((memory_dir / "calendar_sources.json").stat().st_mode & 0o777, 0o600)
 
 
 class RuntimeInstallTests(unittest.TestCase):

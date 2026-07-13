@@ -22,7 +22,7 @@ When Codex offers a better primitive, parity uses the Codex-native primitive rat
   - transcript-driven file attachment and tool-file capture
   - session-start history injection
   - durable user-fact extraction and injection
-  - optional calendar injection via `gws`
+  - optional calendar injection via private read-only iCal feeds
   - history compaction with temporary, consolidated, and meta archive-backed summaries
   - OpenAI-backed summaries, file captions, and user-fact extraction with deterministic fallback
   - durable single-worker maintenance queue for summary retries, compaction, fact cleanup, and file descriptions
@@ -41,7 +41,7 @@ When Codex offers a better primitive, parity uses the Codex-native primitive rat
   - auto-answering for structured `item/tool/requestUserInput` prompts, with fallback notification when safe inference is not possible
   - voice transcription
   - reminders
-  - Gmail polling via `gws`
+  - read-only Gmail IMAP polling with official Gmail-plugin actions
   - groups, mentions, and mention regexes
   - delivery controls: ack reactions, reply threading, chunking
   - on-disk Codex version monitor

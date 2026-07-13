@@ -15,6 +15,10 @@ PLUGIN_NAMES = (
     "codex-long-term-memory",
     "codex-telegram-bridge",
 )
+GOOGLE_PLUGIN_NAMES = (
+    "gmail@openai-curated",
+    "google-calendar@openai-curated",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,6 +32,14 @@ def parse_args() -> argparse.Namespace:
         "--skip-marketplace",
         action="store_true",
         help="Do not run `codex plugin marketplace add`; only run plugin add commands.",
+    )
+    parser.add_argument(
+        "--with-google-apps",
+        action="store_true",
+        help=(
+            "Also install OpenAI's curated Gmail and Google Calendar plugins. "
+            "Users still connect their Google account through OpenAI's OAuth flow."
+        ),
     )
     parser.add_argument(
         "--replace-marketplace",
@@ -73,6 +85,9 @@ def main() -> None:
     selected = tuple(args.only) if args.only else PLUGIN_NAMES
     for plugin_name in selected:
         run([codex, "plugin", "add", f"{plugin_name}@{MARKETPLACE_NAME}"])
+    if args.with_google_apps:
+        for plugin_name in GOOGLE_PLUGIN_NAMES:
+            run([codex, "plugin", "add", plugin_name])
 
     print()
     print("Plugins installed from the local marketplace.")
@@ -90,6 +105,10 @@ def main() -> None:
             "- Configure Telegram, then run: "
             f"python3 {root}/plugins/codex-telegram-bridge/scripts/bridge.py install-service"
         )
+    if args.with_google_apps:
+        print("- Gmail and Google Calendar curated plugins were installed.")
+        print("- Connect both Google apps from ChatGPT Settings > Apps using the same account as Codex.")
+        print("- No custom Google Cloud project, client ID, or client secret is required.")
         print(
             "- Check setup with: "
             f"python3 {root}/plugins/codex-telegram-bridge/scripts/bridge.py doctor"
