@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
+import io
 import json
 import shlex
 import sys
 import tempfile
 import unittest
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -130,7 +133,7 @@ class CompactionDetectionTests(unittest.TestCase):
             self.assertNotIn(".env", originals)
             self.assertEqual(memory_stop.extract_last_assistant_message(str(rollout)), "Done")
 
-    def test_model_file_description_sends_non_image_as_data_url(self) -> None:
+    def test_model_file_description_samples_docx_text_and_normalizes_mime(self) -> None:
         captured: dict[str, object] = {}
 
         def fake_call(instructions: str, content: list[dict[str, object]], config: dict[str, object]) -> str:
@@ -139,11 +142,16 @@ class CompactionDetectionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "example.docx"
-            path.write_bytes(b"PK\x03\x04test-docx")
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr(
+                    "word/document.xml",
+                    '<w:document xmlns:w="urn:test"><w:body><w:p><w:t>Quarterly legal report</w:t>'
+                    '</w:p></w:body></w:document>',
+                )
             with mock.patch.object(common, "call_openai_responses", side_effect=fake_call):
                 result = common.describe_file_entry(
                     path,
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "application/octet-stream",
                     config={
                         **common.DEFAULT_CONFIG,
                         "enable_model_file_descriptions": True,
@@ -152,21 +160,149 @@ class CompactionDetectionTests(unittest.TestCase):
                 )
 
         self.assertEqual(result, "A Word document used in the conversation.")
+        blocks = captured["content"]  # type: ignore[assignment]
+        self.assertFalse(any(block.get("type") == "input_file" for block in blocks))
+        sample_block = next(
+            block
+            for block in blocks
+            if block.get("type") == "input_text" and "FILE CONTENT SAMPLE" in str(block.get("text"))
+        )
+        self.assertIn("Quarterly legal report", str(sample_block["text"]))
+        self.assertIn(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            str(sample_block["text"]),
+        )
+
+    def test_model_file_description_sends_only_five_sampled_pdf_pages(self) -> None:
+        from pypdf import PdfReader, PdfWriter
+
+        captured: dict[str, object] = {}
+
+        def fake_call(instructions: str, content: list[dict[str, object]], config: dict[str, object]) -> str:
+            captured["content"] = content
+            return "A sampled PDF document."
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "long-report.pdf"
+            writer = PdfWriter()
+            for _ in range(12):
+                writer.add_blank_page(width=612, height=792)
+            with path.open("wb") as handle:
+                writer.write(handle)
+            with mock.patch.object(common, "call_openai_responses", side_effect=fake_call):
+                result = common.describe_file_entry(
+                    path,
+                    "application/octet-stream",
+                    config={
+                        **common.DEFAULT_CONFIG,
+                        "enable_model_file_descriptions": True,
+                        "openai_api_key": "sk-test",
+                        "model_pdf_max_pages": 5,
+                    },
+                )
+
+        self.assertEqual(result, "A sampled PDF document.")
         file_block = next(
             block for block in captured["content"] if block.get("type") == "input_file"  # type: ignore[union-attr]
         )
-        self.assertEqual(file_block["filename"], "example.docx")
-        self.assertTrue(
-            str(file_block["file_data"]).startswith(
-                "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,"
-            )
+        self.assertEqual(file_block["filename"], "long-report.pdf")
+        self.assertEqual(file_block["detail"], "low")
+        encoded = str(file_block["file_data"]).split(",", 1)[1]
+        sampled_reader = PdfReader(io.BytesIO(base64.b64decode(encoded)))
+        self.assertEqual(len(sampled_reader.pages), 5)
+        prompt = "\n".join(
+            str(block.get("text") or "")
+            for block in captured["content"]  # type: ignore[union-attr]
+            if block.get("type") == "input_text"
         )
+        self.assertIn("pages 1, 2, 3, 7, 12 of 12", prompt)
+
+    def test_unsupported_file_uses_fallback_without_api_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "archive.zip"
+            path.write_bytes(b"PK\x03\x04unsupported")
+            with mock.patch.object(common, "call_openai_responses") as api_call:
+                result = common.describe_file_entry(
+                    path,
+                    "application/zip",
+                    config={
+                        **common.DEFAULT_CONFIG,
+                        "enable_model_file_descriptions": True,
+                        "openai_api_key": "sk-test",
+                    },
+                )
+        self.assertEqual(result, "File attachment named archive.zip (application/zip, 15 bytes)")
+        api_call.assert_not_called()
+
+    def test_document_sample_positions_cover_beginning_middle_and_end(self) -> None:
+        self.assertEqual(common.sample_positions(200, 5), [0, 1, 2, 100, 199])
+        self.assertEqual(common.sample_positions(4, 5), [0, 1, 2, 3])
+
+    def test_pptx_description_uses_only_representative_slides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "deck.pptx"
+            with zipfile.ZipFile(path, "w") as archive:
+                for number in range(1, 11):
+                    archive.writestr(
+                        f"ppt/slides/slide{number}.xml",
+                        f'<p:sld xmlns:p="urn:test"><p:t>Slide content {number}</p:t></p:sld>',
+                    )
+            sampled = common.sampled_file_content(
+                path,
+                "application/octet-stream",
+                path.read_bytes(),
+                {**common.DEFAULT_CONFIG, "model_presentation_max_slides": 5},
+            )
+
+        self.assertIsNotNone(sampled)
+        blocks, note = sampled  # type: ignore[misc]
+        text = str(blocks[0]["text"])
+        self.assertIn("slides 1, 2, 3, 6, 10 of 10", note)
+        for number in (1, 2, 3, 6, 10):
+            self.assertIn(f"Slide content {number}", text)
+        self.assertNotIn("Slide content 4", text)
+
+    def test_xlsx_description_uses_bounded_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "workbook.xlsx"
+            rows = "".join(
+                f'<row><c t="inlineStr"><is><t>row-{number}</t></is></c></row>'
+                for number in range(1, 31)
+            )
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr(
+                    "xl/worksheets/sheet1.xml",
+                    f'<worksheet xmlns="urn:test"><sheetData>{rows}</sheetData></worksheet>',
+                )
+            sampled = common.sampled_file_content(
+                path,
+                "application/octet-stream",
+                path.read_bytes(),
+                common.DEFAULT_CONFIG,
+            )
+
+        self.assertIsNotNone(sampled)
+        blocks, note = sampled  # type: ignore[misc]
+        text = str(blocks[0]["text"])
+        self.assertIn("worksheet/header/row sample", note)
+        self.assertIn("row-1", text)
+        self.assertIn("row-25", text)
+        self.assertNotIn("row-26", text)
+
+    def test_bounded_text_sample_never_exceeds_configured_size(self) -> None:
+        sample = common.bounded_text_sample("A" * 10000, 900)
+        self.assertLessEqual(len(sample), 900)
+        self.assertIn("middle sample", sample)
+        self.assertIn("ending sample", sample)
 
     def test_default_memory_model_is_luna_high(self) -> None:
         self.assertEqual(common.DEFAULT_CONFIG["openai_model"], "gpt-5.6-luna")
         self.assertEqual(common.DEFAULT_CONFIG["openai_reasoning_effort"], "high")
+        self.assertEqual(common.DEFAULT_CONFIG["model_pdf_max_pages"], 5)
+        self.assertEqual(common.DEFAULT_CONFIG["model_file_sample_max_chars"], 16000)
         self.assertEqual(memory_install.DEFAULT_STATE_CONFIG["openai_model"], "gpt-5.6-luna")
         self.assertEqual(memory_install.DEFAULT_STATE_CONFIG["openai_reasoning_effort"], "high")
+        self.assertEqual(memory_install.DEFAULT_STATE_CONFIG["model_pdf_max_pages"], 5)
 
     def test_consolidated_summary_names_surviving_archive_not_deleted_sources(self) -> None:
         rendered = common.render_entry(

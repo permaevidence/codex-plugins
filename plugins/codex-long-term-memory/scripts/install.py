@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -16,6 +18,8 @@ HOOKS_FILE = CODEX_DIR / "hooks.json"
 CONFIG_TOML = CODEX_DIR / "config.toml"
 STATE_DIR = CODEX_DIR / "long-term-memory"
 STATE_CONFIG = STATE_DIR / "config.json"
+DEPENDENCY_DIR = STATE_DIR / "python"
+REQUIREMENTS_FILE = PLUGIN_ROOT / "requirements.txt"
 
 DEFAULT_STATE_CONFIG = {
     "max_injection_chars": 300000,
@@ -38,6 +42,9 @@ DEFAULT_STATE_CONFIG = {
     "enable_model_user_facts": True,
     "user_facts_max_chars": 16000,
     "model_file_max_bytes": 8388608,
+    "model_file_sample_max_chars": 16000,
+    "model_pdf_max_pages": 5,
+    "model_presentation_max_slides": 5,
     "openai_api_key": "",
     "openai_api_key_env": "OPENAI_API_KEY",
     "openai_base_url": "https://api.openai.com/v1/responses",
@@ -173,6 +180,45 @@ def ensure_state_files() -> None:
         atomic_write_text(STATE_CONFIG, json.dumps(DEFAULT_STATE_CONFIG, indent=2) + "\n")
 
 
+def ensure_python_dependencies() -> None:
+    """Install pinned pure-Python helpers into memory state, outside the runtime.
+
+    Keeping dependencies in state makes them survive atomic runtime switches and
+    avoids modifying the user's system Python environment.
+    """
+    marker = DEPENDENCY_DIR / "pypdf-6.14.2.dist-info" / "METADATA"
+    if marker.is_file():
+        return
+    DEPENDENCY_DIR.mkdir(parents=True, exist_ok=True)
+    command = [
+        PYTHON,
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-input",
+        "--no-deps",
+        "--only-binary=:all:",
+        "--require-hashes",
+        "--target",
+        str(DEPENDENCY_DIR),
+        "--upgrade",
+        "--requirement",
+        str(REQUIREMENTS_FILE),
+    ]
+    env = dict(os.environ)
+    env.setdefault("PIP_ROOT_USER_ACTION", "ignore")
+    try:
+        subprocess.run(command, check=True, timeout=180, env=env)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise SystemExit(
+            "Could not install the pinned PDF sampling helper. Check network access and Python pip, "
+            f"then rerun setup. Reason: {exc}"
+        ) from exc
+    if not marker.is_file():
+        raise SystemExit(f"PDF sampling dependency did not install correctly in {DEPENDENCY_DIR}")
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, raw_path = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
@@ -188,6 +234,7 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 
 def main() -> None:
+    ensure_python_dependencies()
     ensure_hooks_feature_enabled()
     merge_hooks()
     ensure_state_files()

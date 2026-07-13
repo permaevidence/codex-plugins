@@ -103,6 +103,9 @@ Default config:
   "enable_model_user_facts": true,
   "user_facts_max_chars": 16000,
   "model_file_max_bytes": 8388608,
+  "model_file_sample_max_chars": 16000,
+  "model_pdf_max_pages": 5,
+  "model_presentation_max_slides": 5,
   "openai_api_key": "",
   "openai_api_key_env": "OPENAI_API_KEY",
   "openai_base_url": "https://api.openai.com/v1/responses",
@@ -124,6 +127,8 @@ Default config:
 `timezone` accepts an IANA name such as `America/New_York`, `Europe/Rome`, or `UTC`. The setup wizard detects and stores it automatically. An empty value preserves backward compatibility by using the computer's local timezone. The setting controls per-prompt `[now: ...]` markers, memory-snapshot and history timestamps, and calendar headings.
 
 When an OpenAI API key is configured, the plugin uses the Responses API with `gpt-5.6-luna` and `reasoning.effort = "high"` for model-backed summaries, file descriptions, and richer user-fact extraction by default. The repo-level setup wizard treats this key as required because memory quality is poor without model-backed summaries.
+
+File descriptions use bounded, format-aware samples rather than uploading complete documents. PDFs include at most five pages (the first three, a middle page, and the last page) at low visual detail. DOCX/ODT/text files use bounded beginning, middle, and ending text; PPTX files use at most five representative slides; XLSX files use a small worksheet/header/row sample. Unsupported formats, formats that cannot be safely sampled, and encrypted, malformed, or oversized files receive a local filename/type description without an API request. The pinned pure-Python PDF sampler is installed under `~/.codex/long-term-memory/python`, outside the system Python environment.
 
 Background maintenance parks after five consecutive exceptions or no-progress
 cycles. It writes `pending/memory-maintenance.stuck.json` and injects a visible
