@@ -37,6 +37,12 @@ assert update_spec and update_spec.loader
 runtime_update = importlib.util.module_from_spec(update_spec)
 update_spec.loader.exec_module(runtime_update)
 
+JSONRPC_PATH = REPO_ROOT / "scripts" / "jsonrpc_io.py"
+jsonrpc_spec = importlib.util.spec_from_file_location("jsonrpc_io_test", JSONRPC_PATH)
+assert jsonrpc_spec and jsonrpc_spec.loader
+jsonrpc_io = importlib.util.module_from_spec(jsonrpc_spec)
+jsonrpc_spec.loader.exec_module(jsonrpc_io)
+
 
 class SetupWizardTests(unittest.TestCase):
     def model_catalog_result(self):
@@ -334,6 +340,52 @@ class SetupWizardTests(unittest.TestCase):
         self.assertFalse(result["calendar_enabled"])
         self.assertIn("optional background features", output.getvalue())
         self.assertIn("not required for the official Gmail and Calendar apps", output.getvalue())
+
+    def test_runtime_validation_installs_dependencies_before_running_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            requirements = root / "plugins/codex-long-term-memory/requirements.txt"
+            requirements.parent.mkdir(parents=True)
+            requirements.write_text("example==1 --hash=sha256:" + "0" * 64 + "\n", encoding="utf-8")
+            calls: list[tuple[list[str], dict[str, object]]] = []
+
+            def fake_run(command, **kwargs):
+                calls.append((list(command), dict(kwargs)))
+                return mock.Mock(returncode=0)
+
+            with mock.patch.object(setup_wizard.subprocess, "run", side_effect=fake_run):
+                setup_wizard.validate_source_runtime(root)
+
+        self.assertEqual(calls[0][0][2:5], ["pip", "install", "--disable-pip-version-check"])
+        self.assertIn("--target", calls[0][0])
+        self.assertEqual(len(calls), 5)
+        for _, kwargs in calls[1:]:
+            self.assertIn("PYTHONPATH", kwargs["env"])
+
+    def test_jsonrpc_reader_keeps_responses_already_read_from_pipe(self) -> None:
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(
+                write_fd,
+                b'{"jsonrpc":"2.0","id":1,"result":{}}\n'
+                b'{"jsonrpc":"2.0","id":2,"result":{"ok":true}}\n',
+            )
+            os.close(write_fd)
+            write_fd = -1
+            with os.fdopen(read_fd, "r", encoding="utf-8") as stream:
+                read_fd = -1
+                reader = jsonrpc_io.JsonRpcLineReader(stream)
+                process = mock.Mock()
+                process.poll.return_value = None
+                second = reader.wait_for_id(process, 2, timeout=1)
+                first = reader.wait_for_id(process, 1, timeout=1)
+            self.assertTrue(second["result"]["ok"])
+            self.assertEqual(first["id"], 1)
+        finally:
+            if read_fd >= 0:
+                os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
 
 
 class RuntimeInstallTests(unittest.TestCase):

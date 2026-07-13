@@ -11,7 +11,6 @@ import os
 import plistlib
 import pwd
 import re
-import select
 import shlex
 import shutil
 import signal
@@ -35,6 +34,7 @@ if str(ROOT_SCRIPTS) not in sys.path:
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 from lib.gmail_imap import probe_imap
+from jsonrpc_io import JsonRpcLineReader
 from platform_support import (
     LAUNCHD_LABEL,
     SYSTEMD_SERVICE_NAME,
@@ -876,6 +876,7 @@ def query_memory_hooks(cwd: str | None) -> list[dict]:
     except Exception:
         return []
     assert process.stdin is not None and process.stdout is not None
+    reader = JsonRpcLineReader(process.stdout)
     try:
         for message in (
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "permaevidence_doctor", "title": "Perma Evidence Doctor", "version": "1"}}},
@@ -884,17 +885,8 @@ def query_memory_hooks(cwd: str | None) -> list[dict]:
         ):
             process.stdin.write(json.dumps(message) + "\n")
         process.stdin.flush()
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            ready, _, _ = select.select([process.stdout], [], [], 0.5)
-            if not ready:
-                continue
-            line = process.stdout.readline()
-            if not line:
-                break
-            reply = json.loads(line)
-            if reply.get("id") != 2:
-                continue
+        reply = reader.wait_for_id(process, 2, timeout=15)
+        if reply:
             records: list[dict] = []
             for group in (reply.get("result") or {}).get("data", []):
                 records.extend(
@@ -930,6 +922,7 @@ def query_codex_apps(cwd: str | None) -> dict[str, dict]:
     except Exception:
         return {}
     assert process.stdin is not None and process.stdout is not None
+    reader = JsonRpcLineReader(process.stdout)
     found: dict[str, dict] = {}
     try:
         process.stdin.write(
@@ -964,7 +957,7 @@ def query_codex_apps(cwd: str | None) -> dict[str, dict]:
                 + "\n"
             )
             process.stdin.flush()
-            reply = wait_for_app_server_reply(process, request_id, timeout=10)
+            reply = reader.wait_for_id(process, request_id, timeout=10)
             if not reply or reply.get("error"):
                 break
             result = reply.get("result") or {}
@@ -984,28 +977,6 @@ def query_codex_apps(cwd: str | None) -> dict[str, dict]:
             process.wait(timeout=3)
         except subprocess.TimeoutExpired:
             process.kill()
-
-
-def wait_for_app_server_reply(process: subprocess.Popen, request_id: int, *, timeout: int) -> dict:
-    assert process.stdout is not None
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        ready, _, _ = select.select([process.stdout], [], [], 0.5)
-        if not ready:
-            if process.poll() is not None:
-                break
-            continue
-        line = process.stdout.readline()
-        if not line:
-            break
-        try:
-            reply = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if reply.get("id") == request_id:
-            return reply
-    return {}
-
 
 def smoke_test_calendar_feeds(config: dict) -> tuple[bool, str]:
     helper_path = REPO_ROOT / "plugins/codex-long-term-memory/lib/ical_calendar.py"
@@ -1049,6 +1020,7 @@ def smoke_test_telegram_mcp() -> tuple[bool, str]:
             text=True,
         )
         assert process.stdin is not None and process.stdout is not None
+        reader = JsonRpcLineReader(process.stdout)
         for message in (
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "doctor", "version": "1"}}},
             {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
@@ -1056,16 +1028,11 @@ def smoke_test_telegram_mcp() -> tuple[bool, str]:
         ):
             process.stdin.write(json.dumps(message) + "\n")
         process.stdin.flush()
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            ready, _, _ = select.select([process.stdout], [], [], 0.5)
-            if not ready:
-                continue
-            reply = json.loads(process.stdout.readline())
-            if reply.get("id") == 2:
-                names = {item.get("name") for item in (reply.get("result") or {}).get("tools", [])}
-                expected = {"reply", "edit_message", "react", "download_attachment"}
-                return expected.issubset(names), f"{len(names & expected)}/4 tools"
+        reply = reader.wait_for_id(process, 2, timeout=10)
+        if reply:
+            names = {item.get("name") for item in (reply.get("result") or {}).get("tools", [])}
+            expected = {"reply", "edit_message", "react", "download_attachment"}
+            return expected.issubset(names), f"{len(names & expected)}/4 tools"
         return False, "tools/list timed out"
     except Exception as exc:
         return False, str(exc)

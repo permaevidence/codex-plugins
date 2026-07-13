@@ -10,7 +10,6 @@ import io
 import json
 import os
 import re
-import select
 import shutil
 import subprocess
 import sys
@@ -26,6 +25,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from platform_support import platform_display_name, platform_family, runtime_data_root, service_definition_path
+from jsonrpc_io import JsonRpcLineReader
 from runtime_install import install_runtime, prune_old_versions
 
 
@@ -943,10 +943,40 @@ def validate_source_runtime(root: Path) -> None:
         [sys.executable, "-m", "unittest", "discover", "-s", "plugins/codex-long-term-memory/tests", "-p", "test_*.py"],
         [sys.executable, "-m", "unittest", "discover", "-s", "plugins/codex-telegram-bridge/tests", "-p", "test_*.py"],
     ]
-    for command in commands:
-        completed = subprocess.run(command, cwd=str(root), check=False)
-        if completed.returncode != 0:
-            raise RuntimeError(f"Runtime validation failed: {' '.join(command)}")
+    with tempfile.TemporaryDirectory(prefix="permaevidence-validation-deps-") as dependency_dir:
+        environment = dict(os.environ)
+        requirements = root / "plugins/codex-long-term-memory/requirements.txt"
+        if requirements.is_file() and requirements.read_text(encoding="utf-8").strip():
+            dependency_command = [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-input",
+                "--no-deps",
+                "--only-binary=:all:",
+                "--require-hashes",
+                "--target",
+                dependency_dir,
+                "--requirement",
+                str(requirements),
+            ]
+            completed = subprocess.run(dependency_command, cwd=str(root), check=False, timeout=180)
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    "Runtime validation could not install pinned dependencies: "
+                    + " ".join(dependency_command)
+                )
+            existing_pythonpath = environment.get("PYTHONPATH", "")
+            environment["PYTHONPATH"] = dependency_dir + (
+                os.pathsep + existing_pythonpath if existing_pythonpath else ""
+            )
+
+        for command in commands:
+            completed = subprocess.run(command, cwd=str(root), check=False, env=environment)
+            if completed.returncode != 0:
+                raise RuntimeError(f"Runtime validation failed: {' '.join(command)}")
 
 
 def trust_memory_hooks(cwd: Path) -> None:
@@ -991,6 +1021,7 @@ def query_memory_hooks(cwd: Path) -> list[dict]:
         cwd=str(cwd),
     )
     assert process.stdin is not None and process.stdout is not None
+    reader = JsonRpcLineReader(process.stdout)
     messages = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "permaevidence_setup", "title": "Perma Evidence Setup", "version": "1"}}},
         {"jsonrpc": "2.0", "method": "initialized", "params": {}},
@@ -1000,22 +1031,8 @@ def query_memory_hooks(cwd: Path) -> list[dict]:
         for message in messages:
             process.stdin.write(json.dumps(message) + "\n")
         process.stdin.flush()
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            readable, _, _ = select.select([process.stdout], [], [], 0.5)
-            if not readable:
-                if process.poll() is not None:
-                    break
-                continue
-            line = process.stdout.readline()
-            if not line:
-                break
-            try:
-                reply = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if reply.get("id") != 2:
-                continue
+        reply = reader.wait_for_id(process, 2, timeout=20)
+        if reply:
             if reply.get("error"):
                 raise SystemExit(f"Could not inspect Codex hooks: {reply['error']}")
             hooks: list[dict] = []
