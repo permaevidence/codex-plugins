@@ -156,31 +156,46 @@ def main() -> int:
 
     require_codex()
 
+    # ── Quick-change menu on reruns ─────────────────────────────────
+    quick = choose_quick_section(args, existing_installation)
+    numbered = quick is None
+
+    def wants(section: str) -> bool:
+        return quick is None or quick == section
+
     # ── Step 1 ──────────────────────────────────────────────────────
-    step_header(1, "Starting folder and time zone")
-    print("Codex sessions launched from Telegram begin in this folder, and the")
-    print("AGENTS.md memory file lives there. With full computer access (chosen in")
-    print("step 4) it is a starting point, not a boundary.")
-    print()
-    project_dir = resolve_project_dir(
-        args.project_dir,
-        str(existing_telegram_config.get("default_cwd") or ""),
-    )
+    if wants("machine"):
+        step_header(1, "Starting folder and time zone", numbered=numbered)
+        print("Codex sessions launched from Telegram begin in this folder, and the")
+        print("AGENTS.md memory file lives there. With full computer access (chosen in")
+        print("step 4) it is a starting point, not a boundary.")
+        print()
+        project_dir = resolve_project_dir(
+            args.project_dir,
+            str(existing_telegram_config.get("default_cwd") or ""),
+        )
+        print()
+        print("The time zone keeps every clock in agreement: prompt timestamps, memory,")
+        print("Telegram message times, and calendar headings.")
+        timezone_name = resolve_timezone_name(
+            args.timezone,
+            str(existing_memory_config.get("timezone") or existing_telegram_config.get("timezone") or ""),
+        )
+    else:
+        default_dir = str(existing_telegram_config.get("default_cwd") or "") or str(Path.home())
+        project_dir = Path(default_dir).expanduser().resolve()
+        if not project_dir.is_dir():
+            project_dir = resolve_project_dir(None, default_dir)
+        timezone_name = str(
+            existing_memory_config.get("timezone") or existing_telegram_config.get("timezone") or ""
+        ).strip()
+        try:
+            ZoneInfo(timezone_name)
+        except (ZoneInfoNotFoundError, ValueError):
+            timezone_name = detect_system_timezone()
     agents_md_path = project_dir / "AGENTS.md"
-    print()
-    print("The time zone keeps every clock in agreement: prompt timestamps, memory,")
-    print("Telegram message times, and calendar headings.")
-    timezone_name = resolve_timezone_name(
-        args.timezone,
-        str(existing_memory_config.get("timezone") or existing_telegram_config.get("timezone") or ""),
-    )
 
     # ── Step 2 ──────────────────────────────────────────────────────
-    step_header(2, "Telegram bot")
-    print("The token @BotFather sent you when you created your bot. It is checked")
-    print("with Telegram the moment you enter it, so a paste mistake is caught")
-    print("right here instead of at the end.")
-    print()
     existing_telegram_token = read_env_value(TELEGRAM_ENV, "TELEGRAM_BOT_TOKEN")
 
     def telegram_checker(token: str) -> None:
@@ -191,24 +206,30 @@ def main() -> int:
         if not skip_checks:
             validate_telegram_token(token)
 
-    telegram_token = resolve_secret(
-        supplied=args.telegram_token,
-        existing=existing_telegram_token,
-        label="Telegram bot token",
-        required_message="A Telegram bot token is required.",
-        validator=telegram_checker,
-    )
+    if wants("telegram") or not existing_telegram_token:
+        step_header(2, "Telegram bot", numbered=numbered)
+        if quick == "telegram":
+            print("Enter the NEW bot token from @BotFather. It is checked with Telegram")
+            print("the moment you enter it. Your existing pairing survives a token change.")
+        else:
+            print("The token @BotFather sent you when you created your bot. It is checked")
+            print("with Telegram the moment you enter it, so a paste mistake is caught")
+            print("right here instead of at the end.")
+        print()
+        telegram_token = resolve_secret(
+            supplied=args.telegram_token,
+            existing="" if quick == "telegram" else existing_telegram_token,
+            label="Telegram bot token",
+            required_message="A Telegram bot token is required.",
+            validator=telegram_checker,
+        )
+    else:
+        telegram_token = existing_telegram_token
     telegram_kept = bool(existing_telegram_token) and telegram_token == existing_telegram_token
-    if telegram_kept:
+    if telegram_kept and wants("telegram"):
         print("Keeping the existing token; the final health check verifies it.")
 
     # ── Step 3 ──────────────────────────────────────────────────────
-    step_header(3, "OpenAI API key")
-    print("Used for two things: writing memory summaries and transcribing Telegram")
-    print("voice messages. The key needs active API billing (platform.openai.com);")
-    print("a ChatGPT subscription alone does not include API access. The key is")
-    print("checked immediately with a real, fraction-of-a-cent request.")
-    print()
     memory_openai_key = read_env_value(MEMORY_ENV, "OPENAI_API_KEY")
     telegram_openai_key = read_env_value(TELEGRAM_ENV, "OPENAI_API_KEY")
     existing_openai_key = memory_openai_key or telegram_openai_key
@@ -221,50 +242,75 @@ def main() -> int:
         if not skip_checks:
             validate_openai_key(key)
 
-    openai_key = resolve_secret(
-        supplied=args.openai_api_key,
-        existing=existing_openai_key,
-        label="OpenAI API key",
-        required_message="An OpenAI API key is required for memory summaries and voice transcription.",
-        validator=openai_checker,
-    )
+    if wants("openai") or not existing_openai_key:
+        step_header(3, "OpenAI API key", numbered=numbered)
+        if quick == "openai":
+            print("Enter the NEW OpenAI API key. It is checked immediately with a real,")
+            print("fraction-of-a-cent summary and transcription request.")
+        else:
+            print("Used for two things: writing memory summaries and transcribing Telegram")
+            print("voice messages. The key needs active API billing (platform.openai.com);")
+            print("a ChatGPT subscription alone does not include API access. The key is")
+            print("checked immediately with a real, fraction-of-a-cent request.")
+        print()
+        openai_key = resolve_secret(
+            supplied=args.openai_api_key,
+            existing="" if quick == "openai" else existing_openai_key,
+            label="OpenAI API key",
+            required_message="An OpenAI API key is required for memory summaries and voice transcription.",
+            validator=openai_checker,
+        )
+    else:
+        openai_key = existing_openai_key
     openai_kept = bool(existing_openai_key) and openai_key == existing_openai_key
-    if openai_kept:
+    if openai_kept and wants("openai"):
         print("Keeping the existing key; the final health check verifies memory and transcription.")
 
     # ── Step 4 ──────────────────────────────────────────────────────
-    step_header(4, "Codex permissions")
-    sandbox_mode = args.sandbox_mode or choose_sandbox_mode(
-        str(existing_telegram_config.get("sandbox_mode") or ""),
-        project_dir=project_dir,
-    )
-    print()
-    network_access = resolve_network_access(
-        args.network_access,
-        sandbox_mode,
-        existing_telegram_config.get("network_access"),
-    )
+    if wants("machine"):
+        step_header(4, "Codex permissions", numbered=numbered)
+        sandbox_mode = args.sandbox_mode or choose_sandbox_mode(
+            str(existing_telegram_config.get("sandbox_mode") or ""),
+            project_dir=project_dir,
+        )
+        print()
+        network_access = resolve_network_access(
+            args.network_access,
+            sandbox_mode,
+            existing_telegram_config.get("network_access"),
+        )
+    else:
+        sandbox_mode = str(existing_telegram_config.get("sandbox_mode") or "") or "dangerFullAccess"
+        existing_network = existing_telegram_config.get("network_access")
+        network_access = existing_network if isinstance(existing_network, bool) else sandbox_mode == "dangerFullAccess"
 
     # ── Step 5 ──────────────────────────────────────────────────────
-    step_header(5, "Google integration (optional)")
-    google_setup = resolve_google_setup(args, timezone_name=timezone_name, skip_checks=skip_checks)
+    if wants("google"):
+        step_header(5, "Google integration (optional)", numbered=numbered)
+        google_setup = resolve_google_setup(args, timezone_name=timezone_name, skip_checks=skip_checks)
+    else:
+        google_setup = google_setup_from_existing()
 
     # ── Step 6 ──────────────────────────────────────────────────────
-    step_header(6, "Bridge service and pairing")
-    print("The bridge is the small background service that connects Telegram to")
-    print("Codex. It starts at login and restarts itself after a crash.")
-    print()
-    start_bridge = resolve_start_bridge(args.start_bridge)
     already_paired = existing_allowed_chat()
-    if already_paired:
-        print("Telegram pairing: already approved — nothing to redo.")
-        pair_now = False
-    else:
+    if quick is None:
+        step_header(6, "Bridge service and pairing")
+        print("The bridge is the small background service that connects Telegram to")
+        print("Codex. It starts at login and restarts itself after a crash.")
         print()
-        print("Pairing links your personal Telegram account to the bot so that only")
-        print("you can talk to it. It is a 30-second step at the end of setup, and it")
-        print("can always be done later.")
-        pair_now = start_bridge and resolve_pair_now(args.pair_now)
+        start_bridge = resolve_start_bridge(args.start_bridge)
+        if already_paired:
+            print("Telegram pairing: already approved — nothing to redo.")
+            pair_now = False
+        else:
+            print()
+            print("Pairing links your personal Telegram account to the bot so that only")
+            print("you can talk to it. It is a 30-second step at the end of setup, and it")
+            print("can always be done later.")
+            pair_now = start_bridge and resolve_pair_now(args.pair_now)
+    else:
+        start_bridge = True
+        pair_now = False if already_paired else resolve_pair_now(args.pair_now)
 
     print()
     print("Reading the Codex model catalog...")
@@ -276,7 +322,10 @@ def main() -> int:
     )
 
     # ── Step 7 ──────────────────────────────────────────────────────
-    step_header(7, "Review")
+    step_header(7, "Review", numbered=numbered)
+    if quick is not None:
+        print("Everything you did not change is kept exactly as it was.")
+        print()
 
     def secret_status(kept: bool) -> str:
         if kept:
@@ -431,7 +480,8 @@ def main() -> int:
     print()
     print("To change a credential or repair an integration later, rerun:")
     print(f'  python3 "{installed_root}/scripts/setup.py"')
-    print("The wizard keeps every saved working value by default.")
+    print("A menu lets you jump straight to the thing you want to change;")
+    print("everything else is kept as it is.")
     return 0
 
 
@@ -449,11 +499,79 @@ def print_header(title: str) -> None:
     print("━" * RULE_WIDTH)
 
 
-def step_header(number: int, title: str) -> None:
+def step_header(number: int, title: str, *, numbered: bool = True) -> None:
     print()
     print("─" * RULE_WIDTH)
-    print(f"  Step {number} of {TOTAL_STEPS} · {title}")
+    if numbered:
+        print(f"  Step {number} of {TOTAL_STEPS} · {title}")
+    else:
+        print(f"  {title}")
     print("─" * RULE_WIDTH)
+
+
+def choose_quick_section(args: argparse.Namespace, existing_installation: bool) -> str | None:
+    """On an interactive rerun, let the user jump straight to one section.
+    Returns None for the full walkthrough, or a section key."""
+    cli_settings = any(
+        [
+            args.project_dir,
+            args.telegram_token,
+            args.openai_api_key,
+            args.model,
+            args.effort,
+            args.timezone,
+            args.sandbox_mode,
+            args.network_access,
+            args.start_bridge,
+            args.pair_now,
+            args.google_integration,
+            args.email_notifications,
+            args.gmail_email,
+            args.gmail_app_password,
+            args.calendar_context,
+            args.calendar_ical_url,
+        ]
+    )
+    if not existing_installation or cli_settings:
+        return None
+    print()
+    print("─" * RULE_WIDTH)
+    print("  What would you like to do?")
+    print("─" * RULE_WIDTH)
+    print("  1. Review or change everything (full walkthrough, 7 steps)")
+    print("  2. Change the Telegram bot token")
+    print("  3. Change the OpenAI API key")
+    print("  4. Gmail and Calendar settings (apps, email notices, calendar feeds)")
+    print("  5. Starting folder, time zone, permissions, or model")
+    print("  0. Quit without changing anything")
+    print()
+    mapping = {"1": None, "2": "telegram", "3": "openai", "4": "google", "5": "machine"}
+    while True:
+        choice = prompt("Your choice (0-5)", default="1")
+        if choice == "0":
+            raise SystemExit("Nothing was changed.")
+        if choice in mapping:
+            return mapping[choice]
+        print("Choose a number between 0 and 5.")
+
+
+def google_setup_from_existing() -> dict[str, object]:
+    """Rebuild the google_setup dict from the saved configuration without
+    prompting, so a quick change elsewhere round-trips the current state."""
+    config = load_json(TELEGRAM_CONFIG)
+    memory_config = load_json(MEMORY_CONFIG)
+    sources = read_calendar_sources()
+    gmail_email = read_env_value(TELEGRAM_ENV, "GMAIL_IMAP_EMAIL")
+    gmail_password = read_env_value(TELEGRAM_ENV, "GMAIL_IMAP_APP_PASSWORD")
+    return {
+        "enabled": bool(config.get("enable_google_apps", False)),
+        "email_enabled": bool(config.get("enable_email_notifications", False)) and bool(gmail_password),
+        "email_kept": True,
+        "gmail_email": gmail_email,
+        "gmail_app_password": gmail_password,
+        "calendar_enabled": bool(memory_config.get("enable_calendar", False)) and bool(sources),
+        "calendar_sources": sources,
+    }
 
 
 def mask_secret(value: str) -> str:

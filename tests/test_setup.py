@@ -341,6 +341,97 @@ class SetupWizardTests(unittest.TestCase):
         self.assertIn("optional background features", output.getvalue())
         self.assertIn("not required for the official Gmail and Calendar apps", output.getvalue())
 
+    @staticmethod
+    def make_cli_args(**overrides) -> "argparse.Namespace":
+        import argparse
+
+        values = {
+            "project_dir": None,
+            "google_integration": None,
+            "email_notifications": None,
+            "gmail_email": None,
+            "gmail_app_password": None,
+            "calendar_context": None,
+            "calendar_ical_url": None,
+            "telegram_token": None,
+            "openai_api_key": None,
+            "model": None,
+            "effort": None,
+            "timezone": None,
+            "sandbox_mode": None,
+            "network_access": None,
+            "start_bridge": None,
+            "pair_now": None,
+            "skip_credential_checks": False,
+        }
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def test_quick_menu_is_skipped_on_fresh_installs_and_cli_runs(self) -> None:
+        args = self.make_cli_args()
+        with mock.patch.object(setup_wizard, "prompt") as menu_prompt:
+            self.assertIsNone(setup_wizard.choose_quick_section(args, existing_installation=False))
+            self.assertIsNone(
+                setup_wizard.choose_quick_section(
+                    self.make_cli_args(telegram_token="123:t"), existing_installation=True
+                )
+            )
+        menu_prompt.assert_not_called()
+
+    def test_quick_menu_maps_choices_to_sections(self) -> None:
+        args = self.make_cli_args()
+        expected = {"1": None, "2": "telegram", "3": "openai", "4": "google", "5": "machine"}
+        for choice, section in expected.items():
+            with mock.patch.object(setup_wizard, "prompt", return_value=choice), contextlib.redirect_stdout(
+                io.StringIO()
+            ):
+                self.assertEqual(
+                    setup_wizard.choose_quick_section(args, existing_installation=True), section
+                )
+        with mock.patch.object(setup_wizard, "prompt", return_value="0"), contextlib.redirect_stdout(
+            io.StringIO()
+        ):
+            with self.assertRaises(SystemExit):
+                setup_wizard.choose_quick_section(args, existing_installation=True)
+
+    def test_google_setup_from_existing_round_trips_saved_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            telegram_dir = root / "telegram"
+            memory_dir = root / "memory"
+            telegram_dir.mkdir()
+            memory_dir.mkdir()
+            (telegram_dir / "config.json").write_text(
+                json.dumps({"enable_google_apps": True, "enable_email_notifications": True}),
+                encoding="utf-8",
+            )
+            (telegram_dir / ".env").write_text(
+                "GMAIL_IMAP_EMAIL=owner@gmail.com\nGMAIL_IMAP_APP_PASSWORD=abcdefghijklmnop\n",
+                encoding="utf-8",
+            )
+            (memory_dir / "config.json").write_text(
+                json.dumps({"enable_calendar": True}), encoding="utf-8"
+            )
+            (memory_dir / "calendar_sources.json").write_text(
+                json.dumps({"sources": [{"name": "Primary", "url": "https://calendar.google.com/x.ics"}]}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(setup_wizard, "TELEGRAM_CONFIG", telegram_dir / "config.json"), mock.patch.object(
+                setup_wizard, "TELEGRAM_ENV", telegram_dir / ".env"
+            ), mock.patch.object(
+                setup_wizard, "MEMORY_CONFIG", memory_dir / "config.json"
+            ), mock.patch.object(
+                setup_wizard, "CALENDAR_SOURCES", memory_dir / "calendar_sources.json"
+            ):
+                result = setup_wizard.google_setup_from_existing()
+        self.assertTrue(result["enabled"])
+        self.assertTrue(result["email_enabled"])
+        self.assertTrue(result["email_kept"])
+        self.assertEqual(result["gmail_email"], "owner@gmail.com")
+        self.assertEqual(result["gmail_app_password"], "abcdefghijklmnop")
+        self.assertTrue(result["calendar_enabled"])
+        self.assertEqual(len(result["calendar_sources"]), 1)
+
     def test_runtime_validation_installs_dependencies_before_running_tests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

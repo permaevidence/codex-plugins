@@ -78,11 +78,16 @@ python3 /absolute/path/to/repo/scripts/setup.py
 ```
 
 The same command is also the normal repair and reconfiguration path. On a
-rerun, the wizard finds the existing installation and defaults to keeping every
-working value. Saved secrets are never displayed: choose **Yes** to keep one,
-or **No** to enter its replacement. Unchanged pairing, allowlists, conversation
-history, memory archives, hooks, model selection, permissions, Google settings,
-and other configuration remain in place.
+rerun, the wizard opens with a quick-change menu: jump straight to changing
+the Telegram bot token, the OpenAI API key, the Gmail/Calendar settings, or
+the folder/permissions/model — everything else is filled in silently from the
+saved configuration — or pick the full walkthrough. (The menu is skipped when
+any setting is passed on the command line, so scripted runs behave as before.)
+The wizard defaults to keeping every working value. Saved secrets are never
+displayed: choose **Yes** to keep one, or **No** to enter its replacement.
+Unchanged pairing, allowlists, conversation history, memory archives, hooks,
+model selection, permissions, Google settings, and other configuration remain
+in place.
 
 The wizard walks through seven numbered steps and shows a review screen before
 changing anything. Every credential is validated with a real request the
