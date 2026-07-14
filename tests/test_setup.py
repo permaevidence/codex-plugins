@@ -45,6 +45,41 @@ jsonrpc_spec.loader.exec_module(jsonrpc_io)
 
 
 class SetupWizardTests(unittest.TestCase):
+    class TtyBuffer(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    def test_wizard_headings_use_terminal_styling_only_when_supported(self) -> None:
+        terminal = self.TtyBuffer()
+        with mock.patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True), contextlib.redirect_stdout(
+            terminal
+        ):
+            setup_wizard.print_header("Plugin setup")
+            setup_wizard.step_header(2, "Telegram bot")
+        styled_output = terminal.getvalue()
+        self.assertIn("\033[", styled_output)
+        self.assertIn("PLUGIN SETUP", styled_output)
+        self.assertIn("STEP 2 OF 7", styled_output)
+
+        plain = io.StringIO()
+        with contextlib.redirect_stdout(plain):
+            setup_wizard.print_header("Plugin setup")
+        self.assertNotIn("\033[", plain.getvalue())
+
+        no_color = self.TtyBuffer()
+        with mock.patch.dict(
+            os.environ, {"TERM": "xterm-256color", "NO_COLOR": "1"}, clear=True
+        ), contextlib.redirect_stdout(no_color):
+            setup_wizard.print_header("Plugin setup")
+        self.assertNotIn("\033[", no_color.getvalue())
+
+    def test_questions_have_a_separate_answer_line(self) -> None:
+        output = io.StringIO()
+        with mock.patch("builtins.input", return_value=""), contextlib.redirect_stdout(output):
+            answer = setup_wizard.prompt("Your choice", default="1")
+        self.assertEqual(answer, "1")
+        self.assertIn("\n› Your choice  [1]\n", output.getvalue())
+
     def model_catalog_result(self):
         payload = {
             "models": [

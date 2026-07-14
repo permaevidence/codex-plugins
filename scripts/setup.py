@@ -152,7 +152,7 @@ def main() -> int:
         print("you choose to replace it.")
     if args.telegram_token or args.openai_api_key or args.gmail_app_password or args.calendar_ical_url:
         print()
-        print("Warning: command-line secrets can be visible in shell history and process listings.")
+        print(warning("Warning: command-line secrets can be visible in shell history and process listings."))
 
     require_codex()
 
@@ -354,7 +354,7 @@ def main() -> int:
     ]
     label_width = max(len(label) for label, _ in review_rows) + 2
     for label, value in review_rows:
-        print(f"  {label.ljust(label_width)}{value}")
+        print(f"  {bold(label.ljust(label_width))}{value}")
     print()
     if not prompt_yes_no("Proceed with these changes?", default=True):
         raise SystemExit("Setup cancelled. Nothing was changed.")
@@ -454,13 +454,13 @@ def main() -> int:
         paired = guided_pairing(installed_root)
 
     print_header("Setup complete")
-    print("Where things live:")
+    print(bold("Where things live"))
     print(f"  memory settings   {display_path(MEMORY_DIR)}")
     print(f"  bridge settings   {display_path(TELEGRAM_DIR)}")
     print(f"  AGENTS.md         {display_path(agents_md_path)}")
     print(f"  runtime           {display_path(installed_root)}")
     print()
-    print("Next:")
+    print(bold("Next"))
     next_step = 1
     if google_setup["enabled"]:
         print_google_connection_steps(start=next_step)
@@ -491,22 +491,83 @@ class CredentialCheckError(Exception):
 
 RULE_WIDTH = 64
 
+ANSI_RESET = "\033[0m"
+ANSI_BOLD = "1"
+ANSI_DIM = "2"
+ANSI_RED = "31"
+ANSI_GREEN = "32"
+ANSI_YELLOW = "33"
+ANSI_CYAN = "36"
+
+
+def terminal_styling_enabled(stream=None) -> bool:
+    """Use ANSI styling only in an interactive terminal that supports it."""
+    stream = stream or sys.stdout
+    return bool(
+        getattr(stream, "isatty", lambda: False)()
+        and os.environ.get("TERM", "").lower() != "dumb"
+        and "NO_COLOR" not in os.environ
+    )
+
+
+def styled(text: str, *codes: str, stream=None) -> str:
+    if not codes or not terminal_styling_enabled(stream):
+        return text
+    return f"\033[{';'.join(codes)}m{text}{ANSI_RESET}"
+
+
+def bold(text: str) -> str:
+    return styled(text, ANSI_BOLD)
+
+
+def accent(text: str, *, bold_text: bool = False) -> str:
+    codes = (ANSI_BOLD, ANSI_CYAN) if bold_text else (ANSI_CYAN,)
+    return styled(text, *codes)
+
+
+def success(text: str) -> str:
+    return styled(text, ANSI_BOLD, ANSI_GREEN)
+
+
+def warning(text: str) -> str:
+    return styled(text, ANSI_BOLD, ANSI_YELLOW)
+
+
+def failure(text: str) -> str:
+    return styled(text, ANSI_BOLD, ANSI_RED)
+
+
+def print_choice(number: str, title: str, detail: str = "") -> None:
+    print(f"  {accent(number, bold_text=True)}. {bold(title)}")
+    if detail:
+        print(f"     {detail}")
+
+
+def secret_prompt(label: str) -> str:
+    """Show secret questions with the same spacing without echoing input."""
+    print()
+    print(bold(f"› {label}"))
+    return getpass.getpass("  > ").strip()
+
 
 def print_header(title: str) -> None:
     print()
-    print("━" * RULE_WIDTH)
-    print(f"  {title}")
-    print("━" * RULE_WIDTH)
+    print(accent("━" * RULE_WIDTH))
+    print(f"  {accent(title.upper(), bold_text=True)}")
+    print(accent("━" * RULE_WIDTH))
+    print()
 
 
 def step_header(number: int, title: str, *, numbered: bool = True) -> None:
     print()
-    print("─" * RULE_WIDTH)
+    print(styled("─" * RULE_WIDTH, ANSI_DIM))
     if numbered:
-        print(f"  Step {number} of {TOTAL_STEPS} · {title}")
+        step = accent(f"STEP {number} OF {TOTAL_STEPS}", bold_text=True)
+        print(f"  {step}  {bold(title)}")
     else:
-        print(f"  {title}")
-    print("─" * RULE_WIDTH)
+        print(f"  {bold(title)}")
+    print(styled("─" * RULE_WIDTH, ANSI_DIM))
+    print()
 
 
 def choose_quick_section(args: argparse.Namespace, existing_installation: bool) -> str | None:
@@ -534,16 +595,15 @@ def choose_quick_section(args: argparse.Namespace, existing_installation: bool) 
     )
     if not existing_installation or cli_settings:
         return None
+    step_header(0, "What would you like to do?", numbered=False)
+    print_choice("1", "Review or change everything", "Full walkthrough · 7 steps")
     print()
-    print("─" * RULE_WIDTH)
-    print("  What would you like to do?")
-    print("─" * RULE_WIDTH)
-    print("  1. Review or change everything (full walkthrough, 7 steps)")
-    print("  2. Change the Telegram bot token")
-    print("  3. Change the OpenAI API key")
-    print("  4. Gmail and Calendar settings (apps, email notices, calendar feeds)")
-    print("  5. Starting folder, time zone, permissions, or model")
-    print("  0. Quit without changing anything")
+    print_choice("2", "Change the Telegram bot token")
+    print_choice("3", "Change the OpenAI API key")
+    print_choice("4", "Gmail and Calendar settings", "Apps, email notices, and calendar feeds")
+    print_choice("5", "Starting folder, time zone, permissions, or model")
+    print()
+    print_choice("0", "Quit without changing anything")
     print()
     mapping = {"1": None, "2": "telegram", "3": "openai", "4": "google", "5": "machine"}
     while True:
@@ -590,12 +650,12 @@ def python_stage(label: str, action):
     try:
         result = action()
     except SystemExit:
-        print(" FAILED")
+        print(f" {failure('FAILED')}")
         raise
     except Exception as exc:
-        print(" FAILED")
+        print(f" {failure('FAILED')}")
         raise SystemExit(f"{label} failed: {exc}") from exc
-    print(f" ok ({time.monotonic() - started:.0f}s)")
+    print(f" {success('ok')} ({time.monotonic() - started:.0f}s)")
     return result
 
 
@@ -609,9 +669,9 @@ def run_stage(label: str, command: list[str], *, log_path: Path) -> None:
         stage_offset = log.tell()
         completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False)
     if completed.returncode == 0:
-        print(f" ok ({time.monotonic() - started:.0f}s)")
+        print(f" {success('ok')} ({time.monotonic() - started:.0f}s)")
         return
-    print(" FAILED")
+    print(f" {failure('FAILED')}")
     print()
     print(f"The step '{label}' failed (exit code {completed.returncode}). Its output:")
     tail_log(log_path, offset=stage_offset)
@@ -882,7 +942,7 @@ def resolve_secret(
             return existing
         print(f"Enter the replacement {label}. The existing value remains active unless setup completes successfully.")
     while True:
-        value = getpass.getpass(f"{label} (typing stays hidden — paste it and press Enter): ").strip()
+        value = secret_prompt(f"{label} — typing stays hidden; paste it and press Enter")
         if not value:
             print(required_message)
             continue
@@ -1056,7 +1116,7 @@ def resolve_google_setup(
             print("Each feed is checked the moment you enter it.")
             sources = []
             while True:
-                url = getpass.getpass("Private iCal URL (typing stays hidden — paste it and press Enter): ").strip()
+                url = secret_prompt("Private iCal URL — typing stays hidden; paste it and press Enter")
                 if not url:
                     if sources:
                         break
@@ -1692,15 +1752,19 @@ def atomic_write_text(
 
 
 def prompt(label: str, *, default: str = "") -> str:
-    suffix = f" [{default}]" if default else ""
-    value = input(f"{label}{suffix}: ").strip()
+    print()
+    suffix = styled(f"  [{default}]", ANSI_DIM) if default else ""
+    print(f"{bold(f'› {label}')}{suffix}")
+    value = input(f"  {accent('>')} ").strip()
     return value or default
 
 
 def prompt_yes_no(label: str, *, default: bool) -> bool:
     suffix = "Y/n" if default else "y/N"
     while True:
-        value = input(f"{label} [{suffix}]: ").strip().lower()
+        print()
+        print(f"{bold(f'› {label}')} {styled(f'[{suffix}]', ANSI_DIM)}")
+        value = input(f"  {accent('>')} ").strip().lower()
         if not value:
             return default
         if value in {"y", "yes"}:
