@@ -31,7 +31,7 @@ Supported operating systems:
 
 The test suite runs on both `macos-latest` and `ubuntu-latest` for every pushed change.
 
-This is the intended beginner path from a clean macOS or Linux machine. In the recommended setup, Codex is allowed to control the whole computer as your local user. The folder chosen during setup is only Codex's starting folder and the place where `AGENTS.md` memory instructions live; it is not a limit on what Codex can access.
+This is the intended beginner path from a clean macOS or Linux machine. In the recommended setup, Codex is allowed to control the whole computer as your local user. The wizard automatically uses the user's home folder as Codex's starting location and the place where `AGENTS.md` memory instructions live; it is not a limit on what Codex can access.
 
 ### Non-technical macOS/Linux install: exact steps
 
@@ -80,7 +80,7 @@ python3 /absolute/path/to/repo/scripts/setup.py
 The same command is also the normal repair and reconfiguration path. On a
 rerun, the wizard opens with a quick-change menu: jump straight to changing
 the Telegram bot token, the OpenAI API key, the Gmail/Calendar settings, or
-the folder/permissions/model — everything else is filled in silently from the
+the time zone/permissions/model/advanced starting location — everything else is filled in silently from the
 saved configuration — or pick the full walkthrough. (The menu is skipped when
 any setting is passed on the command line, so scripted runs behave as before.)
 The wizard defaults to keeping every working value. Saved secrets are never
@@ -101,9 +101,10 @@ the installation is complete and verified: a pairing that times out or is
 declined never rolls anything back — setup finishes and prints the manual
 pairing steps instead.
 
-It asks for:
+It configures:
 
-- the starting folder for Telegram-launched Codex sessions; this is not a permission boundary in autonomous mode
+- the user's home folder as the automatic starting location for whole-computer mode, preserving any valid location already configured
+- a user-selected folder only in restricted `workspaceWrite` mode, where that folder is the actual access boundary
 - the Telegram bot token from BotFather
 - the OpenAI API key, required for memory summaries and voice transcription
 - the user's IANA timezone, detected from the computer by default, so every clock and calendar heading agrees

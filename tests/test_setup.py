@@ -195,6 +195,72 @@ class SetupWizardTests(unittest.TestCase):
                 setup_wizard.resolve_network_access(None, "dangerFullAccess", False)
             )
 
+    def test_fresh_whole_computer_setup_uses_home_without_folder_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            with mock.patch.object(setup_wizard.Path, "home", return_value=home):
+                current = setup_wizard.default_starting_location()
+            with mock.patch.object(setup_wizard, "resolve_project_dir") as folder_prompt, mock.patch.object(
+                setup_wizard, "prompt_yes_no"
+            ) as advanced_prompt:
+                selected = setup_wizard.resolve_starting_location_for_access(
+                    supplied=None,
+                    existing="",
+                    current=current,
+                    sandbox_mode="dangerFullAccess",
+                    offer_advanced_change=False,
+                )
+        self.assertEqual(selected, home)
+        folder_prompt.assert_not_called()
+        advanced_prompt.assert_not_called()
+
+    def test_existing_starting_location_is_preserved_in_whole_computer_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            saved = Path(tmp).resolve()
+            current = setup_wizard.default_starting_location(str(saved))
+            with mock.patch.object(setup_wizard, "resolve_project_dir") as folder_prompt:
+                selected = setup_wizard.resolve_starting_location_for_access(
+                    supplied=None,
+                    existing=str(saved),
+                    current=current,
+                    sandbox_mode="dangerFullAccess",
+                    offer_advanced_change=False,
+                )
+        self.assertEqual(selected, saved)
+        folder_prompt.assert_not_called()
+
+    def test_restricted_mode_requests_its_folder_boundary(self) -> None:
+        current = Path.home().resolve()
+        restricted = current / "restricted"
+        with mock.patch.object(
+            setup_wizard, "resolve_project_dir", return_value=restricted
+        ) as folder_prompt, contextlib.redirect_stdout(io.StringIO()):
+            selected = setup_wizard.resolve_starting_location_for_access(
+                supplied=None,
+                existing="",
+                current=current,
+                sandbox_mode="workspaceWrite",
+                offer_advanced_change=False,
+            )
+        self.assertEqual(selected, restricted)
+        folder_prompt.assert_called_once_with(None, str(current))
+
+    def test_advanced_rerun_can_change_whole_computer_starting_location(self) -> None:
+        current = Path.home().resolve()
+        replacement = current / "advanced"
+        with mock.patch.object(setup_wizard, "prompt_yes_no", return_value=True), mock.patch.object(
+            setup_wizard, "resolve_project_dir", return_value=replacement
+        ) as folder_prompt, contextlib.redirect_stdout(io.StringIO()):
+            selected = setup_wizard.resolve_starting_location_for_access(
+                supplied=None,
+                existing=str(current),
+                current=current,
+                sandbox_mode="dangerFullAccess",
+                offer_advanced_change=True,
+            )
+        self.assertEqual(selected, replacement)
+        folder_prompt.assert_called_once_with(None, str(current))
+
     def test_recommended_sandbox_mode_is_danger_full_access(self) -> None:
         with mock.patch.object(setup_wizard, "prompt", return_value="1"), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(setup_wizard.choose_sandbox_mode(), "dangerFullAccess")

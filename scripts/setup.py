@@ -58,8 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--project-dir",
         help=(
-            "Starting folder for Telegram-launched Codex sessions and AGENTS.md memory. "
-            "In dangerFullAccess mode this is not a permission boundary."
+            "Advanced starting location for Telegram-launched Codex sessions and AGENTS.md memory. "
+            "Whole-computer mode defaults to the home folder; in dangerFullAccess mode this is not a permission boundary."
         ),
     )
     parser.add_argument(
@@ -163,18 +163,12 @@ def main() -> int:
     def wants(section: str) -> bool:
         return quick is None or quick == section
 
+    configured_project_dir = str(existing_telegram_config.get("default_cwd") or "")
+    project_dir = default_starting_location(configured_project_dir)
+
     # ── Step 1 ──────────────────────────────────────────────────────
     if wants("machine"):
-        step_header(1, "Starting folder and time zone", numbered=numbered)
-        print("Codex sessions launched from Telegram begin in this folder, and the")
-        print("AGENTS.md memory file lives there. With full computer access (chosen in")
-        print("step 4) it is a starting point, not a boundary.")
-        print()
-        project_dir = resolve_project_dir(
-            args.project_dir,
-            str(existing_telegram_config.get("default_cwd") or ""),
-        )
-        print()
+        step_header(1, "Time zone", numbered=numbered)
         print("The time zone keeps every clock in agreement: prompt timestamps, memory,")
         print("Telegram message times, and calendar headings.")
         timezone_name = resolve_timezone_name(
@@ -182,10 +176,6 @@ def main() -> int:
             str(existing_memory_config.get("timezone") or existing_telegram_config.get("timezone") or ""),
         )
     else:
-        default_dir = str(existing_telegram_config.get("default_cwd") or "") or str(Path.home())
-        project_dir = Path(default_dir).expanduser().resolve()
-        if not project_dir.is_dir():
-            project_dir = resolve_project_dir(None, default_dir)
         timezone_name = str(
             existing_memory_config.get("timezone") or existing_telegram_config.get("timezone") or ""
         ).strip()
@@ -193,7 +183,6 @@ def main() -> int:
             ZoneInfo(timezone_name)
         except (ZoneInfoNotFoundError, ValueError):
             timezone_name = detect_system_timezone()
-    agents_md_path = project_dir / "AGENTS.md"
 
     # ── Step 2 ──────────────────────────────────────────────────────
     existing_telegram_token = read_env_value(TELEGRAM_ENV, "TELEGRAM_BOT_TOKEN")
@@ -270,8 +259,14 @@ def main() -> int:
     if wants("machine"):
         step_header(4, "Codex permissions", numbered=numbered)
         sandbox_mode = args.sandbox_mode or choose_sandbox_mode(
-            str(existing_telegram_config.get("sandbox_mode") or ""),
-            project_dir=project_dir,
+            str(existing_telegram_config.get("sandbox_mode") or "")
+        )
+        project_dir = resolve_starting_location_for_access(
+            supplied=args.project_dir,
+            existing=configured_project_dir,
+            current=project_dir,
+            sandbox_mode=sandbox_mode,
+            offer_advanced_change=bool(quick == "machine" and existing_installation),
         )
         print()
         network_access = resolve_network_access(
@@ -283,6 +278,8 @@ def main() -> int:
         sandbox_mode = str(existing_telegram_config.get("sandbox_mode") or "") or "dangerFullAccess"
         existing_network = existing_telegram_config.get("network_access")
         network_access = existing_network if isinstance(existing_network, bool) else sandbox_mode == "dangerFullAccess"
+
+    agents_md_path = project_dir / "AGENTS.md"
 
     # ── Step 5 ──────────────────────────────────────────────────────
     if wants("google"):
@@ -337,8 +334,13 @@ def main() -> int:
         if sandbox_mode == "dangerFullAccess"
         else f"only {display_path(project_dir)}  (workspaceWrite)"
     )
+    starting_location_detail = (
+        f"{display_path(project_dir)}  (AGENTS.md lives here; not an access limit)"
+        if sandbox_mode == "dangerFullAccess"
+        else f"{display_path(project_dir)}  (Codex access is limited to this folder)"
+    )
     review_rows = [
-        ("Starting folder", f"{display_path(project_dir)}  (AGENTS.md memory lives here)"),
+        ("Starting location", starting_location_detail),
         ("Time zone", timezone_name),
         ("Telegram bot token", secret_status(telegram_kept)),
         ("OpenAI API key", secret_status(openai_kept)),
@@ -601,7 +603,7 @@ def choose_quick_section(args: argparse.Namespace, existing_installation: bool) 
     print_choice("2", "Change the Telegram bot token")
     print_choice("3", "Change the OpenAI API key")
     print_choice("4", "Gmail and Calendar settings", "Apps, email notices, and calendar feeds")
-    print_choice("5", "Starting folder, time zone, permissions, or model")
+    print_choice("5", "Time zone, permissions, model, or advanced starting location")
     print()
     print_choice("0", "Quit without changing anything")
     print()
@@ -855,6 +857,42 @@ def openai_transcription_probe_body() -> tuple[bytes, str]:
     return bytes(body), boundary
 
 
+def default_starting_location(existing: str = "") -> Path:
+    """Use a valid saved location, otherwise the user's home folder."""
+    home = Path.home().expanduser().resolve()
+    if existing.strip():
+        candidate = Path(existing).expanduser().resolve()
+        if candidate.is_dir():
+            return candidate
+    return home
+
+
+def resolve_starting_location_for_access(
+    *,
+    supplied: str | None,
+    existing: str,
+    current: Path,
+    sandbox_mode: str,
+    offer_advanced_change: bool,
+) -> Path:
+    """Ask for a location only when it affects access or was explicitly requested."""
+    if supplied:
+        return resolve_project_dir(supplied, existing or str(current))
+    if sandbox_mode == "workspaceWrite":
+        print()
+        print("Restricted mode needs a folder boundary. Codex will only be able to")
+        print("modify files inside the folder you choose here.")
+        return resolve_project_dir(None, existing or str(current))
+    if offer_advanced_change:
+        print()
+        print(f"Starting location: {display_path(current)}")
+        print("This is where Codex starts and where AGENTS.md memory lives. It does")
+        print("not limit whole-computer access.")
+        if prompt_yes_no("Advanced: change this starting location?", default=False):
+            return resolve_project_dir(None, existing or str(current))
+    return current
+
+
 def resolve_project_dir(value: str | None, existing: str = "") -> Path:
     default = existing.strip() or str(Path.home())
     while True:
@@ -957,17 +995,14 @@ def resolve_secret(
         return value
 
 
-def choose_sandbox_mode(existing: str = "", project_dir: Path | None = None) -> str:
-    folder = display_path(project_dir) if project_dir else "the chosen starting folder"
-    if folder == "~":
-        folder = "your home folder"
+def choose_sandbox_mode(existing: str = "") -> str:
     print("How much of this computer may Telegram-launched Codex sessions control?")
     print()
     print("  1. The whole computer  (recommended for a dedicated machine)")
     print("     Codex can read and change anything your user account can.")
     print("     Stored in the configuration as: dangerFullAccess")
-    print("  2. Only the starting folder")
-    print(f"     Codex can modify files only inside {folder}.")
+    print("  2. Only one folder")
+    print("     You choose the folder next; Codex cannot modify files outside it.")
     print("     Stored in the configuration as: workspaceWrite")
     print()
     default = "2" if existing == "workspaceWrite" else "1"
