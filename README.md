@@ -566,7 +566,6 @@ After editing `AGENTS.md`, start a new Codex session so the updated instructions
 - [.agents/plugins/marketplace.json](.agents/plugins/marketplace.json)
 - [plugins/codex-long-term-memory/README.md](plugins/codex-long-term-memory/README.md)
 - [plugins/codex-telegram-bridge/README.md](plugins/codex-telegram-bridge/README.md)
-- [PARITY_ROADMAP.md](PARITY_ROADMAP.md)
 
 ## Notes
 
