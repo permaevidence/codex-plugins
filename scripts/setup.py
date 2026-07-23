@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from platform_support import platform_display_name, platform_family, runtime_data_root, service_definition_path
 from jsonrpc_io import JsonRpcLineReader
+from macos_permissions import codex_full_disk_access_status, codex_permission_installation
 from runtime_install import install_runtime, prune_old_versions
 
 
@@ -279,6 +280,10 @@ def main() -> int:
         existing_network = existing_telegram_config.get("network_access")
         network_access = existing_network if isinstance(existing_network, bool) else sandbox_mode == "dangerFullAccess"
 
+    full_disk_access_plan = resolve_macos_full_disk_access_plan(
+        sandbox_mode,
+        offer_guidance=wants("machine"),
+    )
     agents_md_path = project_dir / "AGENTS.md"
 
     # ── Step 5 ──────────────────────────────────────────────────────
@@ -354,12 +359,20 @@ def main() -> int:
         ("Install location", unresolved_display_path(CURRENT_RUNTIME_LINK.parent)),
         ("Memory hooks", "this plugin's four hooks will be verified and trusted"),
     ]
+    if full_disk_access_plan["applicable"]:
+        review_rows.insert(
+            6,
+            ("macOS Full Disk Access", str(full_disk_access_plan["review"])),
+        )
     label_width = max(len(label) for label, _ in review_rows) + 2
     for label, value in review_rows:
         print(f"  {bold(label.ljust(label_width))}{value}")
     print()
     if not prompt_yes_no("Proceed with these changes?", default=True):
         raise SystemExit("Setup cancelled. Nothing was changed.")
+
+    if full_disk_access_plan["requested"]:
+        guide_macos_full_disk_access(full_disk_access_plan)
 
     # ── Install ─────────────────────────────────────────────────────
     print_header("Installing")
@@ -1013,6 +1026,169 @@ def choose_sandbox_mode(existing: str = "") -> str:
         if choice in {"2", "workspaceWrite", "workspacewrite"}:
             return "workspaceWrite"
         print("Choose 1 or 2.")
+
+
+def resolve_macos_full_disk_access_plan(
+    sandbox_mode: str,
+    *,
+    offer_guidance: bool = True,
+) -> dict[str, object]:
+    """Plan the user-approved macOS Full Disk Access step.
+
+    Codex's ``dangerFullAccess`` setting controls its own sandbox. It cannot
+    grant the separate macOS TCC permission, so setup opens System Settings
+    only after the review screen and the user approves the overall setup.
+    """
+
+    plan: dict[str, object] = {
+        "applicable": False,
+        "requested": False,
+        "review": "not applicable",
+        "installation": {},
+        "status": {},
+        "targets": [],
+    }
+    if platform_family() != "macos":
+        return plan
+
+    plan["applicable"] = True
+    if sandbox_mode != "dangerFullAccess":
+        plan["review"] = "not requested in restricted-folder mode"
+        return plan
+
+    installation = codex_permission_installation()
+    plan["installation"] = installation
+    targets = list(installation.get("targets") or [])
+    plan["targets"] = targets
+    kind = str(installation.get("kind") or "")
+
+    if kind == "npm":
+        if offer_guidance:
+            print()
+            print(warning("macOS Full Disk Access"))
+            print("This Codex installation runs through Node. Giving Full Disk Access")
+            print("to Node would also authorize unrelated Node programs, so the wizard")
+            print("will not recommend or automate that. Install native Codex for narrow,")
+            print("Codex-specific macOS authorization.")
+        plan["review"] = "not requested — npm/Node installation detected; native Codex recommended"
+        return plan
+
+    if kind != "native" or len(targets) < 2:
+        if offer_guidance:
+            print()
+            print(warning("macOS Full Disk Access"))
+            print(str(installation.get("detail") or "The native Codex executables could not be identified."))
+            print("The wizard will not guess which executable should receive this sensitive permission.")
+        plan["review"] = "manual review needed — native Codex executables were not safely verified"
+        return plan
+
+    status = codex_full_disk_access_status(targets)
+    plan["status"] = status
+    if status.get("state") == "granted":
+        if offer_guidance:
+            print()
+            print("macOS Full Disk Access: already enabled for Codex and its code-mode helper.")
+        plan["review"] = "already enabled for both native Codex executables"
+        return plan
+
+    if not offer_guidance:
+        plan["review"] = "unchanged — rerun the permissions section to review it"
+        return plan
+
+    print()
+    print(bold("macOS Full Disk Access"))
+    print("Codex's dangerFullAccess setting removes its internal sandbox, but macOS")
+    print("still protects locations such as Desktop, Documents, Mail, Messages, and")
+    print("some application data. macOS requires you to approve this separately.")
+    print()
+    print("The wizard found the two current OpenAI executables:")
+    for target in targets:
+        print(f"  • {target}")
+    print()
+    print("Codex updates may install a new versioned path. Rerunning this permissions")
+    print("section will detect the current executables and offer the same repair.")
+    requested = prompt_yes_no(
+        "Open macOS Full Disk Access settings after the review screen?",
+        default=True,
+    )
+    plan["requested"] = requested
+    plan["review"] = (
+        "open System Settings and guide approval for both executables"
+        if requested
+        else "skipped — protected macOS locations may remain inaccessible"
+    )
+    return plan
+
+
+def guide_macos_full_disk_access(plan: dict[str, object]) -> None:
+    """Open the correct macOS pane and wait for explicit user confirmation."""
+
+    targets = [Path(path) for path in list(plan.get("targets") or [])]
+    if not targets:
+        return
+
+    settings_url = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+    print_header("macOS Full Disk Access")
+    print("macOS does not allow this wizard to grant the permission silently.")
+    print("You will make the final choice in System Settings.")
+    print()
+    print("For each path below:")
+    print("  1. In Full Disk Access, click +.")
+    print("  2. In the file picker, press Command-Shift-G.")
+    print("  3. Paste the complete path, click Open, and enable its switch.")
+    for target in targets:
+        print()
+        print(f"     {target}")
+
+    while True:
+        # Reveal the hidden version directory first, then leave System Settings
+        # in front. ``open`` only navigates; the user still controls the grant.
+        subprocess.run(
+            ["open", "-R", str(targets[-1])],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        opened = subprocess.run(
+            ["open", settings_url],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if opened.returncode != 0:
+            print()
+            print("System Settings could not be opened automatically. Open:")
+            print("  System Settings → Privacy & Security → Full Disk Access")
+
+        prompt("Return here after both switches are enabled, then press Enter")
+        status = codex_full_disk_access_status(targets)
+        plan["status"] = status
+        if status.get("state") == "granted":
+            print()
+            print(success("Full Disk Access is enabled for both Codex executables."))
+            return
+
+        print()
+        if status.get("state") == "missing":
+            print(warning("macOS has not reported both current paths as authorized."))
+            missing = [Path(path) for path in list(status.get("missing") or [])]
+            for path in missing:
+                print(f"  Missing: {path}")
+        else:
+            print(warning(str(status.get("detail") or "The permission could not be inspected automatically.")))
+
+        if prompt_yes_no(
+            "Are both exact paths visibly listed and enabled in Full Disk Access?",
+            default=False,
+        ):
+            print("Continuing with your visual confirmation. Setup will restart the bridge")
+            print("so the new macOS permission applies to its Codex processes.")
+            return
+        if not prompt_yes_no("Open Full Disk Access and try again?", default=True):
+            print()
+            print(warning("Continuing without confirmed Full Disk Access."))
+            print("The plugins will still install, but macOS may deny protected locations.")
+            return
 
 
 def resolve_network_access(value: str | None, sandbox_mode: str, existing: object = None) -> bool:

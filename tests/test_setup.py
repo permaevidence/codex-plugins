@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import json
 import os
+import sqlite3
 from unittest import mock
 from pathlib import Path
 
@@ -289,6 +290,176 @@ class SetupWizardTests(unittest.TestCase):
             self.assertEqual(config["timezone"], "America/New_York")
             self.assertTrue(config["network_access"])
             self.assertEqual(config["writable_roots"], [])
+
+    def test_native_codex_permission_targets_follow_current_release_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            release_bin = root / ".codex/packages/standalone/releases/1.2.3/bin"
+            release_bin.mkdir(parents=True)
+            codex = release_bin / "codex"
+            helper = release_bin / "codex-code-mode-host"
+            codex.write_text("binary", encoding="utf-8")
+            helper.write_text("binary", encoding="utf-8")
+            launcher = root / ".local/bin/codex"
+            launcher.parent.mkdir(parents=True)
+            launcher.symlink_to(codex)
+
+            def signed(command, **_kwargs):
+                identifier = Path(command[-1]).name
+                return mock.Mock(
+                    returncode=0,
+                    stdout="",
+                    stderr=(
+                        f"Identifier={identifier}\n"
+                        "TeamIdentifier=2DC432GLL2\n"
+                    ),
+                )
+
+            with mock.patch.object(setup_wizard.subprocess, "run", side_effect=signed):
+                installation = setup_wizard.codex_permission_installation(str(launcher))
+
+        self.assertEqual(installation["kind"], "native")
+        self.assertEqual(installation["codex"], codex.resolve())
+        self.assertEqual(installation["helper"], helper.resolve())
+        self.assertEqual(installation["targets"], [codex.resolve(), helper.resolve()])
+
+    def test_unverified_native_binaries_are_never_permission_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            codex = bin_dir / "codex"
+            helper = bin_dir / "codex-code-mode-host"
+            codex.write_text("binary", encoding="utf-8")
+            helper.write_text("binary", encoding="utf-8")
+            signature = mock.Mock(
+                returncode=0,
+                stdout="",
+                stderr="Identifier=codex\nTeamIdentifier=NOT-OPENAI\n",
+            )
+            with mock.patch.object(setup_wizard.subprocess, "run", return_value=signature):
+                installation = setup_wizard.codex_permission_installation(str(codex))
+
+        self.assertEqual(installation["kind"], "untrusted")
+        self.assertEqual(installation["targets"], [])
+        self.assertIn("could not be verified", installation["detail"])
+
+    def test_npm_codex_is_not_offered_as_full_disk_access_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_js = Path(tmp) / "node_modules/@openai/codex/bin/codex.js"
+            codex_js.parent.mkdir(parents=True)
+            codex_js.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+
+            installation = setup_wizard.codex_permission_installation(str(codex_js))
+
+        self.assertEqual(installation["kind"], "npm")
+        self.assertEqual(installation["targets"], [])
+        self.assertIn("unrelated Node programs", installation["detail"])
+
+    def test_full_disk_access_status_matches_exact_current_binary_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex = root / "release-2/bin/codex"
+            helper = codex.parent / "codex-code-mode-host"
+            codex.parent.mkdir(parents=True)
+            codex.write_text("binary", encoding="utf-8")
+            helper.write_text("binary", encoding="utf-8")
+            database = root / "TCC.db"
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "CREATE TABLE access (service TEXT, client TEXT, auth_value INTEGER)"
+            )
+            connection.executemany(
+                "INSERT INTO access VALUES (?, ?, ?)",
+                [
+                    ("kTCCServiceSystemPolicyAllFiles", str(codex), 2),
+                    ("kTCCServiceSystemPolicyAllFiles", str(helper), 2),
+                ],
+            )
+            connection.commit()
+            connection.close()
+
+            granted = setup_wizard.codex_full_disk_access_status(
+                [codex, helper],
+                database=database,
+            )
+            next_release = root / "release-3/bin/codex"
+            next_release.parent.mkdir(parents=True)
+            next_release.write_text("binary", encoding="utf-8")
+            changed = setup_wizard.codex_full_disk_access_status(
+                [next_release, helper],
+                database=database,
+            )
+
+        self.assertEqual(granted["state"], "granted")
+        self.assertEqual(changed["state"], "missing")
+        self.assertEqual(changed["missing"], [next_release.resolve()])
+
+    def test_full_disk_access_plan_is_guided_only_for_native_whole_mac_mode(self) -> None:
+        codex = Path("/private/current/bin/codex")
+        helper = codex.parent / "codex-code-mode-host"
+        installation = {
+            "kind": "native",
+            "targets": [codex, helper],
+            "detail": "found",
+        }
+        status = {
+            "state": "missing",
+            "authorized": [],
+            "missing": [codex, helper],
+            "detail": "missing",
+        }
+        with mock.patch.object(setup_wizard, "platform_family", return_value="macos"), mock.patch.object(
+            setup_wizard, "codex_permission_installation", return_value=installation
+        ), mock.patch.object(
+            setup_wizard, "codex_full_disk_access_status", return_value=status
+        ), mock.patch.object(
+            setup_wizard, "prompt_yes_no", return_value=True
+        ) as permission_prompt, contextlib.redirect_stdout(io.StringIO()):
+            plan = setup_wizard.resolve_macos_full_disk_access_plan("dangerFullAccess")
+
+        self.assertTrue(plan["applicable"])
+        self.assertTrue(plan["requested"])
+        self.assertIn("open System Settings", plan["review"])
+        permission_prompt.assert_called_once()
+
+        with mock.patch.object(setup_wizard, "platform_family", return_value="macos"), mock.patch.object(
+            setup_wizard, "codex_permission_installation"
+        ) as discovery:
+            restricted = setup_wizard.resolve_macos_full_disk_access_plan("workspaceWrite")
+        self.assertFalse(restricted["requested"])
+        self.assertIn("restricted-folder", restricted["review"])
+        discovery.assert_not_called()
+
+    def test_full_disk_access_guide_opens_settings_and_accepts_verified_grant(self) -> None:
+        codex = Path("/private/current/bin/codex")
+        helper = codex.parent / "codex-code-mode-host"
+        plan: dict[str, object] = {
+            "requested": True,
+            "targets": [codex, helper],
+        }
+        granted = {
+            "state": "granted",
+            "authorized": [codex, helper],
+            "missing": [],
+            "detail": "granted",
+        }
+        completed = mock.Mock(returncode=0)
+        with mock.patch.object(
+            setup_wizard.subprocess, "run", return_value=completed
+        ) as run_process, mock.patch.object(
+            setup_wizard, "prompt", return_value=""
+        ), mock.patch.object(
+            setup_wizard, "codex_full_disk_access_status", return_value=granted
+        ), contextlib.redirect_stdout(io.StringIO()):
+            setup_wizard.guide_macos_full_disk_access(plan)
+
+        commands = [call.args[0] for call in run_process.call_args_list]
+        self.assertIn(["open", "-R", str(helper)], commands)
+        self.assertIn(
+            ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"],
+            commands,
+        )
+        self.assertEqual(plan["status"], granted)
 
     def test_local_capabilities_block_is_written_and_replaced(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

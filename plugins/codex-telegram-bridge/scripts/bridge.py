@@ -35,6 +35,7 @@ if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 from lib.gmail_imap import probe_imap
 from jsonrpc_io import JsonRpcLineReader
+from macos_permissions import codex_full_disk_access_status, codex_permission_installation
 from platform_support import (
     LAUNCHD_LABEL,
     SYSTEMD_SERVICE_NAME,
@@ -595,7 +596,8 @@ def doctor(
     allow_google_unconnected: bool = False,
 ) -> int:
     checks: list[tuple[str, bool, str]] = []
-    pending: list[tuple[str, str]] = []
+    pending_steps: list[tuple[str, str]] = []
+    notices: list[tuple[str, str]] = []
 
     codex = shutil.which("codex")
     checks.append(("codex CLI on PATH", bool(codex), codex or "missing"))
@@ -655,7 +657,7 @@ def doctor(
             if connected or not allow_google_unconnected:
                 checks.append((label, connected, detail))
             else:
-                pending.append((label, f"{detail}; run `codex`, enter `/apps`, and connect it"))
+                pending_steps.append((label, f"{detail}; run `codex`, enter `/apps`, and connect it"))
     checks.append(("Telegram config.json", bool(config), str(CONFIG_FILE) if config else "missing or invalid"))
     if config:
         default_cwd = Path(str(config.get("default_cwd") or "")).expanduser()
@@ -670,6 +672,55 @@ def doctor(
             timezone_ok = False
             timezone_detail = telegram_timezone or "missing"
         checks.append(("Telegram timezone configured", timezone_ok, timezone_detail))
+        if PLATFORM_FAMILY == "macos" and config.get("sandbox_mode") == "dangerFullAccess":
+            installation = codex_permission_installation(
+                str(config.get("codex_cmd") or codex or "")
+            )
+            installation_kind = str(installation.get("kind") or "")
+            targets = list(installation.get("targets") or [])
+            if installation_kind == "native" and len(targets) >= 2:
+                full_disk = codex_full_disk_access_status(targets)
+                if full_disk.get("state") == "granted":
+                    checks.append(
+                        (
+                            "macOS Full Disk Access",
+                            True,
+                            "enabled for Codex and codex-code-mode-host",
+                        )
+                    )
+                elif full_disk.get("state") == "unknown":
+                    notices.append(
+                        (
+                            "macOS Full Disk Access",
+                            str(full_disk.get("detail") or "could not inspect; confirm visually in System Settings"),
+                        )
+                    )
+                else:
+                    missing = ", ".join(str(path) for path in full_disk.get("missing") or targets)
+                    pending_steps.append(
+                        (
+                            "macOS Full Disk Access",
+                            (
+                                f"{full_disk.get('detail') or 'not confirmed'} "
+                                f"Current path(s): {missing}. Rerun the permissions section in "
+                                f"`python3 {REPO_ROOT}/scripts/setup.py`."
+                            ),
+                        )
+                    )
+            elif installation_kind == "npm":
+                pending_steps.append(
+                    (
+                        "macOS Full Disk Access",
+                        "npm/Node Codex detected; use native Codex instead of granting broad access to shared Node",
+                    )
+                )
+            else:
+                pending_steps.append(
+                    (
+                        "macOS Full Disk Access",
+                        str(installation.get("detail") or "native Codex executables could not be identified"),
+                    )
+                )
 
     env_values = load_env_keys(ENV_FILE)
     checks.append(("Telegram .env", ENV_FILE.exists(), str(ENV_FILE) if ENV_FILE.exists() else "missing"))
@@ -687,14 +738,14 @@ def doctor(
 
     access = load_json(ACCESS_FILE)
     allow_list = access.get("allowFrom", []) if isinstance(access, dict) else []
-    pending = access.get("pending", {}) if isinstance(access, dict) else {}
+    pairing_pending = access.get("pending", {}) if isinstance(access, dict) else {}
     if allow_unpaired and not allow_list:
         print("[PENDING] Telegram pairing: send the bot a DM, then approve the displayed code.")
     else:
         checks.append(("access.json", isinstance(access, dict), str(ACCESS_FILE) if isinstance(access, dict) else "missing or invalid"))
         checks.append(("at least one allowed chat", bool(allow_list), f"{len(allow_list)} allowed" if allow_list else "none yet"))
-    if pending and not allow_unpaired:
-        checks.append(("pending pairing codes", False, f"{len(pending)} pending; approve with scripts/access.py pair <code>"))
+    if pairing_pending and not allow_unpaired:
+        checks.append(("pending pairing codes", False, f"{len(pairing_pending)} pending; approve with scripts/access.py pair <code>"))
 
     memory_config = load_json(MEMORY_CONFIG_FILE)
     checks.append(("long-term-memory config", bool(memory_config), str(MEMORY_CONFIG_FILE) if memory_config else "missing or invalid"))
@@ -779,8 +830,10 @@ def doctor(
         if not ok:
             failures += 1
         print(f"[{marker}] {label}: {detail}")
-    for label, detail in pending:
+    for label, detail in pending_steps:
         print(f"[PENDING] {label}: {detail}")
+    for label, detail in notices:
+        print(f"[INFO] {label}: {detail}")
 
     print()
     if failures:
@@ -795,7 +848,7 @@ def doctor(
         print("- After plugin or hook changes, start a new Codex thread or send /newsession.")
         return 1
 
-    if pending:
+    if pending_steps:
         print("Doctor checks passed; the clearly marked first-time connection steps remain pending.")
     else:
         print("Doctor checks passed.")

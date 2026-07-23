@@ -48,7 +48,7 @@ cd codex-plugins-main
 python3 scripts/setup.py
 ```
 
-3. Follow the wizard. Paste both keys when asked; if unsure about any choice, press Enter for the recommended option.
+3. Follow the wizard. Paste both keys when asked; if unsure about any choice, press Enter for the recommended option. On macOS, whole-computer mode also offers to open Full Disk Access so you can explicitly approve native Codex and its code-mode helper.
 4. If you selected Google integration, the wizard installs both official plugins automatically. Follow its printed steps: run `codex`, type `/apps`, connect Gmail, connect Google Calendar, then leave Codex with `/quit`. This is the only required Google authorization step.
 5. When prompted, message your new Telegram bot, return to Terminal, press Enter, and approve the Telegram user shown.
 6. In Telegram, send this only after Google authorization and pairing are complete:
@@ -101,6 +101,23 @@ the installation is complete and verified: a pairing that times out or is
 declined never rolls anything back — setup finishes and prints the manual
 pairing steps instead.
 
+On macOS, Codex's `dangerFullAccess` setting and Apple's Full Disk Access are
+separate. The first controls the Codex sandbox; it cannot override macOS
+privacy protection for Desktop, Documents, Mail, Messages, and other protected
+data. In whole-computer mode the wizard detects the active native `codex` and
+`codex-code-mode-host` binaries, verifies both Apple signatures as OpenAI,
+shows their exact paths, opens the Full Disk Access pane, and waits for the
+user to enable both entries. macOS requires that explicit user action; the
+wizard never edits the TCC privacy database.
+
+Native Codex releases live under versioned paths. Rerun the wizard's
+**Time zone, permissions, model...** section after a Codex application update
+if protected files stop working; it checks the current release paths and offers
+the same guided repair. The doctor also reports a pending permission step when
+it can confirm that either current path is missing. For npm Codex, the wizard
+does not recommend granting Full Disk Access to the shared Node runtime because
+that would authorize unrelated Node programs; use native Codex instead.
+
 It configures:
 
 - the user's home folder as the automatic starting location for whole-computer mode, preserving any valid location already configured
@@ -109,6 +126,7 @@ It configures:
 - the OpenAI API key, required for memory summaries and voice transcription
 - the user's IANA timezone, detected from the computer by default, so every clock and calendar heading agrees
 - the Codex sandbox level for Telegram sessions, defaulting to broad autonomous access
+- guided native Codex Full Disk Access approval on macOS when whole-computer mode is selected
 - whether to start the bridge immediately
 - preserves an existing Telegram model selection, or inherits Codex's effective model and effort on the first setup
 - whether to complete secure local pairing inside the wizard
