@@ -355,6 +355,23 @@ def main() -> int:
         ("Gmail/Calendar apps", "install now, authorize later via /apps" if google_setup["enabled"] else "no"),
         ("Email notices", "on — IMAP " + secret_status(bool(google_setup.get("email_kept"))) if google_setup["email_enabled"] else "off"),
         ("Calendar context", f"{len(list(google_setup['calendar_sources']))} private feed(s)" if google_setup["calendar_enabled"] else "off"),
+        (
+            "Voice-note converter",
+            (
+                f"system FFmpeg found at {shutil.which('ffmpeg')}"
+                if shutil.which("ffmpeg")
+                else (
+                    "private setup-managed FFmpeg already installed"
+                    if (
+                        TELEGRAM_DIR
+                        / "python"
+                        / "imageio_ffmpeg-0.6.0.dist-info"
+                        / "METADATA"
+                    ).is_file()
+                    else "install a pinned private FFmpeg helper (about a 20–30 MB download)"
+                )
+            ),
+        ),
         ("Bridge service", ("start after setup" if start_bridge else "do not start") + ("; pair via this wizard" if pair_now else "")),
         ("Install location", unresolved_display_path(CURRENT_RUNTIME_LINK.parent)),
         ("Memory hooks", "this plugin's four hooks will be verified and trusted"),

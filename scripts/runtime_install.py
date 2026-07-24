@@ -45,6 +45,7 @@ def install_runtime(source_root: Path, *, cachebuster: str | None = None) -> Pat
     if destination.exists():
         if token.startswith("commit-"):
             _validate_runtime(destination)
+            _ensure_runtime_dependencies(destination)
             _activate(destination)
             return CURRENT_LINK
         suffix = 1
@@ -75,6 +76,7 @@ def install_runtime(source_root: Path, *, cachebuster: str | None = None) -> Pat
     finally:
         shutil.rmtree(staging_parent, ignore_errors=True)
 
+    _ensure_runtime_dependencies(destination)
     _activate(destination)
     return CURRENT_LINK
 
@@ -85,6 +87,43 @@ def _activate(destination: Path) -> None:
     next_link.unlink(missing_ok=True)
     next_link.symlink_to(destination)
     os.replace(next_link, CURRENT_LINK)
+
+
+def _ensure_runtime_dependencies(root: Path) -> None:
+    """Install dependencies that must exist before this runtime becomes active.
+
+    This lives in the runtime installer rather than only in setup/update so an
+    older updater can safely activate a release that introduces a new runtime
+    dependency.
+    """
+
+    installer = (
+        root
+        / "plugins"
+        / "codex-telegram-bridge"
+        / "scripts"
+        / "install_dependencies.py"
+    )
+    if not installer.is_file():
+        return
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(installer)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"Could not prepare Telegram voice transcription: {exc}"
+        ) from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(
+            "Could not prepare Telegram voice transcription"
+            + (f": {detail[-1000:]}" if detail else "")
+        )
 
 
 def _apply_cachebusters(root: Path, token: str) -> None:

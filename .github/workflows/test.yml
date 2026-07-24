@@ -17,7 +17,21 @@ jobs:
         with:
           python-version: "3.9"
       - name: Install pinned Python dependencies
-        run: python3 -m pip install --no-deps --require-hashes -r plugins/codex-long-term-memory/requirements.txt
+        run: |
+          python3 -m pip install --no-deps --require-hashes -r plugins/codex-long-term-memory/requirements.txt
+          python3 -m pip install --no-deps --require-hashes -r plugins/codex-telegram-bridge/requirements.txt
+      - name: Validate private voice-note converter
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          import imageio_ffmpeg
+          subprocess.run(
+              [imageio_ffmpeg.get_ffmpeg_exe(), "-version"],
+              check=True,
+              capture_output=True,
+              timeout=15,
+          )
+          PY
       - name: Compile Python sources
         run: python3 -m compileall -q plugins scripts tests
       - name: Test setup and runtime

@@ -792,6 +792,94 @@ class RuntimeInstallTests(unittest.TestCase):
             )
             self.assertEqual(manifest["version"], "1.2.3+codex.commit-abc123")
 
+    def test_runtime_dependency_is_prepared_before_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self.make_source(root)
+            installer = (
+                source
+                / "plugins"
+                / "codex-telegram-bridge"
+                / "scripts"
+                / "install_dependencies.py"
+            )
+            installer.parent.mkdir(parents=True)
+            installer.write_text("print('ready')\n", encoding="utf-8")
+            app = root / "Application Support/PermaEvidenceCodex"
+            completed = mock.Mock(returncode=0, stdout="ready\n", stderr="")
+            with mock.patch.object(runtime_install, "APP_SUPPORT_ROOT", app), mock.patch.object(
+                runtime_install, "VERSIONS_DIR", app / "versions"
+            ), mock.patch.object(
+                runtime_install, "CURRENT_LINK", app / "current"
+            ), mock.patch.object(
+                runtime_install.subprocess, "run", return_value=completed
+            ) as run_process:
+                current = runtime_install.install_runtime(
+                    source,
+                    cachebuster="commit-with-dependency",
+                )
+
+            installed = current.resolve()
+            run_process.assert_called_once()
+            dependency_command = run_process.call_args.args[0]
+            self.assertEqual(
+                dependency_command[0],
+                runtime_install.sys.executable,
+            )
+            self.assertEqual(
+                Path(dependency_command[1]).resolve(),
+                (
+                    installed
+                    / "plugins"
+                    / "codex-telegram-bridge"
+                    / "scripts"
+                    / "install_dependencies.py"
+                ).resolve(),
+            )
+            self.assertEqual(
+                run_process.call_args.kwargs,
+                {
+                    "capture_output": True,
+                    "text": True,
+                    "check": False,
+                    "timeout": 300,
+                },
+            )
+            self.assertTrue(current.is_symlink())
+
+    def test_failed_runtime_dependency_does_not_activate_release(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self.make_source(root)
+            installer = (
+                source
+                / "plugins"
+                / "codex-telegram-bridge"
+                / "scripts"
+                / "install_dependencies.py"
+            )
+            installer.parent.mkdir(parents=True)
+            installer.write_text("raise SystemExit(1)\n", encoding="utf-8")
+            app = root / "Application Support/PermaEvidenceCodex"
+            failed = mock.Mock(returncode=1, stdout="", stderr="pip failed")
+            with mock.patch.object(runtime_install, "APP_SUPPORT_ROOT", app), mock.patch.object(
+                runtime_install, "VERSIONS_DIR", app / "versions"
+            ), mock.patch.object(
+                runtime_install, "CURRENT_LINK", app / "current"
+            ), mock.patch.object(
+                runtime_install.subprocess, "run", return_value=failed
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Could not prepare Telegram voice transcription",
+                ):
+                    runtime_install.install_runtime(
+                        source,
+                        cachebuster="commit-broken-dependency",
+                    )
+
+            self.assertFalse((app / "current").exists())
+
     def test_runtime_install_reuses_same_cachebuster_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

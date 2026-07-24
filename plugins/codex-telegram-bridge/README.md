@@ -511,14 +511,22 @@ These tools default to the currently active Telegram chat tracked by the bridge,
 
 ## Voice Transcription
 
-Voice transcription uses OpenAI `gpt-4o-transcribe`. Telegram voice notes often arrive as `.oga` / Ogg Opus files, so the bridge converts them to `.mp3` with `ffmpeg` before sending them to the transcription API.
+Voice transcription uses OpenAI `gpt-4o-transcribe`. Telegram voice notes
+often arrive as `.oga` / Ogg Opus files, which are not among OpenAI's
+documented transcription upload formats. The bridge therefore converts them
+to `.mp3` with FFmpeg before sending them to the API.
 
 If transcription fails, the bridge does not silently pass a placeholder to
 Codex. It tells the user that the voice note was not processed, records the
 specific failure category for `/health`, and reports when transcription works
 again. Repeated failures remain visible without repeating the full diagnostic.
 
-Install `ffmpeg` on the machine running the bridge if you want Telegram voice-note transcription to work reliably.
+Setup first checks for a working system `ffmpeg`. If none is available, it
+installs a pinned, platform-specific private FFmpeg helper under
+`~/.codex/telegram-bridge/python/`; this requires no Homebrew, `apt`, `sudo`,
+or system-wide package change. The updater performs the same check, and
+`bridge.py doctor` plus Telegram `/health` report a missing converter
+explicitly.
 
 ## Reminders
 

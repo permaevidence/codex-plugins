@@ -36,6 +36,7 @@ from lib.telegram_api import (
     telegram_request,
 )
 from lib.gmail_imap import GmailImapError, poll_unread_messages
+from lib.audio_tools import ffmpeg_status, resolve_ffmpeg_executable
 from lib.telegram_common import (
     CONFIG_FILE,
     INBOX_DIR,
@@ -654,9 +655,21 @@ def transcribe_audio(
 
     suffix = Path(filename or "audio").suffix.lower()
     if mime_type == "audio/ogg" or suffix in {".oga", ".ogg"}:
-        converted = convert_audio_for_transcription(file_bytes, suffix or ".oga")
-        if converted is not None:
-            file_bytes, filename, mime_type = converted
+        try:
+            file_bytes, filename, mime_type = convert_audio_for_transcription(
+                file_bytes,
+                suffix or ".oga",
+            )
+        except RuntimeError as exc:
+            detail = str(exc)
+            changed = set_component_health(
+                "transcription",
+                "error",
+                category="audio_conversion",
+                detail=detail,
+            )
+            notify_transcription_failure(on_notice, detail, changed=changed)
+            return None
 
     fields = {"model": "gpt-4o-transcribe"}
     payload, boundary = encode_multipart(fields, file_bytes, filename, mime_type)
@@ -714,7 +727,13 @@ def transcribe_audio(
     return None
 
 
-def convert_audio_for_transcription(file_bytes: bytes, suffix: str) -> tuple[bytes, str, str] | None:
+def convert_audio_for_transcription(file_bytes: bytes, suffix: str) -> tuple[bytes, str, str]:
+    ffmpeg = resolve_ffmpeg_executable()
+    if not ffmpeg:
+        raise RuntimeError(
+            "The Telegram voice-note converter is missing. Rerun the setup wizard "
+            "to install its private FFmpeg helper, then resend this voice message."
+        )
     try:
         with tempfile.TemporaryDirectory(prefix="telegram-audio-") as tmp_dir:
             source = Path(tmp_dir) / f"input{suffix}"
@@ -722,7 +741,7 @@ def convert_audio_for_transcription(file_bytes: bytes, suffix: str) -> tuple[byt
             source.write_bytes(file_bytes)
             proc = subprocess.run(
                 [
-                    "ffmpeg",
+                    ffmpeg,
                     "-nostdin",
                     "-y",
                     "-loglevel",
@@ -737,11 +756,22 @@ def convert_audio_for_transcription(file_bytes: bytes, suffix: str) -> tuple[byt
                 timeout=120,
             )
             if proc.returncode != 0 or not target.exists():
-                return None
+                error = (proc.stderr or "").strip()
+                suffix_detail = f" ({error[:240]})" if error else ""
+                raise RuntimeError(
+                    "FFmpeg could not convert this Telegram OGG/Opus voice note"
+                    f"{suffix_detail}."
+                )
             converted = target.read_bytes()
             return converted, target.name, "audio/mpeg"
-    except Exception:
-        return None
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "FFmpeg timed out while converting this Telegram voice note."
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"FFmpeg could not process this Telegram voice note: {exc}"
+        ) from exc
 
 
 def list_generated_images(thread_id: str) -> list[str]:
@@ -2166,7 +2196,10 @@ def compact_health_summary() -> str:
     elif memory["health"].get("status") == "error":
         problems.append("memory API retrying")
     transcription = component_health("transcription")
-    if transcription.get("status") == "error":
+    converter_ok, _ = ffmpeg_status()
+    if not converter_ok:
+        problems.append("voice-note converter missing")
+    elif transcription.get("status") == "error":
         problems.append("voice transcription unavailable")
     codex_health = component_health("codex")
     if codex_health.get("status") == "error":
@@ -2241,7 +2274,11 @@ def health_text(
         lines.append("✅ Memory summaries: ready")
 
     transcription = component_health("transcription")
-    if transcription.get("status") == "error":
+    converter_ok, converter_detail = ffmpeg_status()
+    if not converter_ok:
+        lines.append(f"❌ Voice transcription: {converter_detail}")
+        lines.append(f"   Repair it by rerunning: {setup_repair_command()}")
+    elif transcription.get("status") == "error":
         lines.append(f"❌ Voice transcription: {transcription.get('detail') or 'unavailable'}")
         lines.append(
             "   Text messages still work. Check API billing or rerun setup to replace the OpenAI key, then resend the voice message."

@@ -34,6 +34,7 @@ if str(ROOT_SCRIPTS) not in sys.path:
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 from lib.gmail_imap import probe_imap
+from lib.audio_tools import ffmpeg_status
 from jsonrpc_io import JsonRpcLineReader
 from macos_permissions import codex_full_disk_access_status, codex_permission_installation
 from platform_support import (
@@ -726,6 +727,8 @@ def doctor(
     checks.append(("Telegram .env", ENV_FILE.exists(), str(ENV_FILE) if ENV_FILE.exists() else "missing"))
     checks.append(("TELEGRAM_BOT_TOKEN set", "TELEGRAM_BOT_TOKEN" in env_values, "set" if "TELEGRAM_BOT_TOKEN" in env_values else "missing"))
     checks.append(("Telegram OPENAI_API_KEY set", "OPENAI_API_KEY" in env_values, "set" if "OPENAI_API_KEY" in env_values else "missing; voice transcription will not work"))
+    converter_ok, converter_detail = ffmpeg_status()
+    checks.append(("Telegram voice-note converter", converter_ok, converter_detail))
     if config.get("enable_email_notifications"):
         gmail_email = _env_value(ENV_FILE, "GMAIL_IMAP_EMAIL")
         gmail_password = _env_value(ENV_FILE, "GMAIL_IMAP_APP_PASSWORD")

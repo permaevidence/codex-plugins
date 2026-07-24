@@ -713,6 +713,50 @@ class UpdateAnnouncementTests(unittest.TestCase):
 
 
 class HealthVisibilityTests(unittest.TestCase):
+    def test_ogg_transcription_stops_before_api_when_converter_is_missing(self):
+        bridge = load_bridge_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            health_file = Path(tmpdir) / "health.json"
+            notices = []
+            with mock.patch.object(bridge, "HEALTH_STATE_FILE", health_file), mock.patch.object(
+                bridge,
+                "resolve_ffmpeg_executable",
+                return_value=None,
+            ), mock.patch.object(bridge.urllib.request, "urlopen") as urlopen:
+                result = bridge.transcribe_audio(
+                    b"ogg-opus",
+                    "voice.ogg",
+                    "audio/ogg",
+                    "sk-test",
+                    on_notice=notices.append,
+                )
+
+            self.assertIsNone(result)
+            urlopen.assert_not_called()
+            health = json.loads(health_file.read_text(encoding="utf-8"))
+            self.assertEqual(
+                health["components"]["transcription"]["category"],
+                "audio_conversion",
+            )
+            self.assertIn("setup wizard", notices[0])
+
+    def test_ogg_conversion_uses_resolved_ffmpeg_and_returns_mp3(self):
+        bridge = load_bridge_module()
+
+        def convert(command, **_kwargs):
+            Path(command[-1]).write_bytes(b"mp3")
+            return mock.Mock(returncode=0, stderr="")
+
+        with mock.patch.object(
+            bridge,
+            "resolve_ffmpeg_executable",
+            return_value="/private/converter/ffmpeg",
+        ), mock.patch.object(bridge.subprocess, "run", side_effect=convert) as run_process:
+            converted = bridge.convert_audio_for_transcription(b"ogg", ".ogg")
+
+        self.assertEqual(converted, (b"mp3", "transcription.mp3", "audio/mpeg"))
+        self.assertEqual(run_process.call_args.args[0][0], "/private/converter/ffmpeg")
+
     def test_transcription_retries_transient_failure_then_succeeds(self):
         bridge = load_bridge_module()
 
@@ -820,6 +864,8 @@ class HealthVisibilityTests(unittest.TestCase):
                 bridge, "MEMORY_TASK_FILE", memory_task
             ), mock.patch.object(bridge, "MEMORY_PID_FILE", memory_pid), mock.patch.object(
                 bridge, "UPDATE_STATE_FILE", root / "update.json"
+            ), mock.patch.object(
+                bridge, "ffmpeg_status", return_value=(True, "test converter")
             ):
                 text = bridge.health_text()
             self.assertIn("Memory summaries: parked", text)
@@ -857,6 +903,8 @@ class HealthVisibilityTests(unittest.TestCase):
                 bridge, "MEMORY_PID_FILE", memory_dir / "worker.pid"
             ), mock.patch.object(
                 bridge, "UPDATE_STATE_FILE", root / "update.json"
+            ), mock.patch.object(
+                bridge, "ffmpeg_status", return_value=(True, "test converter")
             ):
                 text = bridge.health_text()
                 compact = bridge.compact_health_summary()

@@ -19,7 +19,7 @@ Requirements:
 - A local clone of this repository.
 - For Telegram: a Telegram bot token from BotFather.
 - `OPENAI_API_KEY` for high-quality memory summaries and Telegram voice transcription.
-- Optional: `ffmpeg` for Telegram voice notes.
+- Telegram voice-note conversion is installed automatically when a working system `ffmpeg` is unavailable.
 - Optional Google integration: connect OpenAI's official Gmail and Google Calendar apps. No custom Google Cloud project is required.
 - Optional proactive email notices: Google 2-Step Verification plus a Gmail app password.
 - Optional calendar context: one or more private Google Calendar “Secret address in iCal format” URLs.
@@ -473,7 +473,7 @@ Telegram bridge:
 - Optional `GMAIL_IMAP_EMAIL` and `GMAIL_IMAP_APP_PASSWORD` for proactive read-only unread-email notices.
 - `~/.codex/telegram-bridge/config.json`
 - `owner_chat_id` in `config.json` if you want owner-only notifications like email/version monitor.
-- Optional `ffmpeg` for Telegram voice-note transcription.
+- A working system `ffmpeg`, or the pinned private converter installed automatically by setup.
 - Optional official Gmail and Google Calendar Codex plugins for interactive reads and actions.
 - Review the Telegram README security notes before using `dangerFullAccess` and `network_access = true` on anything other than a trusted dedicated machine.
 
