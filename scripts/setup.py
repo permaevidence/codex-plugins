@@ -1132,35 +1132,74 @@ def guide_macos_full_disk_access(plan: dict[str, object]) -> None:
     print("macOS does not allow this wizard to grant the permission silently.")
     print("You will make the final choice in System Settings.")
     print()
-    print("For each path below:")
-    print("  1. In Full Disk Access, click +.")
-    print("  2. In the file picker, press Command-Shift-G.")
-    print("  3. Paste the complete path, click Open, and enable its switch.")
-    for target in targets:
-        print()
-        print(f"     {target}")
+    print(bold("Important: Codex will not already appear in the list."))
+    print("The wizard will guide you through adding both required executables")
+    print("manually, one at a time. For each executable:")
+    print()
+    print("  1. The wizard copies its exact path to the clipboard.")
+    print("  2. In Full Disk Access, click +.")
+    print("  3. In the file picker, press Command-Shift-G.")
+    print("  4. Press Command-V to paste the path, then click Open.")
+    print("  5. Make sure the new entry's switch is enabled.")
+    print()
+    prompt("Read these steps, then press Enter to begin")
 
+    pending_targets = targets
     while True:
-        # Reveal the hidden version directory first, then leave System Settings
-        # in front. ``open`` only navigates; the user still controls the grant.
-        subprocess.run(
-            ["open", "-R", str(targets[-1])],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        opened = subprocess.run(
-            ["open", settings_url],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if opened.returncode != 0:
+        for index, target in enumerate(pending_targets, start=1):
+            executable_name = (
+                "Codex CLI"
+                if target.name == "codex"
+                else "Codex code-mode helper"
+            )
             print()
-            print("System Settings could not be opened automatically. Open:")
-            print("  System Settings → Privacy & Security → Full Disk Access")
+            print(bold(f"Add {executable_name} ({index} of {len(pending_targets)})"))
+            print("Exact path:")
+            print(f"  {target}")
+            try:
+                copied = subprocess.run(
+                    ["pbcopy"],
+                    input=str(target),
+                    text=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except OSError:
+                copied = None
+            if copied is not None and copied.returncode == 0:
+                print(success("The path is copied. In the + file picker, press Command-Shift-G,"))
+                print("then Command-V, click Open, and enable the switch.")
+            else:
+                print(warning("The path could not be copied automatically."))
+                print("Copy the complete path shown above before continuing.")
 
-        prompt("Return here after both switches are enabled, then press Enter")
+            prompt("Press Enter to open Finder and Full Disk Access")
+
+            # Reveal this exact hidden executable as a second visual aid, then
+            # leave System Settings in front. ``open`` only navigates; the user
+            # still controls whether the executable is added and enabled.
+            subprocess.run(
+                ["open", "-R", str(target)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            opened = subprocess.run(
+                ["open", settings_url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if opened.returncode != 0:
+                print()
+                print("System Settings could not be opened automatically. Open:")
+                print("  System Settings → Privacy & Security → Full Disk Access")
+
+            prompt(
+                f"Add and enable {target.name}, return to this window, then press Enter"
+            )
+
         status = codex_full_disk_access_status(targets)
         plan["status"] = status
         if status.get("state") == "granted":
@@ -1174,8 +1213,10 @@ def guide_macos_full_disk_access(plan: dict[str, object]) -> None:
             missing = [Path(path) for path in list(status.get("missing") or [])]
             for path in missing:
                 print(f"  Missing: {path}")
+            pending_targets = missing
         else:
             print(warning(str(status.get("detail") or "The permission could not be inspected automatically.")))
+            pending_targets = targets
 
         if prompt_yes_no(
             "Are both exact paths visibly listed and enabled in Full Disk Access?",

@@ -106,9 +106,13 @@ separate. The first controls the Codex sandbox; it cannot override macOS
 privacy protection for Desktop, Documents, Mail, Messages, and other protected
 data. In whole-computer mode the wizard detects the active native `codex` and
 `codex-code-mode-host` binaries, verifies both Apple signatures as OpenAI,
-shows their exact paths, opens the Full Disk Access pane, and waits for the
-user to enable both entries. macOS requires that explicit user action; the
-wizard never edits the TCC privacy database.
+and guides their manual addition one at a time. These command-line executables
+do not normally appear in the Full Disk Access list beforehand. The wizard
+copies each exact version-specific path to the clipboard, opens the correct
+pane, tells the user to click **+**, paste the path with
+**Command-Shift-G** then **Command-V**, and waits for both entries to be
+enabled. macOS requires that explicit user action; the wizard never edits the
+TCC privacy database.
 
 Native Codex releases live under versioned paths. Rerun the wizard's
 **Time zone, permissions, model...** section after a Codex application update

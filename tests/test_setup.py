@@ -444,21 +444,32 @@ class SetupWizardTests(unittest.TestCase):
             "detail": "granted",
         }
         completed = mock.Mock(returncode=0)
+        output = io.StringIO()
         with mock.patch.object(
             setup_wizard.subprocess, "run", return_value=completed
         ) as run_process, mock.patch.object(
             setup_wizard, "prompt", return_value=""
         ), mock.patch.object(
             setup_wizard, "codex_full_disk_access_status", return_value=granted
-        ), contextlib.redirect_stdout(io.StringIO()):
+        ), contextlib.redirect_stdout(output):
             setup_wizard.guide_macos_full_disk_access(plan)
 
         commands = [call.args[0] for call in run_process.call_args_list]
+        self.assertEqual(commands.count(["pbcopy"]), 2)
+        self.assertIn(["open", "-R", str(codex)], commands)
         self.assertIn(["open", "-R", str(helper)], commands)
         self.assertIn(
             ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"],
             commands,
         )
+        clipboard_values = [
+            call.kwargs["input"]
+            for call in run_process.call_args_list
+            if call.args[0] == ["pbcopy"]
+        ]
+        self.assertEqual(clipboard_values, [str(codex), str(helper)])
+        self.assertIn("will not already appear in the list", output.getvalue())
+        self.assertIn("one at a time", output.getvalue())
         self.assertEqual(plan["status"], granted)
 
     def test_local_capabilities_block_is_written_and_replaced(self) -> None:
