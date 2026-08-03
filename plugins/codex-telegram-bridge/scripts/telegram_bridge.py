@@ -1369,7 +1369,10 @@ class CodexAppServerClient:
         state = self._turns.get(turn_id)
         if not state:
             return False
-        self.request("turn/interrupt", {"threadId": state["thread_id"]})
+        self.request(
+            "turn/interrupt",
+            {"threadId": state["thread_id"], "turnId": turn_id},
+        )
         save_runtime_state(
             {
                 **load_runtime_state(),

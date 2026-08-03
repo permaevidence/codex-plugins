@@ -207,6 +207,24 @@ class AppServerResilienceTests(unittest.TestCase):
         self.assertNotIn("model", params)
         self.assertNotIn("effort", params)
 
+    def test_interrupt_turn_sends_active_thread_and_turn_ids(self):
+        bridge = load_bridge_module()
+        client = object.__new__(bridge.CodexAppServerClient)
+        client._active_turn_by_chat = {"123": "turn-1"}
+        client._turns = {"turn-1": {"thread_id": "thread-1"}}
+        client.request = mock.Mock(return_value={})
+
+        with mock.patch.object(bridge, "load_runtime_state", return_value={}), mock.patch.object(
+            bridge, "save_runtime_state"
+        ) as save_state:
+            self.assertTrue(client.interrupt_turn("123"))
+
+        client.request.assert_called_once_with(
+            "turn/interrupt",
+            {"threadId": "thread-1", "turnId": "turn-1"},
+        )
+        self.assertEqual(save_state.call_args.args[0]["last_turn_status"], "interruptRequested")
+
 
 class TurnRecoveryTests(unittest.TestCase):
     def test_rate_limit_retry_uses_exhausted_window_reset(self):
