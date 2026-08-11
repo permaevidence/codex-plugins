@@ -140,6 +140,7 @@ def codex_permission_installation(codex_cmd: str | None = None) -> dict[str, Any
 def codex_full_disk_access_status(
     targets: list[Path],
     *,
+    bundle_ids: list[str] | None = None,
     database: Path = SYSTEM_TCC_DATABASE,
 ) -> dict[str, Any]:
     """Return whether the requested exact binary paths have Full Disk Access.
@@ -150,19 +151,20 @@ def codex_full_disk_access_status(
     """
 
     normalized_targets = [Path(os.path.realpath(path)).expanduser() for path in targets]
-    if not normalized_targets:
+    normalized_bundle_ids = [str(value).strip() for value in (bundle_ids or []) if str(value).strip()]
+    if not normalized_targets and not normalized_bundle_ids:
         return {
             "state": "not_applicable",
             "authorized": [],
             "missing": [],
-            "detail": "No native Codex permission targets were found.",
+            "detail": "No macOS Full Disk Access targets were found.",
         }
 
     try:
         connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
         try:
             rows = connection.execute(
-                "SELECT client, auth_value FROM access WHERE service = ?",
+                "SELECT client, client_type, auth_value FROM access WHERE service = ?",
                 (FULL_DISK_ACCESS_SERVICE,),
             ).fetchall()
         finally:
@@ -171,37 +173,49 @@ def codex_full_disk_access_status(
         return {
             "state": "unknown",
             "authorized": [],
-            "missing": normalized_targets,
+            "missing": [*normalized_targets, *normalized_bundle_ids],
             "detail": (
                 "macOS would not let this process inspect the protected privacy "
                 f"database ({type(exc).__name__}). Confirm the entries visually."
             ),
         }
 
-    decisions = {
+    path_decisions = {
         os.path.realpath(str(client)): int(auth_value)
-        for client, auth_value in rows
-        if client
+        for client, client_type, auth_value in rows
+        if client and int(client_type) == 1
     }
-    authorized = [
+    bundle_decisions = {
+        str(client): int(auth_value)
+        for client, client_type, auth_value in rows
+        if client and int(client_type) == 0
+    }
+    authorized_paths = [
         path
         for path in normalized_targets
-        if decisions.get(os.path.realpath(str(path))) == 2
+        if path_decisions.get(os.path.realpath(str(path))) == 2
     ]
-    missing = [path for path in normalized_targets if path not in authorized]
+    authorized_bundle_ids = [
+        value for value in normalized_bundle_ids if bundle_decisions.get(value) == 2
+    ]
+    authorized: list[Path | str] = [*authorized_paths, *authorized_bundle_ids]
+    missing: list[Path | str] = [
+        *[path for path in normalized_targets if path not in authorized_paths],
+        *[value for value in normalized_bundle_ids if value not in authorized_bundle_ids],
+    ]
     if not missing:
         return {
             "state": "granted",
             "authorized": authorized,
             "missing": [],
-            "detail": f"Full Disk Access is enabled for all {len(authorized)} Codex executables.",
+            "detail": f"Full Disk Access is enabled for all {len(authorized)} required identities.",
         }
     return {
         "state": "missing",
         "authorized": authorized,
         "missing": missing,
         "detail": (
-            f"{len(missing)} of {len(normalized_targets)} current Codex "
-            "executables are not authorized."
+            f"{len(missing)} of {len(normalized_targets) + len(normalized_bundle_ids)} required "
+            "macOS identities are not authorized."
         ),
     }

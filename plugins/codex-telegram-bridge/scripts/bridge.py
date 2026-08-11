@@ -38,6 +38,12 @@ from lib.audio_tools import ffmpeg_status
 from jsonrpc_io import JsonRpcLineReader
 from codex_runtime import stable_codex_command, stable_runtime_status
 from macos_permissions import codex_full_disk_access_status, codex_permission_installation
+from macos_bridge_host import (
+    BRIDGE_HOST_EXECUTABLE,
+    BridgeHostError,
+    bridge_host_status,
+    ensure_macos_bridge_host,
+)
 from platform_support import (
     LAUNCHD_LABEL,
     SYSTEMD_SERVICE_NAME,
@@ -482,11 +488,16 @@ def install_service() -> int:
         return 1
 
     if PLATFORM_FAMILY == "macos":
+        try:
+            host = ensure_macos_bridge_host()
+        except BridgeHostError as exc:
+            print(f"Could not prepare the permanent macOS bridge host: {exc}", file=sys.stderr)
+            return 1
         LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
         payload = {
             "Label": SERVICE_LABEL,
-            "ProgramArguments": [bash, str(START_SCRIPT)],
-            "WorkingDirectory": str(PLUGIN_ROOT),
+            "ProgramArguments": [str(host["executable"])],
+            "WorkingDirectory": str(Path.home()),
             "RunAtLoad": True,
             "KeepAlive": True,
             "ProcessType": "Background",
@@ -499,6 +510,7 @@ def install_service() -> int:
         temp.chmod(0o600)
         temp.replace(LAUNCH_AGENT_FILE)
         print(f"Installed LaunchAgent: {LAUNCH_AGENT_FILE}")
+        print(f"Permanent bridge permission identity: {host['bundle']}")
         return start_launch_service()
 
     SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
@@ -675,6 +687,26 @@ def doctor(
             timezone_detail = telegram_timezone or "missing"
         checks.append(("Telegram timezone configured", timezone_ok, timezone_detail))
         if PLATFORM_FAMILY == "macos" and config.get("sandbox_mode") == "dangerFullAccess":
+            host = bridge_host_status()
+            checks.append(
+                (
+                    "permanent macOS bridge host",
+                    host.get("state") == "ready",
+                    str(host.get("detail") or "not ready"),
+                )
+            )
+            try:
+                launch_payload = plistlib.loads(LAUNCH_AGENT_FILE.read_bytes()) if LAUNCH_AGENT_FILE.is_file() else {}
+            except (OSError, plistlib.InvalidFileException):
+                launch_payload = {}
+            launch_arguments = list(launch_payload.get("ProgramArguments") or [])
+            checks.append(
+                (
+                    "LaunchAgent uses permanent bridge host",
+                    launch_arguments == [str(BRIDGE_HOST_EXECUTABLE)],
+                    " ".join(str(item) for item in launch_arguments) or "not configured",
+                )
+            )
             stable_status = stable_runtime_status()
             checks.append(
                 (
@@ -701,13 +733,15 @@ def doctor(
             installation_kind = str(installation.get("kind") or "")
             targets = list(installation.get("targets") or [])
             if installation_kind == "native" and len(targets) >= 2:
-                full_disk = codex_full_disk_access_status(targets)
+                full_disk = codex_full_disk_access_status(
+                    targets, bundle_ids=[str(host.get("bundle_id") or "")]
+                )
                 if full_disk.get("state") == "granted":
                     checks.append(
                         (
                             "macOS Full Disk Access",
                             True,
-                            "enabled for Codex and codex-code-mode-host",
+                            "enabled for Codex, codex-code-mode-host, and the bridge host",
                         )
                     )
                 elif full_disk.get("state") == "unknown":

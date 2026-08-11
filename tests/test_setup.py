@@ -347,10 +347,13 @@ class SetupWizardTests(unittest.TestCase):
             "helper": source_helper,
             "targets": [source_codex, source_helper],
         }
+        bridge_bundle = Path("/stable/PermaEvidence Codex Bridge.app")
         with mock.patch.object(setup_wizard, "platform_family", return_value="macos"), mock.patch.object(
             setup_wizard, "codex_permission_installation", return_value=installation
         ), mock.patch.object(setup_wizard, "stable_codex_targets", return_value=stable_targets), mock.patch.object(
             setup_wizard, "stable_runtime_status", return_value={"state": "missing"}
+        ), mock.patch.object(
+            setup_wizard, "BRIDGE_HOST_BUNDLE", bridge_bundle
         ), mock.patch.object(
             setup_wizard,
             "codex_full_disk_access_status",
@@ -360,7 +363,7 @@ class SetupWizardTests(unittest.TestCase):
 
         self.assertTrue(plan["prepare_stable"])
         self.assertEqual(plan["source_command"], str(source_codex))
-        self.assertEqual(plan["targets"], stable_targets)
+        self.assertEqual(plan["targets"], [*stable_targets, bridge_bundle])
 
     def test_unverified_native_binaries_are_never_permission_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -405,13 +408,14 @@ class SetupWizardTests(unittest.TestCase):
             database = root / "TCC.db"
             connection = sqlite3.connect(database)
             connection.execute(
-                "CREATE TABLE access (service TEXT, client TEXT, auth_value INTEGER)"
+                "CREATE TABLE access (service TEXT, client TEXT, client_type INTEGER, auth_value INTEGER)"
             )
             connection.executemany(
-                "INSERT INTO access VALUES (?, ?, ?)",
+                "INSERT INTO access VALUES (?, ?, ?, ?)",
                 [
-                    ("kTCCServiceSystemPolicyAllFiles", str(codex), 2),
-                    ("kTCCServiceSystemPolicyAllFiles", str(helper), 2),
+                    ("kTCCServiceSystemPolicyAllFiles", str(codex), 1, 2),
+                    ("kTCCServiceSystemPolicyAllFiles", str(helper), 1, 2),
+                    ("kTCCServiceSystemPolicyAllFiles", setup_wizard.BRIDGE_HOST_BUNDLE_ID, 0, 2),
                 ],
             )
             connection.commit()
@@ -419,6 +423,7 @@ class SetupWizardTests(unittest.TestCase):
 
             granted = setup_wizard.codex_full_disk_access_status(
                 [codex, helper],
+                bundle_ids=[setup_wizard.BRIDGE_HOST_BUNDLE_ID],
                 database=database,
             )
             next_release = root / "release-3/bin/codex"
@@ -426,6 +431,7 @@ class SetupWizardTests(unittest.TestCase):
             next_release.write_text("binary", encoding="utf-8")
             changed = setup_wizard.codex_full_disk_access_status(
                 [next_release, helper],
+                bundle_ids=[setup_wizard.BRIDGE_HOST_BUNDLE_ID],
                 database=database,
             )
 
@@ -472,13 +478,14 @@ class SetupWizardTests(unittest.TestCase):
     def test_full_disk_access_guide_opens_settings_and_accepts_verified_grant(self) -> None:
         codex = Path("/private/current/bin/codex")
         helper = codex.parent / "codex-code-mode-host"
+        bridge_bundle = Path("/stable/PermaEvidence Codex Bridge.app")
         plan: dict[str, object] = {
             "requested": True,
-            "targets": [codex, helper],
+            "targets": [codex, helper, bridge_bundle],
         }
         granted = {
             "state": "granted",
-            "authorized": [codex, helper],
+            "authorized": [codex, helper, setup_wizard.BRIDGE_HOST_BUNDLE_ID],
             "missing": [],
             "detail": "granted",
         }
@@ -494,9 +501,10 @@ class SetupWizardTests(unittest.TestCase):
             setup_wizard.guide_macos_full_disk_access(plan)
 
         commands = [call.args[0] for call in run_process.call_args_list]
-        self.assertEqual(commands.count(["pbcopy"]), 2)
+        self.assertEqual(commands.count(["pbcopy"]), 3)
         self.assertIn(["open", "-R", str(codex)], commands)
         self.assertIn(["open", "-R", str(helper)], commands)
+        self.assertIn(["open", "-R", str(bridge_bundle)], commands)
         self.assertIn(
             ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"],
             commands,
@@ -506,7 +514,7 @@ class SetupWizardTests(unittest.TestCase):
             for call in run_process.call_args_list
             if call.args[0] == ["pbcopy"]
         ]
-        self.assertEqual(clipboard_values, [str(codex), str(helper)])
+        self.assertEqual(clipboard_values, [str(codex), str(helper), str(bridge_bundle)])
         self.assertIn("will not already appear in the list", output.getvalue())
         self.assertIn("one at a time", output.getvalue())
         self.assertEqual(plan["status"], granted)

@@ -48,7 +48,7 @@ cd codex-plugins-main
 python3 scripts/setup.py
 ```
 
-3. Follow the wizard. Paste both keys when asked; if unsure about any choice, press Enter for the recommended option. On macOS, whole-computer mode also offers to open Full Disk Access so you can explicitly approve native Codex and its code-mode helper.
+3. Follow the wizard. Paste both keys when asked; if unsure about any choice, press Enter for the recommended option. On macOS, whole-computer mode also offers to open Full Disk Access so you can explicitly approve native Codex, its code-mode helper, and the permanent background-bridge app.
 4. If you selected Google integration, the wizard installs both official plugins automatically. Follow its printed steps: run `codex`, type `/apps`, connect Gmail, connect Google Calendar, then leave Codex with `/quit`. This is the only required Google authorization step.
 5. When prompted, message your new Telegram bot, return to Terminal, press Enter, and approve the Telegram user shown.
 6. In Telegram, send this only after Google authorization and pairing are complete:
@@ -107,12 +107,15 @@ privacy protection for Desktop, Documents, Mail, Messages, and other protected
 data. In whole-computer mode the wizard detects the official standalone
 package, verifies both Apple signatures as OpenAI, and copies the complete
 package into a stable actual directory (not a symlink to a versioned release).
-It then guides manual addition of the stable `codex` and
-`codex-code-mode-host` paths one at a time. These command-line executables do
-not normally appear in the Full Disk Access list beforehand. The wizard copies
-each exact stable path to the clipboard, opens the correct
+It also creates a tiny, immutable `PermaEvidence Codex Bridge.app` that remains
+the responsible macOS identity for the background LaunchAgent. This prevents
+the bridge's Python interpreter from becoming the privacy identity and losing
+access when Python or Codex changes. The wizard then guides manual addition of
+the stable `codex`, `codex-code-mode-host`, and bridge-app paths one at a time.
+These identities do not normally appear in the Full Disk Access list
+beforehand. The wizard copies each exact stable path to the clipboard, opens the correct
 pane, tells the user to click **+**, paste the path with
-**Command-Shift-G** then **Command-V**, and waits for both entries to be
+**Command-Shift-G** then **Command-V**, and waits for all three entries to be
 enabled. macOS requires that explicit user action; the wizard never edits the
 TCC privacy database.
 
@@ -120,7 +123,8 @@ Future Codex updates run through OpenAI's official standalone installer, then
 verify both executable signatures, the OpenAI team identifier, executable
 identifiers, and unchanged macOS designated requirements. The complete package
 is atomically exchanged at the same two paths and one prior package is retained
-for rollback. Routine updates should therefore preserve the original Full Disk
+for rollback. The bridge app is deliberately not replaced by routine plugin or
+Codex updates. Routine updates should therefore preserve all three Full Disk
 Access grants. A signing-requirement change is rejected instead of silently
 assuming the old authorization remains valid. The doctor reports an invalid or
 missing stable runtime, a bridge configured to use another path, or a missing
@@ -136,7 +140,7 @@ It configures:
 - the OpenAI API key, required for memory summaries and voice transcription
 - the user's IANA timezone, detected from the computer by default, so every clock and calendar heading agrees
 - the Codex sandbox level for Telegram sessions, defaulting to broad autonomous access
-- guided native Codex Full Disk Access approval on macOS when whole-computer mode is selected
+- guided native Codex and permanent bridge-host Full Disk Access approval on macOS when whole-computer mode is selected
 - stable OpenAI-signed Codex paths so normal macOS updates do not require repeated Full Disk Access grants
 - whether to start the bridge immediately
 - preserves an existing Telegram model selection, or inherits Codex's effective model and effort on the first setup

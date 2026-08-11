@@ -439,12 +439,18 @@ class LaunchAgentTests(unittest.TestCase):
                 operator, "stop_bridge", return_value=0
             ), mock.patch.object(operator, "start_launch_service", return_value=0), mock.patch.object(
                 operator, "PLATFORM_FAMILY", "macos"
+            ), mock.patch.object(
+                operator,
+                "ensure_macos_bridge_host",
+                return_value={"bundle": Path("/stable/PermaEvidence Codex Bridge.app"), "executable": Path("/stable/bridge-host")},
             ):
                 self.assertEqual(operator.install_service(), 0)
             payload = operator.plistlib.loads(plist.read_bytes())
             self.assertTrue(payload["RunAtLoad"])
             self.assertTrue(payload["KeepAlive"])
             self.assertEqual(payload["Label"], operator.SERVICE_LABEL)
+            self.assertEqual(payload["ProgramArguments"], ["/stable/bridge-host"])
+            self.assertNotIn("start_bridge.sh", " ".join(payload["ProgramArguments"]))
 
 
 class SystemdServiceTests(unittest.TestCase):

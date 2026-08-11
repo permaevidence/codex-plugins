@@ -211,7 +211,9 @@ When the bridge starts, it registers Telegram's native bot command menu. In Tele
   signatures and unchanged macOS designated requirements, atomically replace
   the complete Codex package at stable Full Disk Access paths, restart the
   bridge, run the doctor, and roll back to the prior package if activation
-  fails. The initial stable paths still require one explicit macOS grant.
+  fails. Initial setup requires explicit macOS grants for the two stable OpenAI
+  executables and the permanent `PermaEvidence Codex Bridge.app`; routine
+  plugin, Python, and Codex updates retain those identities.
 
 `/model` shows the current model/effort and opens Telegram inline buttons built
 from `codex debug models`, so the choices track the installed Codex CLI. You can

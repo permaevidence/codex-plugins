@@ -34,6 +34,12 @@ from codex_runtime import (
     sync_stable_codex_runtime,
 )
 from macos_permissions import codex_full_disk_access_status, codex_permission_installation
+from macos_bridge_host import (
+    BRIDGE_HOST_BUNDLE,
+    BRIDGE_HOST_BUNDLE_ID,
+    BridgeHostError,
+    ensure_macos_bridge_host,
+)
 from runtime_install import install_runtime, prune_old_versions
 
 
@@ -1108,19 +1114,21 @@ def resolve_macos_full_disk_access_plan(
         if offer_guidance:
             print()
             print(warning("macOS Full Disk Access"))
-            print(str(installation.get("detail") or "The native Codex executables could not be identified."))
+            print(str(source_installation.get("detail") or "The native Codex executables could not be identified."))
             print("The wizard will not guess which executable should receive this sensitive permission.")
         plan["review"] = "manual review needed — native Codex executables were not safely verified"
         return plan
 
     plan["prepare_stable"] = True
     plan["source_command"] = str(source_installation.get("codex") or "")
-    targets = stable_codex_targets()
-    plan["targets"] = targets
+    codex_targets = stable_codex_targets()
+    plan["codex_targets"] = codex_targets
+    plan["targets"] = [*codex_targets, BRIDGE_HOST_BUNDLE]
     stable_status = stable_runtime_status()
     if not offer_guidance and stable_status.get("state") != "ready":
         plan["prepare_stable"] = False
-        plan["targets"] = source_targets
+        plan["codex_targets"] = source_targets
+        plan["targets"] = [*source_targets, BRIDGE_HOST_BUNDLE]
         plan["review"] = "unchanged — rerun the permissions section to migrate to stable paths"
         return plan
     if stable_status.get("state") == "ready":
@@ -1130,13 +1138,13 @@ def resolve_macos_full_disk_access_plan(
             return plan
         plan["installation"] = installation
 
-    status = codex_full_disk_access_status(targets)
+    status = codex_full_disk_access_status(codex_targets, bundle_ids=[BRIDGE_HOST_BUNDLE_ID])
     plan["status"] = status
     if status.get("state") == "granted":
         if offer_guidance:
             print()
-            print("macOS Full Disk Access: already enabled for Codex and its code-mode helper.")
-        plan["review"] = "already enabled for both native Codex executables"
+            print("macOS Full Disk Access: already enabled for Codex, its helper, and the bridge host.")
+        plan["review"] = "already enabled for all three permanent identities"
         return plan
 
     if not offer_guidance:
@@ -1149,8 +1157,8 @@ def resolve_macos_full_disk_access_plan(
     print("still protects locations such as Desktop, Documents, Mail, Messages, and")
     print("some application data. macOS requires you to approve this separately.")
     print()
-    print("The wizard will use two stable OpenAI-signed executable paths:")
-    for target in targets:
+    print("The wizard will use two stable OpenAI-signed executables and one permanent bridge app:")
+    for target in list(plan["targets"]):
         print(f"  • {target}")
     print()
     print("Future updates are signature-checked and atomically replace the package at")
@@ -1161,7 +1169,7 @@ def resolve_macos_full_disk_access_plan(
     )
     plan["requested"] = requested
     plan["review"] = (
-        "open System Settings and guide approval for both executables"
+        "open System Settings and guide approval for three permanent identities"
         if requested
         else "skipped — protected macOS locations may remain inaccessible"
     )
@@ -1182,10 +1190,19 @@ def prepare_macos_stable_codex_runtime(plan: dict[str, object]) -> dict[str, obj
             str(installation.get("detail") or "The stable Codex executables failed signature verification.")
         )
     plan["installation"] = installation
-    plan["targets"] = list(result["targets"])
-    plan["status"] = codex_full_disk_access_status(list(result["targets"]))
+    try:
+        host = ensure_macos_bridge_host()
+    except BridgeHostError as exc:
+        raise RuntimeError(f"Could not prepare the permanent macOS bridge host: {exc}") from exc
+    plan["codex_targets"] = list(result["targets"])
+    plan["targets"] = [*list(result["targets"]), Path(host["bundle"])]
+    plan["status"] = codex_full_disk_access_status(
+        list(result["targets"]), bundle_ids=[BRIDGE_HOST_BUNDLE_ID]
+    )
     action = "Updated" if result.get("changed") else "Verified"
     print(f"{action} stable OpenAI-signed Codex {result.get('version')} at {result.get('root')}.")
+    host_action = "Created" if host.get("changed") else "Verified"
+    print(f"{host_action} permanent macOS bridge host at {host.get('bundle')}.")
     return result
 
 
@@ -1202,7 +1219,7 @@ def guide_macos_full_disk_access(plan: dict[str, object]) -> None:
     print("You will make the final choice in System Settings.")
     print()
     print(bold("Important: Codex will not already appear in the list."))
-    print("The wizard will guide you through adding both required executables")
+    print("The wizard will guide you through adding all three required identities")
     print("manually, one at a time. For each executable:")
     print()
     print("  1. The wizard copies its exact path to the clipboard.")
@@ -1216,11 +1233,12 @@ def guide_macos_full_disk_access(plan: dict[str, object]) -> None:
     pending_targets = targets
     while True:
         for index, target in enumerate(pending_targets, start=1):
-            executable_name = (
-                "Codex CLI"
-                if target.name == "codex"
-                else "Codex code-mode helper"
-            )
+            if target.name == "codex":
+                executable_name = "Codex CLI"
+            elif target.name == "codex-code-mode-host":
+                executable_name = "Codex code-mode helper"
+            else:
+                executable_name = "PermaEvidence Codex Bridge app"
             print()
             print(bold(f"Add {executable_name} ({index} of {len(pending_targets)})"))
             print("Exact path:")
@@ -1269,26 +1287,32 @@ def guide_macos_full_disk_access(plan: dict[str, object]) -> None:
                 f"Add and enable {target.name}, return to this window, then press Enter"
             )
 
-        status = codex_full_disk_access_status(targets)
+        codex_targets = [target for target in targets if target.suffix != ".app"]
+        status = codex_full_disk_access_status(
+            codex_targets, bundle_ids=[BRIDGE_HOST_BUNDLE_ID]
+        )
         plan["status"] = status
         if status.get("state") == "granted":
             print()
-            print(success("Full Disk Access is enabled for both Codex executables."))
+            print(success("Full Disk Access is enabled for Codex, its helper, and the bridge host."))
             return
 
         print()
         if status.get("state") == "missing":
-            print(warning("macOS has not reported both current paths as authorized."))
-            missing = [Path(path) for path in list(status.get("missing") or [])]
-            for path in missing:
+            print(warning("macOS has not reported all three permanent identities as authorized."))
+            missing_values = list(status.get("missing") or [])
+            missing_bundle = BRIDGE_HOST_BUNDLE_ID in missing_values
+            pending_targets = [Path(path) for path in missing_values if path != BRIDGE_HOST_BUNDLE_ID]
+            if missing_bundle:
+                pending_targets.append(BRIDGE_HOST_BUNDLE)
+            for path in pending_targets:
                 print(f"  Missing: {path}")
-            pending_targets = missing
         else:
             print(warning(str(status.get("detail") or "The permission could not be inspected automatically.")))
             pending_targets = targets
 
         if prompt_yes_no(
-            "Are both exact paths visibly listed and enabled in Full Disk Access?",
+            "Are all three entries visibly listed and enabled in Full Disk Access?",
             default=False,
         ):
             print("Continuing with your visual confirmation. Setup will restart the bridge")
