@@ -9,8 +9,8 @@ This plugin ports the Telegram control loop from `claude-telegram-plugin` to Cod
 - Starts, steers, and interrupts turns through `codex app-server`
 - Auto-approves command, file-change, and permission approval requests
 - Auto-answers structured `item/tool/requestUserInput` prompts with default options when possible
-- Supports `/help`, `/status`, `/model`, `/resume`, `/stop`, `/newsession`, and `/update`
-- Registers Telegram's native bot command menu for `/start`, `/help`, `/status`, `/model`, `/resume`, `/stop`, `/newsession`, and `/update`
+- Supports `/help`, `/status`, `/model`, `/resume`, `/stop`, `/newsession`, `/update`, and `/updatecodex`
+- Registers Telegram's native bot command menu for `/start`, `/help`, `/status`, `/model`, `/resume`, `/stop`, `/newsession`, `/update`, and `/updatecodex`
 - Supports DM pairing, allowlists, groups, mention policies, and mention regexes
 - Transcribes voice messages with OpenAI `gpt-4o-transcribe`
 - Forwards inbound photos and documents as downloaded local paths, with other Telegram attachments as downloadable file IDs
@@ -207,6 +207,11 @@ When the bridge starts, it registers Telegram's native bot command menu. In Tele
   crashes, and the restarted bridge sends a confirmation (or the rollback
   failure reason) to the owner chat. Updates initiated any other way get the
   same post-restart confirmation via `~/.codex/telegram-bridge/update_state.json`.
+- `/updatecodex` - run OpenAI's official standalone updater, verify the OpenAI
+  signatures and unchanged macOS designated requirements, atomically replace
+  the complete Codex package at stable Full Disk Access paths, restart the
+  bridge, run the doctor, and roll back to the prior package if activation
+  fails. The initial stable paths still require one explicit macOS grant.
 
 `/model` shows the current model/effort and opens Telegram inline buttons built
 from `codex debug models`, so the choices track the installed Codex CLI. You can

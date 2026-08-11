@@ -104,23 +104,29 @@ pairing steps instead.
 On macOS, Codex's `dangerFullAccess` setting and Apple's Full Disk Access are
 separate. The first controls the Codex sandbox; it cannot override macOS
 privacy protection for Desktop, Documents, Mail, Messages, and other protected
-data. In whole-computer mode the wizard detects the active native `codex` and
-`codex-code-mode-host` binaries, verifies both Apple signatures as OpenAI,
-and guides their manual addition one at a time. These command-line executables
-do not normally appear in the Full Disk Access list beforehand. The wizard
-copies each exact version-specific path to the clipboard, opens the correct
+data. In whole-computer mode the wizard detects the official standalone
+package, verifies both Apple signatures as OpenAI, and copies the complete
+package into a stable actual directory (not a symlink to a versioned release).
+It then guides manual addition of the stable `codex` and
+`codex-code-mode-host` paths one at a time. These command-line executables do
+not normally appear in the Full Disk Access list beforehand. The wizard copies
+each exact stable path to the clipboard, opens the correct
 pane, tells the user to click **+**, paste the path with
 **Command-Shift-G** then **Command-V**, and waits for both entries to be
 enabled. macOS requires that explicit user action; the wizard never edits the
 TCC privacy database.
 
-Native Codex releases live under versioned paths. Rerun the wizard's
-**Time zone, permissions, model...** section after a Codex application update
-if protected files stop working; it checks the current release paths and offers
-the same guided repair. The doctor also reports a pending permission step when
-it can confirm that either current path is missing. For npm Codex, the wizard
-does not recommend granting Full Disk Access to the shared Node runtime because
-that would authorize unrelated Node programs; use native Codex instead.
+Future Codex updates run through OpenAI's official standalone installer, then
+verify both executable signatures, the OpenAI team identifier, executable
+identifiers, and unchanged macOS designated requirements. The complete package
+is atomically exchanged at the same two paths and one prior package is retained
+for rollback. Routine updates should therefore preserve the original Full Disk
+Access grants. A signing-requirement change is rejected instead of silently
+assuming the old authorization remains valid. The doctor reports an invalid or
+missing stable runtime, a bridge configured to use another path, or a missing
+permission. For npm Codex, the wizard does not recommend granting Full Disk
+Access to the shared Node runtime because that would authorize unrelated Node
+programs; use native Codex instead.
 
 It configures:
 
@@ -131,6 +137,7 @@ It configures:
 - the user's IANA timezone, detected from the computer by default, so every clock and calendar heading agrees
 - the Codex sandbox level for Telegram sessions, defaulting to broad autonomous access
 - guided native Codex Full Disk Access approval on macOS when whole-computer mode is selected
+- stable OpenAI-signed Codex paths so normal macOS updates do not require repeated Full Disk Access grants
 - whether to start the bridge immediately
 - preserves an existing Telegram model selection, or inherits Codex's effective model and effort on the first setup
 - whether to complete secure local pairing inside the wizard
@@ -234,6 +241,18 @@ credential may have been exposed.
 ### Updating safely
 
 The permanent installation includes an updater. The normal nontechnical update path on both platforms is Telegram `/update`. It resolves the requested Git ref to an immutable commit SHA, downloads that exact archive, runs the complete test suites before activation, installs it into a new version directory, applies Codex cachebusters, runs functional health checks, restarts the platform service, and rolls back to the previous runtime if activation fails.
+
+On macOS, `/updatecodex` updates the Codex CLI itself. It runs the [official
+standalone installer](https://learn.chatgpt.com/docs/codex/cli), verifies the
+new OpenAI signatures and unchanged designated requirements, atomically swaps
+the complete package at the stable permission paths, restarts the bridge, runs
+the doctor, and restores the prior stable package if activation fails.
+
+Terminal fallback:
+
+```bash
+python3 "$HOME/Library/Application Support/PermaEvidenceCodex/current/scripts/update_codex.py"
+```
 
 Terminal fallback on macOS:
 

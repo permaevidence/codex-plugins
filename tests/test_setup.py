@@ -38,6 +38,18 @@ assert update_spec and update_spec.loader
 runtime_update = importlib.util.module_from_spec(update_spec)
 update_spec.loader.exec_module(runtime_update)
 
+CODEX_RUNTIME_PATH = REPO_ROOT / "scripts" / "codex_runtime.py"
+codex_runtime_spec = importlib.util.spec_from_file_location("codex_runtime_test", CODEX_RUNTIME_PATH)
+assert codex_runtime_spec and codex_runtime_spec.loader
+codex_runtime = importlib.util.module_from_spec(codex_runtime_spec)
+codex_runtime_spec.loader.exec_module(codex_runtime)
+
+CODEX_UPDATE_PATH = REPO_ROOT / "scripts" / "update_codex.py"
+codex_update_spec = importlib.util.spec_from_file_location("codex_update_test", CODEX_UPDATE_PATH)
+assert codex_update_spec and codex_update_spec.loader
+codex_update = importlib.util.module_from_spec(codex_update_spec)
+codex_update_spec.loader.exec_module(codex_update)
+
 JSONRPC_PATH = REPO_ROOT / "scripts" / "jsonrpc_io.py"
 jsonrpc_spec = importlib.util.spec_from_file_location("jsonrpc_io_test", JSONRPC_PATH)
 assert jsonrpc_spec and jsonrpc_spec.loader
@@ -276,6 +288,7 @@ class SetupWizardTests(unittest.TestCase):
                 setup_wizard.configure_telegram(
                     telegram_token="123:token",
                     openai_key="sk-test",
+                    codex_cmd="/stable/bin/codex",
                     project_dir=project_dir,
                     model="gpt-5.5",
                     effort="high",
@@ -286,6 +299,7 @@ class SetupWizardTests(unittest.TestCase):
 
             config = setup_wizard.load_json(config_path)
             self.assertEqual(config["default_cwd"], str(project_dir))
+            self.assertEqual(config["codex_cmd"], "/stable/bin/codex")
             self.assertEqual(config["sandbox_mode"], "dangerFullAccess")
             self.assertEqual(config["timezone"], "America/New_York")
             self.assertTrue(config["network_access"])
@@ -322,6 +336,31 @@ class SetupWizardTests(unittest.TestCase):
         self.assertEqual(installation["codex"], codex.resolve())
         self.assertEqual(installation["helper"], helper.resolve())
         self.assertEqual(installation["targets"], [codex.resolve(), helper.resolve()])
+
+    def test_full_disk_access_plan_targets_stable_paths(self) -> None:
+        source_codex = Path("/official/release/bin/codex")
+        source_helper = source_codex.parent / "codex-code-mode-host"
+        stable_targets = [Path("/stable/bin/codex"), Path("/stable/bin/codex-code-mode-host")]
+        installation = {
+            "kind": "native",
+            "codex": source_codex,
+            "helper": source_helper,
+            "targets": [source_codex, source_helper],
+        }
+        with mock.patch.object(setup_wizard, "platform_family", return_value="macos"), mock.patch.object(
+            setup_wizard, "codex_permission_installation", return_value=installation
+        ), mock.patch.object(setup_wizard, "stable_codex_targets", return_value=stable_targets), mock.patch.object(
+            setup_wizard, "stable_runtime_status", return_value={"state": "missing"}
+        ), mock.patch.object(
+            setup_wizard,
+            "codex_full_disk_access_status",
+            return_value={"state": "missing", "authorized": [], "missing": stable_targets},
+        ), mock.patch.object(setup_wizard, "prompt_yes_no", return_value=False), contextlib.redirect_stdout(io.StringIO()):
+            plan = setup_wizard.resolve_macos_full_disk_access_plan("dangerFullAccess")
+
+        self.assertTrue(plan["prepare_stable"])
+        self.assertEqual(plan["source_command"], str(source_codex))
+        self.assertEqual(plan["targets"], stable_targets)
 
     def test_unverified_native_binaries_are_never_permission_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -760,6 +799,130 @@ class SetupWizardTests(unittest.TestCase):
                 os.close(read_fd)
             if write_fd >= 0:
                 os.close(write_fd)
+
+
+class StableCodexRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def make_package(root: Path, version: str, marker: str) -> Path:
+        (root / "bin").mkdir(parents=True)
+        (root / "codex-path").mkdir()
+        (root / "codex-resources").mkdir()
+        (root / "bin/codex").write_text(f"codex-{marker}", encoding="utf-8")
+        (root / "bin/codex-code-mode-host").write_text(f"helper-{marker}", encoding="utf-8")
+        (root / "codex-package.json").write_text(
+            json.dumps(
+                {
+                    "layoutVersion": 1,
+                    "version": version,
+                    "target": "aarch64-apple-darwin",
+                    "variant": "codex",
+                    "entrypoint": "bin/codex",
+                    "resourcesDir": "codex-resources",
+                    "pathDir": "codex-path",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return root
+
+    @staticmethod
+    def verification(root: Path, *, expected_requirements=None):
+        requirements = {"codex": "req-codex", "codex-code-mode-host": "req-helper"}
+        if expected_requirements is not None and expected_requirements != requirements:
+            raise codex_runtime.CodexRuntimeError("designated requirement changed")
+        return {
+            "version": codex_runtime.package_version(root),
+            "target": "aarch64-apple-darwin",
+            "requirements": requirements,
+            "signatures": {},
+        }
+
+    @staticmethod
+    def exchange(left: Path, right: Path) -> None:
+        temporary = left.parent / ".unit-test-exchange"
+        left.replace(temporary)
+        right.replace(left)
+        temporary.replace(right)
+
+    def test_initial_sync_creates_actual_stable_package_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self.make_package(root / "source", "1.0.0", "one")
+            stable = root / "stable"
+            previous = root / "previous"
+            with mock.patch.object(codex_runtime, "locate_official_package", return_value=source), mock.patch.object(
+                codex_runtime, "verify_signed_package", side_effect=self.verification
+            ):
+                result = codex_runtime.sync_stable_codex_runtime(
+                    stable_root=stable,
+                    previous_root=previous,
+                )
+
+            self.assertTrue(result["changed"])
+            self.assertEqual(result["version"], "1.0.0")
+            self.assertTrue((stable / "bin/codex").is_file())
+            self.assertFalse((stable / "bin/codex").is_symlink())
+            self.assertFalse(previous.exists())
+
+    def test_update_atomically_swaps_package_and_keeps_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_one = self.make_package(root / "source-one", "1.0.0", "one")
+            source_two = self.make_package(root / "source-two", "2.0.0", "two")
+            stable = root / "stable"
+            previous = root / "previous"
+            with mock.patch.object(codex_runtime, "verify_signed_package", side_effect=self.verification), mock.patch.object(
+                codex_runtime, "_atomic_exchange", side_effect=self.exchange
+            ):
+                with mock.patch.object(codex_runtime, "locate_official_package", return_value=source_one):
+                    codex_runtime.sync_stable_codex_runtime(stable_root=stable, previous_root=previous)
+                with mock.patch.object(codex_runtime, "locate_official_package", return_value=source_two):
+                    result = codex_runtime.sync_stable_codex_runtime(stable_root=stable, previous_root=previous)
+
+            self.assertEqual(result["previous_version"], "1.0.0")
+            self.assertEqual((stable / "bin/codex").read_text(encoding="utf-8"), "codex-two")
+            self.assertEqual((previous / "bin/codex").read_text(encoding="utf-8"), "codex-one")
+
+    def test_designated_requirement_change_is_rejected_before_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self.make_package(root / "source", "2.0.0", "two")
+            stable = self.make_package(root / "stable", "1.0.0", "one")
+            previous = root / "previous"
+
+            def verification(path: Path, *, expected_requirements=None):
+                requirements = {
+                    "codex": "new-requirement" if path == source else "old-requirement",
+                    "codex-code-mode-host": "req-helper",
+                }
+                if expected_requirements is not None and requirements != expected_requirements:
+                    raise codex_runtime.CodexRuntimeError("designated requirement changed")
+                return {
+                    "version": codex_runtime.package_version(path),
+                    "target": "aarch64-apple-darwin",
+                    "requirements": requirements,
+                    "signatures": {},
+                }
+
+            with mock.patch.object(codex_runtime, "locate_official_package", return_value=source), mock.patch.object(
+                codex_runtime, "verify_signed_package", side_effect=verification
+            ), self.assertRaises(codex_runtime.CodexRuntimeError):
+                codex_runtime.sync_stable_codex_runtime(stable_root=stable, previous_root=previous)
+
+            self.assertEqual((stable / "bin/codex").read_text(encoding="utf-8"), "codex-one")
+            self.assertFalse(previous.exists())
+
+    def test_codex_updater_pins_bridge_config_to_stable_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.json"
+            config.write_text('{"codex_cmd": "/old/bin/codex", "keep": true}\n', encoding="utf-8")
+            with mock.patch.object(codex_update, "CONFIG_FILE", config), mock.patch.object(
+                codex_update, "stable_codex_command", return_value=Path("/stable/bin/codex")
+            ):
+                codex_update.configure_stable_command()
+            payload = json.loads(config.read_text(encoding="utf-8"))
+            self.assertEqual(payload["codex_cmd"], "/stable/bin/codex")
+            self.assertTrue(payload["keep"])
 
 
 class RuntimeInstallTests(unittest.TestCase):

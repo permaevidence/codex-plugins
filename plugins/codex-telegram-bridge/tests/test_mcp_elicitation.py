@@ -497,7 +497,7 @@ class BotCommandMenuTests(unittest.TestCase):
 
         self.assertEqual(
             [item["command"] for item in bridge.BOT_COMMANDS],
-            ["start", "help", "status", "health", "model", "resume", "retrymemory", "stop", "newsession", "update"],
+            ["start", "help", "status", "health", "model", "resume", "retrymemory", "stop", "newsession", "update", "updatecodex"],
         )
         for item in bridge.BOT_COMMANDS:
             self.assertIn(f"/{item['command']} - {item['description']}", help_text)
@@ -728,6 +728,32 @@ class UpdateAnnouncementTests(unittest.TestCase):
     def test_update_is_a_registered_bot_command(self):
         bridge = load_bridge_module()
         self.assertIn("update", {item["command"] for item in bridge.BOT_COMMANDS})
+        self.assertIn("updatecodex", {item["command"] for item in bridge.BOT_COMMANDS})
+
+    def test_completed_codex_update_reports_verified_stable_paths(self):
+        bridge = load_bridge_module()
+        text = bridge.codex_update_outcome_message(
+            {
+                "status": "completed",
+                "previous_version": "0.146.0",
+                "version": "0.147.0",
+                "announced": False,
+            }
+        )
+        self.assertIsNotNone(text)
+        self.assertIn("0.146.0 → 0.147.0", text)
+        self.assertIn("designated requirements", text)
+        self.assertIn("stable permission paths", text)
+
+    def test_failed_codex_update_reports_rollback(self):
+        bridge = load_bridge_module()
+        text = bridge.codex_update_outcome_message(
+            {"status": "failed", "error": "signature mismatch", "announced": False}
+        )
+        self.assertIsNotNone(text)
+        self.assertIn("FAILED", text)
+        self.assertIn("signature mismatch", text)
+        self.assertIn("previous stable Codex package was restored", text)
 
 
 class HealthVisibilityTests(unittest.TestCase):

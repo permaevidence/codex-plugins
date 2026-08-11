@@ -36,6 +36,7 @@ if str(PLUGIN_ROOT) not in sys.path:
 from lib.gmail_imap import probe_imap
 from lib.audio_tools import ffmpeg_status
 from jsonrpc_io import JsonRpcLineReader
+from codex_runtime import stable_codex_command, stable_runtime_status
 from macos_permissions import codex_full_disk_access_status, codex_permission_installation
 from platform_support import (
     LAUNCHD_LABEL,
@@ -674,6 +675,26 @@ def doctor(
             timezone_detail = telegram_timezone or "missing"
         checks.append(("Telegram timezone configured", timezone_ok, timezone_detail))
         if PLATFORM_FAMILY == "macos" and config.get("sandbox_mode") == "dangerFullAccess":
+            stable_status = stable_runtime_status()
+            checks.append(
+                (
+                    "stable Codex runtime",
+                    stable_status.get("state") == "ready",
+                    str(stable_status.get("detail") or "not ready"),
+                )
+            )
+            configured_codex = Path(str(config.get("codex_cmd") or "")).expanduser()
+            try:
+                stable_configured = configured_codex.resolve() == stable_codex_command().resolve()
+            except OSError:
+                stable_configured = False
+            checks.append(
+                (
+                    "bridge uses stable Codex path",
+                    stable_configured,
+                    str(configured_codex or "not configured"),
+                )
+            )
             installation = codex_permission_installation(
                 str(config.get("codex_cmd") or codex or "")
             )

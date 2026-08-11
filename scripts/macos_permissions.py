@@ -142,7 +142,7 @@ def codex_full_disk_access_status(
     *,
     database: Path = SYSTEM_TCC_DATABASE,
 ) -> dict[str, Any]:
-    """Return whether the current exact binary paths have Full Disk Access.
+    """Return whether the requested exact binary paths have Full Disk Access.
 
     TCC deliberately protects its database. A setup process without permission
     to read it receives ``unknown`` rather than a false failure. The user still

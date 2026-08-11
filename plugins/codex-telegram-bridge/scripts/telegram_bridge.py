@@ -96,6 +96,7 @@ BOT_COMMANDS = [
     {"command": "stop", "description": "Interrupt the active Codex turn"},
     {"command": "newsession", "description": "Restart Codex and start a fresh thread"},
     {"command": "update", "description": "Update the plugins runtime and restart the bridge"},
+    {"command": "updatecodex", "description": "Safely update Codex CLI at stable permission paths"},
 ]
 
 MODEL_CALLBACK_PREFIX = "model:"
@@ -103,6 +104,7 @@ PENDING_UPDATE_FILE = STATE_DIR / "pending_update.json"
 FAILED_UPDATES_DIR = STATE_DIR / "failed_updates"
 TURN_RECOVERY_FILE = STATE_DIR / "turn_recovery_queue.json"
 UPDATE_STATE_FILE = STATE_DIR / "update_state.json"
+CODEX_UPDATE_STATE_FILE = STATE_DIR / "codex_update_state.json"
 HEALTH_STATE_FILE = STATE_DIR / "health.json"
 HEALTH_NOTIFICATION_FILE = STATE_DIR / "health_notifications.json"
 HEALTH_STATE_LOCK = threading.Lock()
@@ -115,6 +117,7 @@ MEMORY_COMMON_SCRIPT = (
     Path(__file__).resolve().parents[2] / "codex-long-term-memory" / "lib" / "common.py"
 )
 UPDATE_SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "update.py"
+UPDATE_CODEX_SCRIPT = UPDATE_SCRIPT.parent / "update_codex.py"
 SETUP_SCRIPT = UPDATE_SCRIPT.parent / "setup.py"
 
 
@@ -2130,6 +2133,27 @@ def update_outcome_message(state: dict[str, Any]) -> str | None:
     return None
 
 
+def codex_update_outcome_message(state: dict[str, Any]) -> str | None:
+    """Build the owner notification for a finished Codex CLI update."""
+    if not isinstance(state, dict) or state.get("announced"):
+        return None
+    status = state.get("status")
+    version = str(state.get("version") or "unknown")
+    if status == "completed":
+        previous = str(state.get("previous_version") or "").strip()
+        transition = f"{previous} → {version}" if previous and previous != version else version
+        return (
+            f"Codex CLI update complete: {transition}. The OpenAI signatures and "
+            "designated requirements were verified, and the bridge is using the stable permission paths."
+        )
+    if status == "failed":
+        reason = str(state.get("error") or "unknown error")
+        rollback = str(state.get("rollback_error") or "").strip()
+        suffix = f" Rollback also needs attention: {rollback}" if rollback else " The previous stable Codex package was restored."
+        return f"Codex CLI update FAILED: {reason}.{suffix} Log: ~/.codex/telegram-bridge/codex-update-handoff.log"
+    return None
+
+
 def announce_update_outcome(token: str, config: dict[str, Any]) -> bool:
     owner_chat_id = str(config.get("owner_chat_id") or "").strip()
     if not owner_chat_id:
@@ -2148,6 +2172,24 @@ def announce_update_outcome(token: str, config: dict[str, Any]) -> bool:
     return True
 
 
+def announce_codex_update_outcome(token: str, config: dict[str, Any]) -> bool:
+    owner_chat_id = str(config.get("owner_chat_id") or "").strip()
+    if not owner_chat_id:
+        return False
+    state = load_json(CODEX_UPDATE_STATE_FILE, {})
+    text = codex_update_outcome_message(state if isinstance(state, dict) else {})
+    if not text:
+        return False
+    try:
+        send_message(token, owner_chat_id, text)
+    except Exception as exc:
+        print(f"Codex update announcement failed: {exc}", file=sys.stderr)
+        return False
+    state["announced"] = True
+    save_json(CODEX_UPDATE_STATE_FILE, state)
+    return True
+
+
 def start_update_announcement_loop(token: str, config: dict[str, Any]) -> None:
     """Watch for a finished runtime update and notify the owner exactly once.
 
@@ -2162,6 +2204,7 @@ def start_update_announcement_loop(token: str, config: dict[str, Any]) -> None:
         while True:
             try:
                 announce_update_outcome(token, config)
+                announce_codex_update_outcome(token, config)
             except Exception as exc:
                 print(f"update announcement loop failed: {exc}", file=sys.stderr)
             time.sleep(30)
@@ -2328,6 +2371,12 @@ def health_text(
         lines.append(f"⚠️ Last update: failed — {str(update_state.get('error') or 'unknown error')[:240]}")
     else:
         lines.append("✅ Runtime updates: no unresolved failure")
+
+    codex_update_state = load_json(CODEX_UPDATE_STATE_FILE, {})
+    if isinstance(codex_update_state, dict) and codex_update_state.get("status") == "failed":
+        lines.append(f"⚠️ Last Codex CLI update: failed — {str(codex_update_state.get('error') or 'unknown error')[:240]}")
+    else:
+        lines.append("✅ Codex CLI stable-path updates: no unresolved failure")
 
     if not bridge_config.get("enable_google_apps"):
         lines.append("ℹ️ Official Gmail/Calendar apps: disabled")
@@ -2864,6 +2913,44 @@ def main() -> None:
                         )
                     else:
                         send_message(str(token), chat_id, f"Could not schedule the update: {detail or 'unknown error'}", message.get("message_id"), access=access)
+                    PENDING_UPDATE_FILE.unlink(missing_ok=True)
+                    continue
+                if command == "/updatecodex":
+                    if codex.has_active_turn(chat_id):
+                        send_message(
+                            str(token),
+                            chat_id,
+                            "A turn is still running. Send /stop first, or wait for it to finish — the Codex update restarts the bridge.",
+                            message.get("message_id"),
+                            access=access,
+                        )
+                        continue
+                    if not UPDATE_CODEX_SCRIPT.is_file():
+                        send_message(str(token), chat_id, f"Codex updater not found at {UPDATE_CODEX_SCRIPT}.", message.get("message_id"), access=access)
+                        continue
+                    detail = ""
+                    try:
+                        scheduled = subprocess.run(
+                            [sys.executable, str(UPDATE_CODEX_SCRIPT), "--defer-seconds", "10"],
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
+                        )
+                        ok = scheduled.returncode == 0
+                        detail = (scheduled.stderr or scheduled.stdout or "").strip()
+                    except Exception as exc:
+                        ok = False
+                        detail = str(exc)
+                    if ok:
+                        send_message(
+                            str(token),
+                            chat_id,
+                            "Codex CLI update scheduled. The official installer, OpenAI signature checks, atomic stable-path swap, bridge restart, health check, and rollback are automatic.",
+                            message.get("message_id"),
+                            access=access,
+                        )
+                    else:
+                        send_message(str(token), chat_id, f"Could not schedule the Codex update: {detail or 'unknown error'}", message.get("message_id"), access=access)
                     PENDING_UPDATE_FILE.unlink(missing_ok=True)
                     continue
                 if command == "/newsession":

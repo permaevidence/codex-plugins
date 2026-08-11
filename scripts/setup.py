@@ -26,6 +26,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from platform_support import platform_display_name, platform_family, runtime_data_root, service_definition_path
 from jsonrpc_io import JsonRpcLineReader
+from codex_runtime import (
+    CodexRuntimeError,
+    stable_codex_command,
+    stable_codex_targets,
+    stable_runtime_status,
+    sync_stable_codex_runtime,
+)
 from macos_permissions import codex_full_disk_access_status, codex_permission_installation
 from runtime_install import install_runtime, prune_old_versions
 
@@ -388,6 +395,11 @@ def main() -> int:
     if not prompt_yes_no("Proceed with these changes?", default=True):
         raise SystemExit("Setup cancelled. Nothing was changed.")
 
+    codex_command = str(existing_telegram_config.get("codex_cmd") or shutil.which("codex") or "codex")
+    if full_disk_access_plan.get("prepare_stable"):
+        stable_result = prepare_macos_stable_codex_runtime(full_disk_access_plan)
+        codex_command = str(stable_result["codex"])
+
     if full_disk_access_plan["requested"]:
         guide_macos_full_disk_access(full_disk_access_plan)
 
@@ -430,6 +442,7 @@ def main() -> int:
             configure_telegram(
                 telegram_token=telegram_token,
                 openai_key=openai_key,
+                codex_cmd=codex_command,
                 project_dir=project_dir,
                 model=model,
                 effort=effort,
@@ -1064,6 +1077,8 @@ def resolve_macos_full_disk_access_plan(
         "installation": {},
         "status": {},
         "targets": [],
+        "prepare_stable": False,
+        "source_command": None,
     }
     if platform_family() != "macos":
         return plan
@@ -1073,11 +1088,9 @@ def resolve_macos_full_disk_access_plan(
         plan["review"] = "not requested in restricted-folder mode"
         return plan
 
-    installation = codex_permission_installation()
-    plan["installation"] = installation
-    targets = list(installation.get("targets") or [])
-    plan["targets"] = targets
-    kind = str(installation.get("kind") or "")
+    source_installation = codex_permission_installation()
+    plan["installation"] = source_installation
+    kind = str(source_installation.get("kind") or "")
 
     if kind == "npm":
         if offer_guidance:
@@ -1090,7 +1103,8 @@ def resolve_macos_full_disk_access_plan(
         plan["review"] = "not requested — npm/Node installation detected; native Codex recommended"
         return plan
 
-    if kind != "native" or len(targets) < 2:
+    source_targets = list(source_installation.get("targets") or [])
+    if kind != "native" or len(source_targets) < 2:
         if offer_guidance:
             print()
             print(warning("macOS Full Disk Access"))
@@ -1098,6 +1112,23 @@ def resolve_macos_full_disk_access_plan(
             print("The wizard will not guess which executable should receive this sensitive permission.")
         plan["review"] = "manual review needed — native Codex executables were not safely verified"
         return plan
+
+    plan["prepare_stable"] = True
+    plan["source_command"] = str(source_installation.get("codex") or "")
+    targets = stable_codex_targets()
+    plan["targets"] = targets
+    stable_status = stable_runtime_status()
+    if not offer_guidance and stable_status.get("state") != "ready":
+        plan["prepare_stable"] = False
+        plan["targets"] = source_targets
+        plan["review"] = "unchanged — rerun the permissions section to migrate to stable paths"
+        return plan
+    if stable_status.get("state") == "ready":
+        installation = codex_permission_installation(str(stable_codex_command()))
+        if installation.get("kind") != "native":
+            plan["review"] = "manual review needed — stable Codex executables failed verification"
+            return plan
+        plan["installation"] = installation
 
     status = codex_full_disk_access_status(targets)
     plan["status"] = status
@@ -1118,12 +1149,12 @@ def resolve_macos_full_disk_access_plan(
     print("still protects locations such as Desktop, Documents, Mail, Messages, and")
     print("some application data. macOS requires you to approve this separately.")
     print()
-    print("The wizard found the two current OpenAI executables:")
+    print("The wizard will use two stable OpenAI-signed executable paths:")
     for target in targets:
         print(f"  • {target}")
     print()
-    print("Codex updates may install a new versioned path. Rerunning this permissions")
-    print("section will detect the current executables and offer the same repair.")
+    print("Future updates are signature-checked and atomically replace the package at")
+    print("these same paths, so routine updates should not need another permission grant.")
     requested = prompt_yes_no(
         "Open macOS Full Disk Access settings after the review screen?",
         default=True,
@@ -1135,6 +1166,27 @@ def resolve_macos_full_disk_access_plan(
         else "skipped — protected macOS locations may remain inaccessible"
     )
     return plan
+
+
+def prepare_macos_stable_codex_runtime(plan: dict[str, object]) -> dict[str, object]:
+    """Create or refresh the stable signed package after setup approval."""
+
+    source_command = str(plan.get("source_command") or "").strip() or None
+    try:
+        result = sync_stable_codex_runtime(source_command)
+    except CodexRuntimeError as exc:
+        raise RuntimeError(f"Could not prepare stable Codex permission paths: {exc}") from exc
+    installation = codex_permission_installation(str(result["codex"]))
+    if installation.get("kind") != "native":
+        raise RuntimeError(
+            str(installation.get("detail") or "The stable Codex executables failed signature verification.")
+        )
+    plan["installation"] = installation
+    plan["targets"] = list(result["targets"])
+    plan["status"] = codex_full_disk_access_status(list(result["targets"]))
+    action = "Updated" if result.get("changed") else "Verified"
+    print(f"{action} stable OpenAI-signed Codex {result.get('version')} at {result.get('root')}.")
+    return result
 
 
 def guide_macos_full_disk_access(plan: dict[str, object]) -> None:
@@ -1794,6 +1846,7 @@ def configure_telegram(
     *,
     telegram_token: str,
     openai_key: str,
+    codex_cmd: str | None = None,
     project_dir: Path,
     model: str,
     effort: str,
@@ -1841,6 +1894,8 @@ def configure_telegram(
             "email_notification_provider": "imap",
         }
     )
+    if codex_cmd:
+        config["codex_cmd"] = codex_cmd
     write_json(TELEGRAM_CONFIG, config)
 
 
