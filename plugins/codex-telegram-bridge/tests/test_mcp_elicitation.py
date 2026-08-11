@@ -173,6 +173,34 @@ class GoogleAppOnboardingTests(unittest.TestCase):
         )
 
 
+class BridgeDoctorTests(unittest.TestCase):
+    def test_live_child_accepts_resolved_runtime_path(self):
+        operator = load_operator_module()
+        command = f"/usr/bin/python3 {operator.SCRIPT_DIR / 'telegram_bridge.py'}"
+        self.assertTrue(operator.bridge_child_command_valid(command))
+
+    def test_live_child_accepts_stable_current_symlink_path(self):
+        operator = load_operator_module()
+        current = (
+            operator.runtime_data_root()
+            / "current"
+            / "plugins"
+            / "codex-telegram-bridge"
+            / "scripts"
+            / "telegram_bridge.py"
+        )
+        command = f"/usr/bin/python3 {current}"
+        self.assertTrue(operator.bridge_child_command_valid(command))
+
+    def test_live_child_rejects_unrelated_bridge_script(self):
+        operator = load_operator_module()
+        self.assertFalse(
+            operator.bridge_child_command_valid(
+                "/usr/bin/python3 /tmp/codex-telegram-bridge/scripts/telegram_bridge.py"
+            )
+        )
+
+
 class AppServerResilienceTests(unittest.TestCase):
     def test_real_app_server_exit_terminates_bridge_for_supervisor_restart(self):
         bridge = load_bridge_module()

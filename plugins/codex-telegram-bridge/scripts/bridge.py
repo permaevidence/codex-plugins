@@ -48,6 +48,7 @@ from platform_support import (
     LAUNCHD_LABEL,
     SYSTEMD_SERVICE_NAME,
     platform_family,
+    runtime_data_root,
     systemd_user_dir,
 )
 
@@ -149,6 +150,22 @@ def process_command(pid: int | None) -> str:
     except Exception:
         return ""
     return (proc.stdout or "").strip()
+
+
+def bridge_child_command_valid(command: str) -> bool:
+    """Accept the deployed bridge through either its resolved or stable current path."""
+    if not command:
+        return False
+    expected = SCRIPT_DIR / "telegram_bridge.py"
+    current = (
+        runtime_data_root()
+        / "current"
+        / "plugins"
+        / "codex-telegram-bridge"
+        / "scripts"
+        / "telegram_bridge.py"
+    )
+    return str(expected) in command or str(current) in command
 
 
 def wait_dead(pid: int | None, timeout: float = 8.0) -> bool:
@@ -610,6 +627,7 @@ def doctor(
     allow_google_unconnected: bool = False,
 ) -> int:
     checks: list[tuple[str, bool, str]] = []
+    warnings: list[tuple[str, str]] = []
     pending_steps: list[tuple[str, str]] = []
     notices: list[tuple[str, str]] = []
 
@@ -803,7 +821,12 @@ def doctor(
         checks.append(("access.json", isinstance(access, dict), str(ACCESS_FILE) if isinstance(access, dict) else "missing or invalid"))
         checks.append(("at least one allowed chat", bool(allow_list), f"{len(allow_list)} allowed" if allow_list else "none yet"))
     if pairing_pending and not allow_unpaired:
-        checks.append(("pending pairing codes", False, f"{len(pairing_pending)} pending; approve with scripts/access.py pair <code>"))
+        warnings.append(
+            (
+                "pending pairing codes",
+                f"{len(pairing_pending)} pending; approve with scripts/access.py pair <code>",
+            )
+        )
 
     memory_config = load_json(MEMORY_CONFIG_FILE)
     checks.append(("long-term-memory config", bool(memory_config), str(MEMORY_CONFIG_FILE) if memory_config else "missing or invalid"))
@@ -870,11 +893,10 @@ def doctor(
         checks.append(("bridge supervisor running", bridge_running(), format_pid(supervisor_pid())))
         checks.append(("bridge child running", is_pid_alive(child_pid()), format_pid(child_pid())))
         child_command = process_command(child_pid())
-        expected_bridge = str(SCRIPT_DIR / "telegram_bridge.py")
         checks.append(
             (
                 "bridge child command valid",
-                expected_bridge in child_command,
+                bridge_child_command_valid(child_command),
                 child_command or "not running",
             )
         )
@@ -888,6 +910,8 @@ def doctor(
         if not ok:
             failures += 1
         print(f"[{marker}] {label}: {detail}")
+    for label, detail in warnings:
+        print(f"[WARN] {label}: {detail}")
     for label, detail in pending_steps:
         print(f"[PENDING] {label}: {detail}")
     for label, detail in notices:
