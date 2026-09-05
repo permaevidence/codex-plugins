@@ -569,6 +569,45 @@ class BotCommandMenuTests(unittest.TestCase):
 
 
 class ModelSelectionTests(unittest.TestCase):
+    def test_model_catalog_exposes_astra_and_high_effort(self):
+        bridge = load_bridge_module()
+        catalog = {
+            "models": [
+                {
+                    "slug": "gpt-6-astra",
+                    "display_name": "GPT-6-Astra",
+                    "description": "Our most capable model for complex, demanding work.",
+                    "visibility": "list",
+                    "priority": 1,
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [
+                        {"effort": "low"},
+                        {"effort": "medium"},
+                        {"effort": "high"},
+                        {"effort": "xhigh"},
+                        {"effort": "max"},
+                        {"effort": "ultra"},
+                    ],
+                }
+            ]
+        }
+        completed = mock.Mock(returncode=0, stdout=json.dumps(catalog))
+
+        with mock.patch.object(bridge.subprocess, "run", return_value=completed):
+            models = bridge.list_codex_models("codex")
+
+        self.assertEqual(models[0]["slug"], "gpt-6-astra")
+        self.assertEqual(models[0]["display_name"], "GPT-6-Astra")
+        self.assertIn("high", models[0]["efforts"])
+        self.assertEqual(
+            bridge.model_keyboard(models),
+            {
+                "inline_keyboard": [
+                    [{"text": "GPT-6-Astra", "callback_data": "model:choose:gpt-6-astra"}]
+                ]
+            },
+        )
+
     def test_save_model_selection_updates_only_model_fields(self):
         bridge = load_bridge_module()
 

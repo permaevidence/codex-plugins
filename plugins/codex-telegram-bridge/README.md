@@ -220,7 +220,7 @@ from `codex debug models`, so the choices track the installed Codex CLI. You can
 also set both fields directly:
 
 ```text
-/model gpt-5.6-sol high
+/model gpt-6-astra high
 ```
 
 The change is saved to `~/.codex/telegram-bridge/config.json` and applies to the
