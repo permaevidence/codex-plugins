@@ -33,6 +33,7 @@ if str(ROOT_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(ROOT_SCRIPTS))
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
+from lib.app_discovery import AppDiscoveryError, discover_apps, discovery_options
 from lib.gmail_imap import probe_imap
 from lib.audio_tools import ffmpeg_status
 from jsonrpc_io import JsonRpcLineReader
@@ -88,9 +89,12 @@ def parse_args() -> argparse.Namespace:
     subparsers.add_parser("stop", help="Stop the bridge supervisor cleanly.")
     subparsers.add_parser("quit", help="Alias for stop.")
     subparsers.add_parser("restart", help="Stop and then start the bridge supervisor.")
+    for action in ("stop", "quit", "restart"):
+        subparsers.choices[action].add_argument("--reason", choices=["operator", "plugin_update", "codex_update", "rollback"], default="operator")
     subparsers.add_parser("status", help="Show bridge process/runtime status.")
     subparsers.add_parser("doctor", help="Check common setup problems.")
     doctor_parser = subparsers.choices["doctor"]
+    doctor_parser.add_argument("--report", type=Path, help="Write structured doctor findings to this JSON file.")
     doctor_parser.add_argument(
         "--allow-unpaired",
         action="store_true",
@@ -342,8 +346,13 @@ def start_bridge() -> int:
     return wait_for_bridge_start()
 
 
-def stop_bridge() -> int:
+def stop_bridge(reason: str = "operator") -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with LOG_FILE.open("a") as log:
+            log.write(f"[{datetime.now().astimezone().isoformat()}] stop requested reason={reason} request_id={uuid.uuid4().hex} operator_pid={os.getpid()} supervisor_pid={supervisor_pid()} bridge_pid={child_pid()}\n")
+    except OSError as exc:
+        print(f"Could not log stop request: {exc}", file=sys.stderr)
     STOP_FILE.touch()
 
     if service_installed() or service_loaded():
@@ -399,8 +408,8 @@ def stop_bridge() -> int:
     return 1
 
 
-def restart_bridge() -> int:
-    stop_code = stop_bridge()
+def restart_bridge(reason: str = "operator") -> int:
+    stop_code = stop_bridge(reason)
     if stop_code != 0:
         return stop_code
     return start_bridge()
@@ -625,8 +634,11 @@ def doctor(
     allow_unpaired: bool = False,
     allow_stopped: bool = False,
     allow_google_unconnected: bool = False,
+    report_path: Path | None = None,
 ) -> int:
     checks: list[tuple[str, bool, str]] = []
+    integration_labels: set[str] = set()
+    discovery_failed = False
     warnings: list[tuple[str, str]] = []
     pending_steps: list[tuple[str, str]] = []
     notices: list[tuple[str, str]] = []
@@ -679,17 +691,11 @@ def doctor(
                 calendar_line or "not visible",
             )
         )
-        apps = query_codex_apps(config.get("default_cwd"))
-        for app_kind, label in (
-            ("gmail", "Gmail app connected and available to Codex"),
-            ("calendar", "Google Calendar app connected and available to Codex"),
-        ):
-            app = find_google_app(apps, app_kind)
-            connected, detail = google_app_connection_status(app)
-            if connected or not allow_google_unconnected:
-                checks.append((label, connected, detail))
-            else:
-                pending_steps.append((label, f"{detail}; run `codex`, enter `/apps`, and connect it"))
+        discovery = google_discovery_findings(config, allow_google_unconnected)
+        checks.extend(discovery["checks"])
+        pending_steps.extend(discovery["pending"])
+        integration_labels.update(discovery["integration_labels"])
+        discovery_failed = discovery["discovery_failed"]
     checks.append(("Telegram config.json", bool(config), str(CONFIG_FILE) if config else "missing or invalid"))
     if config:
         default_cwd = Path(str(config.get("default_cwd") or "")).expanduser()
@@ -903,6 +909,15 @@ def doctor(
         app_server_ok, app_server_detail = app_server_child_status(child_pid())
         checks.append(("Codex app-server child running", app_server_ok, app_server_detail))
 
+    if report_path is not None:
+        from update_validation import write_report
+        write_report(report_path, {
+            "schema_version": 1,
+            "checks": [{"label": label, "ok": ok, "detail": detail,
+                        "scope": "integration" if label in integration_labels else "runtime"}
+                       for label, ok, detail in checks],
+            "warnings": warnings, "pending": pending_steps, "notices": notices,
+        })
     failures = 0
     print("Codex Telegram bridge doctor")
     for label, ok, detail in checks:
@@ -925,7 +940,7 @@ def doctor(
         print(f"- Install plugins: python3 {REPO_ROOT}/scripts/install_plugins.py")
         print(f"- Configure Telegram: edit {CONFIG_FILE} and {ENV_FILE}")
         print(f"- Start bridge: python3 {SCRIPT_DIR}/bridge.py start")
-        if google_apps_enabled:
+        if google_apps_enabled and not discovery_failed:
             print("- Connect Google apps: run `codex`, enter `/apps`, then connect Gmail and Google Calendar.")
         print("- After plugin or hook changes, start a new Codex thread or send /newsession.")
         return 1
@@ -1040,78 +1055,84 @@ def query_memory_hooks(cwd: str | None) -> list[dict]:
     return []
 
 
-def query_codex_apps(cwd: str | None) -> dict[str, dict]:
-    codex = shutil.which("codex")
+def google_discovery_findings(config: dict, allow_google_unconnected: bool = False) -> dict:
+    checks = []
+    pending_steps = []
+    integration_labels = set()
+    discovery_failed = False
+    try:
+        apps = query_codex_apps(config.get("default_cwd"), config)
+    except AppDiscoveryError as exc:
+        discovery_failed = True
+        label = "Google app discovery"
+        checks.append((label, False, str(exc)))
+        # Protocol/configuration/startup failures may be a runtime regression.
+        # Only explicit transport/resource failures are degraded integrations.
+        if exc.category in {"timeout", "request", "budget"}:
+            integration_labels.add(label)
+    else:
+        for app_kind, label in (
+            ("gmail", "Gmail app connected and available to Codex"),
+            ("calendar", "Google Calendar app connected and available to Codex"),
+        ):
+            app = find_google_app(apps, app_kind)
+            connected, detail = google_app_connection_status(app)
+            integration_labels.add(label)
+            if connected or not allow_google_unconnected:
+                checks.append((label, connected, detail))
+            else:
+                pending_steps.append((label, f"{detail}; run `codex`, enter `/apps`, and connect it"))
+    return {"checks": checks, "pending": pending_steps, "integration_labels": integration_labels,
+            "discovery_failed": discovery_failed}
+
+
+def query_codex_apps(cwd: str | None, config: dict | None = None) -> dict[str, dict]:
+    config = config or {}
+    codex = config.get("codex_cmd") or shutil.which("codex")
     working_dir = Path(str(cwd or Path.home())).expanduser()
     if not codex or not working_dir.is_dir():
-        return {}
+        raise AppDiscoveryError("configuration", "Codex command or working directory unavailable")
     try:
         process = subprocess.Popen(
-            [codex, "app-server"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            cwd=str(working_dir),
+            [str(codex), "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, cwd=str(working_dir),
         )
-    except Exception:
-        return {}
+    except OSError as exc:
+        raise AppDiscoveryError("startup", "could not start app-server") from exc
     assert process.stdin is not None and process.stdout is not None
     reader = JsonRpcLineReader(process.stdout)
-    found: dict[str, dict] = {}
+    request_id = 0
+
+    def request(method, params, timeout):
+        nonlocal request_id
+        request_id += 1
+        process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n")
+        process.stdin.flush()
+        reply = reader.wait_for_id(process, request_id, timeout=timeout)
+        if reply is None:
+            raise TimeoutError(method)
+        if not isinstance(reply, dict) or reply.get("error") or "result" not in reply:
+            raise AppDiscoveryError("protocol", f"{method} failed")
+        return reply["result"]
+
     try:
-        process.stdin.write(
-            json.dumps(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "clientInfo": {
-                            "name": "permaevidence_doctor",
-                            "title": "Perma Evidence Doctor",
-                            "version": "1",
-                        }
-                    },
-                }
-            )
-            + "\n"
-        )
+        request("initialize", {"clientInfo": {"name": "permaevidence_doctor", "title": "Perma Evidence Doctor", "version": "1"}}, timeout=15)
         process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "initialized", "params": {}}) + "\n")
         process.stdin.flush()
-        cursor: str | None = None
-        for page in range(6):
-            request_id = 100 + page
-            params: dict[str, object] = {"limit": 200, "forceRefetch": page == 0}
-            if cursor:
-                params["cursor"] = cursor
-            process.stdin.write(
-                json.dumps(
-                    {"jsonrpc": "2.0", "id": request_id, "method": "app/list", "params": params}
-                )
-                + "\n"
-            )
-            process.stdin.flush()
-            reply = reader.wait_for_id(process, request_id, timeout=10)
-            if not reply or reply.get("error"):
-                break
-            result = reply.get("result") or {}
-            for app in result.get("data", []):
-                app_id = str(app.get("id") or "") if isinstance(app, dict) else ""
-                if app_id:
-                    found[app_id] = app
-            cursor = str(result.get("nextCursor") or "") or None
-            if not cursor:
-                break
-        return found
-    except Exception:
-        return found
+        return discover_apps(request, **discovery_options(config))
+    except AppDiscoveryError:
+        raise
+    except Exception as exc:
+        raise AppDiscoveryError("initialization", f"handshake failed ({type(exc).__name__})") from exc
     finally:
-        process.terminate()
+        if process.poll() is None:
+            process.terminate()
         try:
             process.wait(timeout=3)
         except subprocess.TimeoutExpired:
             process.kill()
+            process.wait(timeout=3)
+
 
 def smoke_test_calendar_feeds(config: dict) -> tuple[bool, str]:
     helper_path = REPO_ROOT / "plugins/codex-long-term-memory/lib/ical_calendar.py"
@@ -1339,9 +1360,9 @@ def main() -> int:
     if command == "start":
         return start_bridge()
     if command in {"stop", "quit"}:
-        return stop_bridge()
+        return stop_bridge(args.reason)
     if command == "restart":
-        return restart_bridge()
+        return restart_bridge(args.reason)
     if command == "status":
         return show_status()
     if command == "logs":
@@ -1351,6 +1372,7 @@ def main() -> int:
             allow_unpaired=args.allow_unpaired,
             allow_stopped=args.allow_stopped,
             allow_google_unconnected=args.allow_google_unconnected,
+            report_path=args.report,
         )
     if command == "install-service":
         return install_service()

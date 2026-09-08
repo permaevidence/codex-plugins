@@ -19,7 +19,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-from platform_support import runtime_data_root
+from platform_support import runtime_data_root, platform_family
+from codex_runtime import stable_runtime_status, stable_codex_command
+from update_validation import maintenance_lock, validate_runtime, resolve_update_failure
 
 REPOSITORY = "permaevidence/codex-plugins"
 APP_SUPPORT_ROOT = runtime_data_root()
@@ -89,6 +91,7 @@ def annotate_recovery_for_restart(queue_file: Path = RECOVERY_QUEUE_FILE) -> int
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download, validate, and atomically activate the latest plugin runtime.")
+    parser.add_argument("--revalidate", action="store_true", help="Resolve a failed plugin update after full doctor, preserving the original failure.")
     parser.add_argument("--ref", default="main", help="Git ref to resolve. Defaults to main.")
     parser.add_argument(
         "--defer-seconds",
@@ -167,7 +170,35 @@ def activate_runtime(source: Path, commit: str) -> Path:
     return installed
 
 
-def configure_runtime(root: Path) -> None:
+def preflight_native_runtime() -> None:
+    """Refuse before activation, plugin/config writes or service disruption."""
+    if platform_family() != "macos":
+        return
+    config_path = BRIDGE_STATE_DIR / "config.json"
+    config = json.loads(config_path.read_text()) if config_path.exists() else {}
+    if config.get("sandbox_mode") != "dangerFullAccess":
+        return
+    status = stable_runtime_status()
+    configured = str(config.get("codex_cmd") or "")
+    if status.get("state") != "ready" or not configured or Path(configured).expanduser().resolve() != stable_codex_command().resolve():
+        raise RuntimeError(
+            "Native Codex migration is required; the working bridge has not been stopped. "
+            f"Run python3 '{SCRIPT_DIR / 'update_codex.py'}' --no-restart to install and verify "
+            "the official native package and configure stable paths (the npm installation is retained). "
+            "Review macOS Full Disk Access for the stable Codex executables and permanent bridge host "
+            "in setup.py if needed, then retry the plugin update. Never grant shared Node Full Disk Access. "
+            "An unreadable privacy database does not prove a missing grant."
+        )
+
+
+def configure_runtime(root: Path, *, structured: bool = True, reason: str = "plugin_update") -> dict:
+    def run_stage(stage, command):
+        try:
+            run(command)
+        except Exception as exc:
+            exc.update_stage = stage
+            raise
+
     setup = import_module(root / "scripts/setup.py", "installed_setup")
     config = setup.load_json(setup.TELEGRAM_CONFIG)
     install_command = [
@@ -177,8 +208,8 @@ def configure_runtime(root: Path) -> None:
     ]
     if config.get("enable_google_apps"):
         install_command.append("--with-google-apps")
-    run(install_command)
-    run([sys.executable, str(root / "plugins/codex-long-term-memory/scripts/install.py")])
+    run_stage("install_plugins", install_command)
+    run_stage("install_memory_hooks", [sys.executable, str(root / "plugins/codex-long-term-memory/scripts/install.py")])
 
     # Older releases used an external Workspace CLI for both background
     # integrations. Do not leave those toggles enabled unless replacement
@@ -217,25 +248,35 @@ def configure_runtime(root: Path) -> None:
     bridge = root / "plugins/codex-telegram-bridge/scripts/bridge.py"
     # Stop the old bridge before touching the recovery queue: its in-process
     # lock does not extend to other processes, and it is about to die anyway.
-    subprocess.run([sys.executable, str(bridge), "stop"], check=False)
+    run_stage("stop_service", [sys.executable, str(bridge), "stop", *(["--reason", reason] if structured else [])])
     annotated = annotate_recovery_for_restart()
     if annotated:
         print(f"Marked {annotated} in-flight task(s) as interrupted by this update; they retry after restart.")
-    run([sys.executable, str(bridge), "install-service"])
+    run_stage("install_service", [sys.executable, str(bridge), "install-service"])
+    if structured:
+        try:
+            return validate_runtime([sys.executable, str(bridge), "doctor"])
+        except Exception as exc:
+            exc.update_stage = "validate"
+            raise
+    # Older rollback runtimes do not have --report. Leave their full doctor strict.
     run([sys.executable, str(bridge), "doctor"])
+    return {}
 
 
-def restore(previous: Path | None) -> None:
+def restore(previous: Path | None) -> dict:
     if not previous or not previous.exists():
-        return
+        return {"attempted": False}
     temp_link = APP_SUPPORT_ROOT / ".current.rollback"
     temp_link.unlink(missing_ok=True)
     temp_link.symlink_to(previous)
     os.replace(temp_link, CURRENT_LINK)
     try:
-        configure_runtime(CURRENT_LINK)
+        report = configure_runtime(CURRENT_LINK, structured=(CURRENT_LINK / "scripts/update_validation.py").is_file(), reason="rollback")
+        return {"attempted": True, "validated": True, "doctor": report}
     except Exception as exc:
         print(f"Automatic rollback activation also needs attention: {exc}", file=sys.stderr)
+        return {"attempted": True, "validated": False, "error": str(exc)}
 
 
 def main() -> int:
@@ -246,11 +287,25 @@ def main() -> int:
         return 0
     if args.run_after_delay:
         time.sleep(args.run_after_delay)
+    with maintenance_lock(BRIDGE_STATE_DIR):
+        if args.revalidate:
+            resolve_update_failure(UPDATE_STATE_FILE, [sys.executable, str(CURRENT_LINK / "plugins/codex-telegram-bridge/scripts/bridge.py"), "doctor"])
+            print("Last plugin update failure resolved by full doctor; original history preserved.")
+            return 0
+        return update_from_ref(args.ref)
+
+
+def update_from_ref(ref: str) -> int:
     previous = CURRENT_LINK.resolve() if CURRENT_LINK.exists() else None
-    commit = resolve_commit(args.ref)
-    print(f"Resolved {args.ref} to {commit}")
-    write_update_state(status="running", ref=args.ref, commit=commit, started_at=time.time(), announced=False)
+    commit = resolve_commit(ref)
+    print(f"Resolved {ref} to {commit}")
+    write_update_state(status="running", ref=ref, commit=commit, started_at=time.time(), announced=False)
+    stage = "preflight"
+    report = {}
+    rollback = {"attempted": False}
     try:
+        preflight_native_runtime()
+        stage = "download"
         with tempfile.TemporaryDirectory(prefix="permaevidence-update-") as tmp:
             tmp_path = Path(tmp)
             archive = tmp_path / "source.zip"
@@ -263,24 +318,26 @@ def main() -> int:
             if len(roots) != 1:
                 raise RuntimeError("Downloaded archive had an unexpected layout")
             try:
+                stage = "activate"
                 installed = activate_runtime(roots[0], commit)
-                configure_runtime(installed)
+                stage = "configure_and_validate"
+                report = configure_runtime(installed)
                 runtime_module = import_module(installed / "scripts/runtime_install.py", "installed_runtime_cleanup")
                 runtime_module.prune_old_versions(active=installed.resolve())
             except Exception:
-                restore(previous)
+                rollback = restore(previous)
                 raise
     except Exception as exc:
         write_update_state(
             status="failed",
-            ref=args.ref,
+            ref=ref,
             commit=commit,
-            error=str(exc),
+            error=str(exc), stage=getattr(exc, "update_stage", stage), doctor=getattr(exc, "report", {}), rollback=rollback,
             completed_at=time.time(),
             announced=False,
         )
         raise
-    write_update_state(status="completed", ref=args.ref, commit=commit, completed_at=time.time(), announced=False)
+    write_update_state(status="completed", stage="validated", ref=ref, commit=commit, doctor=report, runtime_validated=report.get("runtime_validated", False), integration_status=report.get("integration_status", "not_checked"), completed_at=time.time(), announced=False)
     print(f"Update complete at commit {commit[:12]}.")
     print("Send /newsession in Telegram before testing updated MCP tools or skills.")
     return 0

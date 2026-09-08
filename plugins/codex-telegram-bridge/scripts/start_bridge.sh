@@ -97,21 +97,32 @@ cleanup() {
   rm -rf "$LAUNCH_LOCK_DIR"
 }
 
-trap 'touch "$STOP_FILE"; cleanup; exit 0' INT TERM
+on_signal() {
+  local received="$1"
+  date +"[%Y-%m-%d %H:%M:%S] supervisor pid=$$ signal=$received child=$child_pid stopping" >> "$LOG_FILE"
+  touch "$STOP_FILE"
+  cleanup
+  exit 0
+}
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
 
 while true; do
-  date +"[%Y-%m-%d %H:%M:%S] starting bridge" >> "$LOG_FILE"
-  python3 "$BRIDGE_SCRIPT" >> "$LOG_FILE" 2>&1 &
+  date +"[%Y-%m-%d %H:%M:%S] starting bridge supervisor_pid=$$" >> "$LOG_FILE"
+  python3 -u "$BRIDGE_SCRIPT" >> "$LOG_FILE" 2>&1 &
   child_pid="$!"
   echo "$child_pid" > "$CHILD_PID_FILE"
-  wait "$child_pid" || true
+  date +"[%Y-%m-%d %H:%M:%S] bridge launched supervisor_pid=$$ bridge_pid=$child_pid" >> "$LOG_FILE"
+  child_status=0
+  wait "$child_pid" || child_status=$?
+  date +"[%Y-%m-%d %H:%M:%S] bridge exited supervisor_pid=$$ bridge_pid=$child_pid status=$child_status (128+signal when signaled)" >> "$LOG_FILE"
   rm -f "$CHILD_PID_FILE"
 
   if [[ -f "$STOP_FILE" ]]; then
     break
   fi
 
-  date +"[%Y-%m-%d %H:%M:%S] bridge exited; restarting in 3s" >> "$LOG_FILE"
+  date +"[%Y-%m-%d %H:%M:%S] unexpected bridge exit; restarting in 3s supervisor_pid=$$ status=$child_status" >> "$LOG_FILE"
   sleep 3
 done
 

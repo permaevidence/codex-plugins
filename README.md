@@ -252,6 +252,44 @@ new OpenAI signatures and unchanged designated requirements, atomically swaps
 the complete package at the stable permission paths, restarts the bridge, runs
 the doctor, and restores the prior stable package if activation fails.
 
+Update validation keeps runtime failures separate from external Google app
+availability. Timeouts and incomplete discovery caused by resource limits, or
+disconnected Google accounts, are recorded as degraded integrations rather than
+triggering runtime rollback. Invalid protocol responses, missing plugins, and
+other runtime checks still fail the update. An ordinary `bridge.py doctor`
+remains strict; `--report /path/to/report.json` also saves structured findings.
+An unchanged Codex package and unchanged configured command no longer trigger
+a restart solely for an update check.
+
+Older npm-based macOS installations must migrate before the plugin updater
+activates a new runtime. Its preflight stops with instructions while the existing
+bridge keeps running. From a checkout containing this updater, run
+`python3 scripts/update_codex.py --no-restart` to install the official native
+package, verify its signatures, and configure the stable paths. The npm
+installation is retained. Review Full Disk Access for the stable native
+executables and permanent bridge host through setup before restarting; shared
+Node must not receive that grant. An unreadable privacy database alone does not
+mean a grant is missing. Already-installed older updater scripts do not acquire
+the new preflight until updated; use the current checkout for this migration.
+
+`update.py --revalidate` and `update_codex.py --revalidate` run the full standard
+doctor without installation or restart. Only a successful check annotates the
+corresponding failed attempt as recovered, retaining its original status, error,
+stage and timestamps. The records are `update_state.json` (plugin runtime) and
+`codex_update_state.json` (Codex CLI), under `~/.codex/telegram-bridge/`.
+`/health` distinguishes those historical records from current component health.
+Updates and revalidation share a maintenance lock.
+
+App discovery follows every cursor with repeated-cursor detection and explicit
+incomplete-result errors. Optional Telegram config settings are
+`app_discovery_initial_timeout_seconds` (60),
+`app_discovery_page_timeout_seconds` (15), and
+`app_discovery_total_timeout_seconds` (120); each accepts a positive number up
+to 600. The overall traversal is also limited to 100 pages and 20,000 raw entries.
+Discovery failure is never reported as proof that an account needs reconnecting.
+Supervisor logs retain exit status and PIDs, operator stop requests have a reason
+and correlation ID, and app-server lifecycle output is unbuffered.
+
 Terminal fallback:
 
 ```bash

@@ -24,6 +24,7 @@ from codex_runtime import (
     sync_stable_codex_runtime,
 )
 from platform_support import runtime_data_root
+from update_validation import maintenance_lock, validate_runtime, resolve_update_failure
 
 
 INSTALLER_URL = "https://chatgpt.com/codex/install.sh"
@@ -98,7 +99,9 @@ def install_official_codex() -> None:
 
 
 def configure_stable_command() -> None:
-    config = read_json(CONFIG_FILE)
+    config = json.loads(CONFIG_FILE.read_bytes()) if CONFIG_FILE.exists() else {}
+    if not isinstance(config, dict):
+        raise RuntimeError("Telegram configuration must be a JSON object; existing file preserved.")
     config["codex_cmd"] = str(stable_codex_command())
     write_json_atomic(CONFIG_FILE, config)
 
@@ -118,43 +121,69 @@ def run_checked(command: list[str]) -> None:
 
 
 def perform_update(*, restart: bool = True) -> dict:
+    with maintenance_lock(STATE_DIR):
+        return _perform_update(restart=restart)
+
+
+def _perform_update(*, restart: bool = True) -> dict:
     started = time.time()
-    record_state(status="running", started_at=started, announced=False)
+    record_state(status="running", stage="preflight", started_at=started, announced=False)
     changed = False
+    restarted = False
+    stage = "preflight"
+    original_config = None
+    report = {}
+    result = {}
     try:
+        original_config = CONFIG_FILE.read_bytes() if CONFIG_FILE.exists() else None
+        if original_config is not None and not isinstance(json.loads(original_config), dict):
+            raise RuntimeError("Telegram configuration must be a JSON object; existing file preserved.")
+        stage = "install"
         install_official_codex()
+        stage = "synchronize"
         result = sync_stable_codex_runtime()
         changed = bool(result.get("changed"))
+        stage = "configure"
+        previous_command = read_json(CONFIG_FILE).get("codex_cmd")
         configure_stable_command()
+        needs_restart = changed or previous_command != str(stable_codex_command())
         if restart:
-            run_checked(bridge_command("restart"))
-            run_checked(bridge_command("doctor"))
+            if needs_restart:
+                stage = "activate"
+                run_checked(bridge_command("restart", "--reason", "codex_update"))
+                restarted = True
+            stage = "validate"
+            report = validate_runtime(bridge_command("doctor"))
         record_state(
-            status="completed",
-            previous_version=result.get("previous_version"),
-            version=result.get("version"),
-            changed=changed,
-            restarted=restart,
-            completed_at=time.time(),
-            announced=False,
+            status="completed", stage="validated" if restart else "prepared",
+            started_at=started, previous_version=result.get("previous_version"),
+            version=result.get("version"), changed=changed, restarted=restarted,
+            runtime_validated=report.get("runtime_validated", False),
+            integration_status=report.get("integration_status", "not_checked"), doctor=report,
+            completed_at=time.time(), announced=False,
         )
         return result
     except Exception as exc:
         rollback_error = ""
-        if changed:
-            try:
+        try:
+            if changed and result.get("previous_version"):
                 rollback_stable_codex_runtime()
-                configure_stable_command()
-                if restart:
-                    subprocess.run(bridge_command("restart"), check=False)
-            except Exception as rollback_exc:
-                rollback_error = str(rollback_exc)
+            # On first native install there is no previous stable package: restore
+            # the old launcher configuration, preserving the verified staged package.
+            if stage in {"configure", "activate", "validate"}:
+                if original_config is None:
+                    CONFIG_FILE.unlink(missing_ok=True)
+                else:
+                    write_json_atomic(CONFIG_FILE, json.loads(original_config))
+            if restart and (changed or stage == "activate"):
+                run_checked(bridge_command("restart", "--reason", "rollback"))
+        except Exception as rollback_exc:
+            rollback_error = str(rollback_exc)
         record_state(
-            status="failed",
-            error=str(exc),
-            rollback_error=rollback_error,
-            completed_at=time.time(),
-            announced=False,
+            status="failed", stage=stage, started_at=started, error=str(exc),
+            doctor=getattr(exc, "report", {}), rollback_error=rollback_error,
+            version=result.get("version"), changed=changed,
+            completed_at=time.time(), announced=False,
         )
         raise
 
@@ -165,12 +194,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--defer-seconds", type=int, default=0, help="Run once in a detached process after this delay.")
     parser.add_argument("--run-after-delay", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--revalidate", action="store_true", help="Run full doctor and resolve the last failure without changing its history or restarting.")
     parser.add_argument("--no-restart", action="store_true", help="Prepare the stable runtime without restarting the bridge.")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.revalidate:
+        with maintenance_lock(STATE_DIR):
+            resolve_update_failure(UPDATE_STATE_FILE, bridge_command("doctor"))
+        print("Last Codex CLI update failure resolved by full doctor; original history preserved.")
+        return 0
     if args.defer_seconds:
         log = schedule_deferred_update(args.defer_seconds, restart=not args.no_restart)
         print(f"One-shot Codex update scheduled in {args.defer_seconds}s. Log: {log}")

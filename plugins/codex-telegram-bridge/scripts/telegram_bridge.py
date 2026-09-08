@@ -35,6 +35,7 @@ from lib.telegram_api import (
     set_message_reaction,
     telegram_request,
 )
+from lib.app_discovery import discover_apps, discovery_options
 from lib.gmail_imap import GmailImapError, poll_unread_messages
 from lib.audio_tools import ffmpeg_status, resolve_ffmpeg_executable
 from lib.telegram_common import (
@@ -107,7 +108,7 @@ UPDATE_STATE_FILE = STATE_DIR / "update_state.json"
 CODEX_UPDATE_STATE_FILE = STATE_DIR / "codex_update_state.json"
 HEALTH_STATE_FILE = STATE_DIR / "health.json"
 HEALTH_NOTIFICATION_FILE = STATE_DIR / "health_notifications.json"
-HEALTH_STATE_LOCK = threading.Lock()
+HEALTH_STATE_LOCK = threading.RLock()
 MEMORY_STATE_DIR = Path.home() / ".codex" / "long-term-memory"
 MEMORY_HEALTH_FILE = MEMORY_STATE_DIR / "health.json"
 MEMORY_TASK_FILE = MEMORY_STATE_DIR / "pending" / "memory-maintenance.json"
@@ -815,6 +816,8 @@ class CodexAppServerClient:
         self._thread_to_chat: dict[str, str] = {}
         self._recovery_lock = threading.Lock()
         self._restart_on_exit = True
+        self._transport_exited = False
+        print(f"[{datetime.now().astimezone().isoformat()}] app-server starting bridge_pid={os.getpid()} app_server_pid={self.process.pid}", flush=True)
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
         self._initialize()
@@ -831,8 +834,15 @@ class CodexAppServerClient:
             },
         )
         self.notify("initialized", {})
+        # Serialize with EOF publication: a late handshake must never erase a new exit.
+        with HEALTH_STATE_LOCK:
+            if not getattr(self, "_transport_exited", False) and self.process.poll() is None:
+                previous = component_health("codex")
+                if previous.get("category") == "app_server_exit":
+                    set_component_health("codex", "ok", detail="Codex app-server reconnected.")
 
     def shutdown(self, timeout: float = 5.0) -> None:
+        print(f"[{datetime.now().astimezone().isoformat()}] app-server shutdown reason=requested bridge_pid={os.getpid()} app_server_pid={getattr(self.process, 'pid', 'unknown')}", flush=True)
         self._restart_on_exit = False
         if self.process.poll() is not None:
             return
@@ -873,23 +883,7 @@ class CodexAppServerClient:
         self._send_json({"jsonrpc": "2.0", "method": method, "params": params})
 
     def list_apps(self) -> dict[str, dict[str, Any]]:
-        found: dict[str, dict[str, Any]] = {}
-        cursor: str | None = None
-        for page in range(6):
-            params: dict[str, Any] = {"limit": 200, "forceRefetch": page == 0}
-            if cursor:
-                params["cursor"] = cursor
-            result = self.request("app/list", params, timeout=15)
-            for app in (result or {}).get("data", []):
-                if not isinstance(app, dict):
-                    continue
-                app_id = str(app.get("id") or "").strip()
-                if app_id:
-                    found[app_id] = app
-            cursor = str((result or {}).get("nextCursor") or "").strip() or None
-            if not cursor:
-                break
-        return found
+        return discover_apps(self.request, **discovery_options(self.config))
 
     def _reserve_id(self) -> int:
         with self._lock:
@@ -930,12 +924,14 @@ class CodexAppServerClient:
             # Exit the child so the supervisor/platform service restarts the complete
             # process tree. Intentional /newsession shutdown disables this path.
             if getattr(self, "_restart_on_exit", False):
-                set_component_health(
-                    "codex",
-                    "error",
-                    category="app_server_exit",
-                    detail="Codex app-server exited unexpectedly; the bridge supervisor is restarting it.",
-                )
+                with HEALTH_STATE_LOCK:
+                    self._transport_exited = True
+                    set_component_health(
+                        "codex", "error", category="app_server_exit",
+                        detail="Codex app-server exited unexpectedly; the bridge supervisor is restarting it.",
+                    )
+                child_status = getattr(self.process, "poll", lambda: None)()
+                print(f"[{datetime.now().astimezone().isoformat()}] app-server EOF reason=unexpected bridge_pid={os.getpid()} app_server_pid={getattr(self.process, 'pid', 'unknown')} app_server_status={child_status} bridge_exit=75", flush=True)
                 os._exit(75)
 
     def _handle_message(self, message: dict[str, Any]) -> None:
@@ -2115,11 +2111,14 @@ def update_outcome_message(state: dict[str, Any]) -> str | None:
     """Build the owner notification for a finished runtime update, if one is due."""
     if not isinstance(state, dict) or state.get("announced"):
         return None
+    if (state.get("resolution") or {}).get("status") == "recovered":
+        return None
     status = state.get("status")
     commit = str(state.get("commit") or "")[:12]
     if status == "completed":
         return (
-            f"Runtime update complete at commit {commit}. The bridge restarted; "
+            ("External integration checks are degraded; the runtime passed validation.\n" if state.get("integration_status") == "degraded" else "")
+            + f"Runtime update complete at commit {commit}. The bridge restarted; "
             "any task interrupted by the restart resumes automatically.\n"
             "Send /newsession before testing updated MCP tools or skills."
         )
@@ -2127,7 +2126,7 @@ def update_outcome_message(state: dict[str, Any]) -> str | None:
         reason = str(state.get("error") or "unknown error")
         return (
             f"Runtime update to {state.get('ref') or commit or 'requested ref'} FAILED: {reason}\n"
-            "The previous runtime was restored and is still running. "
+            f"Failed stage: {state.get('stage') or 'unknown'}. Check /health for current runtime status. "
             "Log: ~/.codex/telegram-bridge/update-handoff.log"
         )
     return None
@@ -2137,21 +2136,34 @@ def codex_update_outcome_message(state: dict[str, Any]) -> str | None:
     """Build the owner notification for a finished Codex CLI update."""
     if not isinstance(state, dict) or state.get("announced"):
         return None
+    if (state.get("resolution") or {}).get("status") == "recovered":
+        return None
     status = state.get("status")
     version = str(state.get("version") or "unknown")
     if status == "completed":
+        if state.get("stage") == "prepared":
+            return f"Codex CLI {version} prepared at verified stable paths. The bridge was not restarted; live validation remains pending."
         previous = str(state.get("previous_version") or "").strip()
         transition = f"{previous} → {version}" if previous and previous != version else version
         return (
-            f"Codex CLI update complete: {transition}. The OpenAI signatures and "
+            ("External integration checks are degraded; the runtime passed validation.\n" if state.get("integration_status") == "degraded" else "")
+            + f"Codex CLI update complete: {transition}. The OpenAI signatures and "
             "designated requirements were verified, and the bridge is using the stable permission paths."
         )
     if status == "failed":
         reason = str(state.get("error") or "unknown error")
         rollback = str(state.get("rollback_error") or "").strip()
-        suffix = f" Rollback also needs attention: {rollback}" if rollback else " The previous stable Codex package was restored."
-        return f"Codex CLI update FAILED: {reason}.{suffix} Log: ~/.codex/telegram-bridge/codex-update-handoff.log"
+        suffix = f" Rollback also needs attention: {rollback}" if rollback else " Check /health for current runtime status."
+        return f"Codex CLI update FAILED at {state.get('stage') or 'unknown stage'}: {reason}.{suffix} Log: ~/.codex/telegram-bridge/codex-update-handoff.log"
     return None
+
+
+def mark_update_announced(path: Path, state: dict) -> bool:
+    scripts = str(UPDATE_SCRIPT.parent)
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    from update_validation import mark_announced
+    return mark_announced(path, state)
 
 
 def announce_update_outcome(token: str, config: dict[str, Any]) -> bool:
@@ -2167,9 +2179,7 @@ def announce_update_outcome(token: str, config: dict[str, Any]) -> bool:
     except Exception as exc:
         print(f"update announcement failed: {exc}", file=sys.stderr)
         return False
-    state["announced"] = True
-    save_json(UPDATE_STATE_FILE, state)
-    return True
+    return mark_update_announced(UPDATE_STATE_FILE, state)
 
 
 def announce_codex_update_outcome(token: str, config: dict[str, Any]) -> bool:
@@ -2185,9 +2195,7 @@ def announce_codex_update_outcome(token: str, config: dict[str, Any]) -> bool:
     except Exception as exc:
         print(f"Codex update announcement failed: {exc}", file=sys.stderr)
         return False
-    state["announced"] = True
-    save_json(CODEX_UPDATE_STATE_FILE, state)
-    return True
+    return mark_update_announced(CODEX_UPDATE_STATE_FILE, state)
 
 
 def start_update_announcement_loop(token: str, config: dict[str, Any]) -> None:
@@ -2366,17 +2374,25 @@ def health_text(
     else:
         lines.append("ℹ️ Calendar context: not enabled or not tested")
 
-    update_state = load_json(UPDATE_STATE_FILE, {})
-    if isinstance(update_state, dict) and update_state.get("status") == "failed":
-        lines.append(f"⚠️ Last update: failed — {str(update_state.get('error') or 'unknown error')[:240]}")
-    else:
-        lines.append("✅ Runtime updates: no unresolved failure")
-
-    codex_update_state = load_json(CODEX_UPDATE_STATE_FILE, {})
-    if isinstance(codex_update_state, dict) and codex_update_state.get("status") == "failed":
-        lines.append(f"⚠️ Last Codex CLI update: failed — {str(codex_update_state.get('error') or 'unknown error')[:240]}")
-    else:
-        lines.append("✅ Codex CLI stable-path updates: no unresolved failure")
+    for label, path, script in (
+        ("plugin runtime", UPDATE_STATE_FILE, UPDATE_SCRIPT),
+        ("Codex CLI", CODEX_UPDATE_STATE_FILE, UPDATE_CODEX_SCRIPT),
+    ):
+        state = load_json(path, {})
+        if not isinstance(state, dict):
+            state = {}
+        resolution = state.get("resolution") or {}
+        if state.get("status") == "failed" and isinstance(resolution, dict) and resolution.get("status") == "recovered":
+            lines.append(f"ℹ️ Last {label} update failed; full doctor verified recovery at {resolution.get('resolved_at')}. Original failure retained in {path.name}.")
+        elif state.get("status") == "failed":
+            lines.append(f"⚠️ Last {label} update failed at {state.get('stage') or 'unknown stage'} — {str(state.get('error') or 'unknown error')[:240]}")
+            lines.append(f"   After repair: python3 {script} --revalidate (history: {path.name}).")
+        elif state.get("integration_status") == "degraded":
+            lines.append(f"⚠️ Last {label} update: runtime validated; external integration checks degraded. Use doctor for current details.")
+        elif state.get("stage") == "prepared":
+            lines.append(f"ℹ️ {label} update prepared; live runtime validation remains pending.")
+        else:
+            lines.append(f"✅ {label} updates: no unresolved failure recorded")
 
     if not bridge_config.get("enable_google_apps"):
         lines.append("ℹ️ Official Gmail/Calendar apps: disabled")

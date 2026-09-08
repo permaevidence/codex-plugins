@@ -2,6 +2,8 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -13,6 +15,44 @@ BRIDGE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "telegram_bridge
 OPERATOR_PATH = Path(__file__).resolve().parents[1] / "scripts" / "bridge.py"
 COMMON_PATH = Path(__file__).resolve().parents[1] / "lib" / "telegram_common.py"
 MCP_PATH = Path(__file__).resolve().parents[1] / "scripts" / "telegram_actions_mcp.py"
+
+
+def setUpModule():
+    """Isolate paths before any module import, including shared cached helpers."""
+    global _isolation
+    _isolation = contextlib.ExitStack()
+    real_home = Path.home()
+    active = [True]
+    protected = [real_home / ".codex" / name for name in ("telegram-bridge", "long-term-memory")]
+
+    def deny_operational_io(event, args):
+        events = {"open", "os.remove", "os.rename", "os.mkdir", "os.rmdir", "os.chmod",
+                  "os.listdir", "os.scandir", "os.truncate", "os.symlink", "shutil.rmtree"}
+        if active[0] and event in events:
+            for value in args[:2] if event in {"os.rename", "os.symlink"} else args[:1]:
+                if isinstance(value, (str, bytes, os.PathLike)):
+                    path = Path(os.fsdecode(value)).absolute()
+                    for candidate in (path, path.resolve()):
+                        if any(candidate == parent or parent in candidate.parents for parent in protected):
+                            raise PermissionError("Test attempted operational state I/O")
+
+    sys.addaudithook(deny_operational_io)
+    _isolation.callback(active.__setitem__, 0, False)
+    root = Path(_isolation.enter_context(tempfile.TemporaryDirectory(prefix="bridge-tests-")))
+    _isolation.enter_context(mock.patch.object(Path, "home", return_value=root))
+    _isolation.enter_context(mock.patch.dict(os.environ, {
+        "XDG_DATA_HOME": str(root / "data"), "XDG_CONFIG_HOME": str(root / "config"),
+        "XDG_CACHE_HOME": str(root / "cache"),
+    }))
+    for name, module in list(sys.modules.items()):
+        if name.startswith("lib.telegram_"):
+            for key, value in list(vars(module).items()):
+                if isinstance(value, Path) and value.is_relative_to(real_home):
+                    _isolation.enter_context(mock.patch.object(module, key, root / value.relative_to(real_home)))
+
+
+def tearDownModule():
+    _isolation.close()
 
 
 def load_bridge_module():
@@ -104,9 +144,90 @@ class TelegramTimeEnvelopeTests(unittest.TestCase):
 
 
 class GoogleAppOnboardingTests(unittest.TestCase):
+    def test_doctor_discovery_classification_never_recommends_reconnection_on_failure(self):
+        operator = load_operator_module()
+        for category in ("timeout", "request", "budget", "protocol", "cursor", "configuration"):
+            with mock.patch.object(operator, "query_codex_apps", side_effect=operator.AppDiscoveryError(category, "failed")):
+                findings = operator.google_discovery_findings({}, allow_google_unconnected=True)
+            self.assertTrue(findings["discovery_failed"])
+            self.assertEqual(findings["pending"], [])
+            self.assertFalse(findings["checks"][0][1])
+            self.assertEqual(bool(findings["integration_labels"]), category in {"timeout", "request", "budget"})
+        with mock.patch.object(operator, "query_codex_apps", return_value={}):
+            findings = operator.google_discovery_findings({}, allow_google_unconnected=True)
+        self.assertFalse(findings["discovery_failed"])
+        self.assertEqual(len(findings["pending"]), 2)
+        self.assertIn("connect it", findings["pending"][0][1])
+
+    def test_slow_refresh_fits_new_deadline_and_protocol_errors_stay_distinct(self):
+        from lib.app_discovery import AppDiscoveryError, discover_apps
+        ticks = [0]
+        def request(method, params, timeout):
+            self.assertGreaterEqual(timeout, 17.78)
+            ticks[0] += 17.78
+            return {"data": [{"id": "gmail"}]}
+        self.assertIn("gmail", discover_apps(request, clock=lambda: ticks[0]))
+        with self.assertRaises(AppDiscoveryError) as caught:
+            discover_apps(mock.Mock(side_effect=AppDiscoveryError("protocol", "invalid response")))
+        self.assertEqual(caught.exception.category, "protocol")
+
+    def test_catalog_beyond_six_pages_and_initial_deadline(self):
+        bridge = load_bridge_module()
+        client = object.__new__(bridge.CodexAppServerClient)
+        client.config = {}
+        pages = [{"data": [{"id": f"app-{i}"}], "nextCursor": str(i + 1)} for i in range(8)]
+        pages[-1] = {"data": [{"id": "gmail", "isEnabled": True, "isAccessible": True}]}
+        client.request = mock.Mock(side_effect=pages)
+        self.assertIn("gmail", client.list_apps())
+        self.assertEqual(client.request.call_count, 8)
+        self.assertEqual(client.request.call_args_list[0].kwargs["timeout"], 60)
+        self.assertEqual(client.request.call_args_list[1].kwargs["timeout"], 15)
+
+    def test_doctor_uses_same_pagination_and_reports_timeout(self):
+        operator = load_operator_module()
+        process = mock.Mock()
+        process.poll.return_value = None
+        pages = [{"result": {}}] + [
+            {"result": {"data": [{"id": f"app-{i}"}], "nextCursor": str(i + 1)}} for i in range(7)
+        ] + [{"result": {"data": [{"id": "gmail"}]}}]
+        reader = mock.Mock()
+        reader.wait_for_id.side_effect = pages
+        with mock.patch.object(operator.subprocess, "Popen", return_value=process), mock.patch.object(
+            operator, "JsonRpcLineReader", return_value=reader
+        ):
+            self.assertIn("gmail", operator.query_codex_apps(str(Path.home()), {"codex_cmd": "/fake/codex"}))
+            reader.wait_for_id.side_effect = [{"result": {}}, None]
+            with self.assertRaisesRegex(operator.AppDiscoveryError, "timeout"):
+                operator.query_codex_apps(str(Path.home()), {"codex_cmd": "/fake/codex"})
+        self.assertEqual(process.wait.call_count, 2)
+
+    def test_partial_discovery_never_returns_success(self):
+        from lib.app_discovery import AppDiscoveryError, discover_apps
+        for ending, category in [
+            ({"data": [], "nextCursor": "again"}, "cursor"),
+            ({"data": None}, "protocol"),
+            (TimeoutError("slow"), "timeout"),
+        ]:
+            request = mock.Mock(side_effect=[{"data": [{"id": "one"}], "nextCursor": "again"}, ending])
+            with self.assertRaises(AppDiscoveryError) as caught:
+                discover_apps(request)
+            self.assertEqual(caught.exception.category, category)
+            self.assertEqual(set(caught.exception.partial), {"one"})
+
+    def test_discovery_resource_budgets_and_config(self):
+        from lib.app_discovery import AppDiscoveryError, discover_apps, discovery_options
+        request = mock.Mock(return_value={"data": [{"id": "one"}], "nextCursor": "next"})
+        for options in ({"max_pages": 1}, {"max_entries": 0}, {"clock": mock.Mock(side_effect=[0, 121])}):
+            with self.assertRaisesRegex(AppDiscoveryError, "budget"):
+                discover_apps(request, **options)
+        for value in (0, -1, "nan", "bad", True):
+            with self.assertRaisesRegex(AppDiscoveryError, "configuration"):
+                discovery_options({"app_discovery_initial_timeout_seconds": value})
+
     def test_live_bridge_lists_all_codex_app_pages(self):
         bridge = load_bridge_module()
         client = object.__new__(bridge.CodexAppServerClient)
+        client.config = {}
         client.request = mock.Mock(
             side_effect=[
                 {
@@ -202,6 +323,42 @@ class BridgeDoctorTests(unittest.TestCase):
 
 
 class AppServerResilienceTests(unittest.TestCase):
+    def test_initialization_clears_only_old_transport_failure(self):
+        bridge = load_bridge_module()
+        client = object.__new__(bridge.CodexAppServerClient)
+        client.request = mock.Mock()
+        client.notify = mock.Mock()
+        client.process = mock.Mock()
+        client.process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(bridge, "HEALTH_STATE_FILE", Path(tmp) / "health.json"):
+            for category in ("app_server_exit", "insufficient_credit"):
+                bridge.set_component_health("codex", "error", category=category)
+                client._transport_exited = False
+                client._initialize()
+                self.assertEqual(bridge.component_health("codex")["status"], "ok" if category == "app_server_exit" else "error")
+            bridge.set_component_health("codex", "error", category="app_server_exit")
+            client.request.side_effect = RuntimeError("failed handshake")
+            with self.assertRaises(RuntimeError):
+                client._initialize()
+            self.assertEqual(bridge.component_health("codex")["status"], "error")
+            client.request.side_effect = None
+            # An EOF arrives while initialized notification is in flight.
+            client.notify.side_effect = lambda *args: setattr(client, "_transport_exited", True)
+            client._initialize()
+            self.assertEqual(bridge.component_health("codex")["status"], "error")
+            client.notify.side_effect = None
+            client._transport_exited = False
+            client.process.poll.return_value = 1
+            client._initialize()
+            self.assertEqual(bridge.component_health("codex")["status"], "error")
+
+    def test_operational_paths_are_isolated_before_loading(self):
+        bridge = load_bridge_module()
+        self.assertTrue(bridge.HEALTH_STATE_FILE.is_relative_to(Path.home()))
+        self.assertIn("bridge-tests-", str(bridge.HEALTH_STATE_FILE))
+        from lib import telegram_common
+        self.assertTrue(telegram_common.RUNTIME_STATE_FILE.is_relative_to(Path.home()))
+
     def test_real_app_server_exit_terminates_bridge_for_supervisor_restart(self):
         bridge = load_bridge_module()
 
@@ -216,9 +373,12 @@ class AppServerResilienceTests(unittest.TestCase):
         client.process = FakeProcess()
         client._pending = {}
         client._restart_on_exit = True
-        with mock.patch.object(bridge.os, "_exit") as exit_process:
+        with mock.patch.object(bridge.os, "_exit") as exit_process, mock.patch.object(
+            bridge, "set_component_health"
+        ) as health:
             client._read_loop()
         exit_process.assert_called_once_with(75)
+        self.assertEqual(health.call_args.kwargs["category"], "app_server_exit")
 
     def test_turn_omits_model_overrides_when_codex_defaults_are_unresolved(self):
         bridge = load_bridge_module()
@@ -305,7 +465,7 @@ class TurnRecoveryTests(unittest.TestCase):
             }
             sent = []
             client.send_callback = lambda chat_id, text, files=None: sent.append((chat_id, text, files))
-            with mock.patch.object(bridge, "TURN_RECOVERY_FILE", recovery_file), mock.patch.object(
+            with mock.patch.object(bridge, "HEALTH_STATE_FILE", Path(tmpdir) / "health.json"), mock.patch.object(bridge, "TURN_RECOVERY_FILE", recovery_file), mock.patch.object(
                 bridge, "list_generated_images", return_value=[]
             ), mock.patch.object(bridge, "load_runtime_state", return_value={}), mock.patch.object(
                 bridge, "save_runtime_state"
@@ -339,7 +499,7 @@ class TurnRecoveryTests(unittest.TestCase):
             }
             sent = []
             client.send_callback = lambda chat_id, text, files=None: sent.append((chat_id, text, files))
-            with mock.patch.object(bridge, "TURN_RECOVERY_FILE", recovery_file), mock.patch.object(
+            with mock.patch.object(bridge, "HEALTH_STATE_FILE", Path(tmpdir) / "health.json"), mock.patch.object(bridge, "TURN_RECOVERY_FILE", recovery_file), mock.patch.object(
                 bridge, "list_generated_images", return_value=[]
             ), mock.patch.object(bridge, "load_runtime_state", return_value={}), mock.patch.object(
                 bridge, "save_runtime_state"
@@ -768,9 +928,6 @@ class SafetyAndReminderTests(unittest.TestCase):
             mcp.resolve_chat(None, "")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class UpdateAnnouncementTests(unittest.TestCase):
     def test_completed_update_produces_owner_notification_once(self):
@@ -791,7 +948,8 @@ class UpdateAnnouncementTests(unittest.TestCase):
         self.assertIsNotNone(text)
         self.assertIn("FAILED", text)
         self.assertIn("doctor found failing checks", text)
-        self.assertIn("previous runtime was restored", text)
+        self.assertIn("Check /health for current runtime status", text)
+        self.assertNotIn("was restored", text)
 
     def test_running_or_empty_state_stays_silent(self):
         bridge = load_bridge_module()
@@ -826,7 +984,8 @@ class UpdateAnnouncementTests(unittest.TestCase):
         self.assertIsNotNone(text)
         self.assertIn("FAILED", text)
         self.assertIn("signature mismatch", text)
-        self.assertIn("previous stable Codex package was restored", text)
+        self.assertIn("Check /health for current runtime status", text)
+        self.assertNotIn("was restored", text)
 
 
 class HealthVisibilityTests(unittest.TestCase):
@@ -1311,3 +1470,7 @@ class HealthVisibilityTests(unittest.TestCase):
             self.assertEqual(result, "parked")
             self.assertEqual(record["state"], "parked")
             self.assertEqual(record["original_input"], "Do not lose this task")
+
+
+if __name__ == "__main__":
+    unittest.main()
