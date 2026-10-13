@@ -1027,7 +1027,8 @@ class CodexAppServerClient:
             thread_id = entry["thread_id"]
             if thread_id not in self._thread_to_chat:
                 try:
-                    self.request("thread/resume", {"threadId": thread_id})
+                    # Codex restores the conversation; the bridge does not use returned turns.
+                    self.request("thread/resume", {"threadId": thread_id, "excludeTurns": True})
                 except RuntimeError as exc:
                     # A newly created thread may have no rollout yet if the bridge
                     # restarts before the first real turn starts. In that case Codex
@@ -1298,7 +1299,7 @@ class CodexAppServerClient:
                             chat_id = str(record.get("chat_id"))
                             thread_id = str(record.get("thread_id"))
                             if thread_id not in self._thread_to_chat:
-                                self.request("thread/resume", {"threadId": thread_id})
+                                self.request("thread/resume", {"threadId": thread_id, "excludeTurns": True})
                                 self._thread_to_chat[thread_id] = chat_id
                             attempts = int(record.get("attempts") or 0) + 1
                             self._update_recovery_record(
